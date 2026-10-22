@@ -30,3 +30,5 @@ MandelbrotViewer/Release/
 
 # NuGet packages directory
 packages/
+tools/
+*.log
