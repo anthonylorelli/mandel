@@ -1,0 +1,192 @@
+#include "pch.h"
+#include "MandelbrotEngine.h"
+#include <cmath>
+#include <chrono>
+#include <algorithm>
+
+namespace Mandelbrot
+{
+    const std::vector<BookmarkLocation>& GetBookmarks()
+    {
+        static const std::vector<BookmarkLocation> bookmarks = {
+            {
+                L"Overview",
+                L"Full view of the iconic Mandelbrot set",
+                -0.75, 0.0, 1.0, 300
+            },
+            {
+                L"Seahorse Valley",
+                L"Intricate spiral filaments connecting cardioid and bulb",
+                -0.7436438870371587, 0.1318259042053119, 85000.0, 1000
+            },
+            {
+                L"Elephant Valley",
+                L"Elephant trunk formations on the East side of main cardioid",
+                0.274, 0.482, 250.0, 500
+            },
+            {
+                L"Triple Spiral",
+                L"Hypnotic three-arm vortex of fractal energy",
+                -0.088, 0.654, 1200.0, 800
+            },
+            {
+                L"Mini Mandelbrot Satellite",
+                L"Self-similar satellite island along the primary spike",
+                -1.768778833, -0.001738994, 30000.0, 1500
+            },
+            {
+                L"Scepter Valley",
+                L"Branching candelabras and crowned antennae",
+                -1.25066, 0.02012, 1000.0, 600
+            },
+            {
+                L"Deep Spiral Core",
+                L"Deep zoom revealing dense cosmic spiral clusters",
+                -0.743643135, 0.131825963, 1500000.0, 2500
+            }
+        };
+        return bookmarks;
+    }
+
+    void MandelbrotEngine::ScreenToComplex(
+        double px, double py,
+        int width, int height,
+        double centerX, double centerY, double zoom,
+        double& outCx, double& outCy)
+    {
+        const double aspect = static_cast<double>(height) / static_cast<double>(width > 0 ? width : 1);
+        const double spanX = 3.0 / (zoom > 1e-12 ? zoom : 1e-12);
+        const double spanY = spanX * aspect;
+
+        outCx = centerX - (spanX * 0.5) + (px + 0.5) / static_cast<double>(width) * spanX;
+        // Invert Y so positive imaginary is upward
+        outCy = centerY + (spanY * 0.5) - (py + 0.5) / static_cast<double>(height) * spanY;
+    }
+
+    void MandelbrotEngine::ComplexToScreen(
+        double cx, double cy,
+        int width, int height,
+        double centerX, double centerY, double zoom,
+        double& outPx, double& outPy)
+    {
+        const double aspect = static_cast<double>(height) / static_cast<double>(width > 0 ? width : 1);
+        const double spanX = 3.0 / (zoom > 1e-12 ? zoom : 1e-12);
+        const double spanY = spanX * aspect;
+
+        outPx = ((cx - (centerX - (spanX * 0.5))) / spanX) * static_cast<double>(width) - 0.5;
+        outPy = (((centerY + (spanY * 0.5)) - cy) / spanY) * static_cast<double>(height) - 0.5;
+    }
+
+    inline bool IsInMainCardioidOrBulb(double x, double y)
+    {
+        // Main Cardioid test
+        const double x_minus_quarter = x - 0.25;
+        const double y2 = y * y;
+        const double q = x_minus_quarter * x_minus_quarter + y2;
+        if (q * (q + x_minus_quarter) <= 0.25 * y2) return true;
+
+        // Period-2 bulb test: (x + 1)^2 + y^2 <= 1/16 (0.0625)
+        const double x_plus_1 = x + 1.0;
+        if (x_plus_1 * x_plus_1 + y2 <= 0.0625) return true;
+
+        return false;
+    }
+
+    double MandelbrotEngine::Compute(
+        const MandelbrotConfig& config,
+        std::vector<float>& outIterations,
+        const std::atomic<bool>* cancelToken)
+    {
+        const auto startTime = std::chrono::high_resolution_clock::now();
+
+        const int width = config.width;
+        const int height = config.height;
+        const int maxIter = config.maxIterations;
+        const bool smooth = config.smooth;
+
+        if (width <= 0 || height <= 0) return 0.0;
+
+        const size_t totalPixels = static_cast<size_t>(width) * static_cast<size_t>(height);
+        if (outIterations.size() != totalPixels)
+        {
+            outIterations.resize(totalPixels);
+        }
+
+        const double aspect = static_cast<double>(height) / static_cast<double>(width);
+        const double spanX = 3.0 / (config.zoom > 1e-12 ? config.zoom : 1e-12);
+        const double spanY = spanX * aspect;
+
+        const double minX = config.centerX - (spanX * 0.5);
+        const double maxY = config.centerY + (spanY * 0.5);
+        const double dx = spanX / static_cast<double>(width);
+        const double dy = spanY / static_cast<double>(height);
+
+        constexpr double bailoutRadius2 = 16.0; // R=4, R^2=16 for smooth coloring
+        const double invLn2 = 1.0 / std::log(2.0);
+
+        #pragma omp parallel for schedule(dynamic, 16)
+        for (int py = 0; py < height; ++py)
+        {
+            if (cancelToken && cancelToken->load(std::memory_order_relaxed))
+            {
+                continue;
+            }
+
+            const double cy = maxY - (py + 0.5) * dy;
+            float* rowPtr = &outIterations[static_cast<size_t>(py) * width];
+
+            for (int px = 0; px < width; ++px)
+            {
+                const double cx = minX + (px + 0.5) * dx;
+
+                // Fast check for points in cardioid or main bulb
+                if (IsInMainCardioidOrBulb(cx, cy))
+                {
+                    rowPtr[px] = -1.0f; // Inside set
+                    continue;
+                }
+
+                double zr = 0.0;
+                double zi = 0.0;
+                double zr2 = 0.0;
+                double zi2 = 0.0;
+                int iter = 0;
+
+                while (iter < maxIter && (zr2 + zi2) <= bailoutRadius2)
+                {
+                    zi = 2.0 * zr * zi + cy;
+                    zr = zr2 - zi2 + cx;
+                    zr2 = zr * zr;
+                    zi2 = zi * zi;
+                    iter++;
+                }
+
+                if (iter >= maxIter)
+                {
+                    rowPtr[px] = -1.0f; // Inside set
+                }
+                else
+                {
+                    if (smooth)
+                    {
+                        // Continuous potential formula:
+                        // nu = iter + 1 - ln(ln(|z|)) / ln(2)
+                        // With |z| = sqrt(zr2 + zi2), ln(|z|) = 0.5 * ln(zr2 + zi2)
+                        const double mod2 = zr2 + zi2;
+                        const double logZn = std::log(mod2) * 0.5;
+                        const double nu = iter + 1.0 - std::log(logZn) * invLn2;
+                        rowPtr[px] = static_cast<float>(nu > 0.0 ? nu : 0.0);
+                    }
+                    else
+                    {
+                        rowPtr[px] = static_cast<float>(iter);
+                    }
+                }
+            }
+        }
+
+        const auto endTime = std::chrono::high_resolution_clock::now();
+        const std::chrono::duration<double, std::milli> elapsed = endTime - startTime;
+        return elapsed.count();
+    }
+}

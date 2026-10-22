@@ -1,0 +1,32 @@
+# Visual Studio & MSBuild
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Build outputs
+ARM64/
+x64/
+Debug/
+Release/
+bin/
+obj/
+*.tlog
+*.idb
+*.pdb
+*.pch
+*.obj
+*.ilk
+*.exp
+*.lib
+
+# Generated Files
+Generated Files/
+MandelbrotViewer/ARM64/
+MandelbrotViewer/x64/
+MandelbrotViewer/Debug/
+MandelbrotViewer/Release/
+
+# NuGet packages directory
+packages/
