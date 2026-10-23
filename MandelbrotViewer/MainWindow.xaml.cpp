@@ -291,6 +291,49 @@ namespace winrt::MandelbrotViewer::implementation
         RenderFractal();
     }
 
+    void MainWindow::SetSidebarVisible(bool visible)
+    {
+        m_isSidebarVisible = visible;
+        if (visible)
+        {
+            SidebarColumn().Width(winrt::Microsoft::UI::Xaml::GridLength{ 380, winrt::Microsoft::UI::Xaml::GridUnitType::Pixel });
+            SidebarBorder().Visibility(winrt::Microsoft::UI::Xaml::Visibility::Visible);
+            OpenSidebarButton().Visibility(winrt::Microsoft::UI::Xaml::Visibility::Collapsed);
+            ToggleSidebarIcon().Glyph(L"\uE8A0");
+        }
+        else
+        {
+            SidebarBorder().Visibility(winrt::Microsoft::UI::Xaml::Visibility::Collapsed);
+            SidebarColumn().Width(winrt::Microsoft::UI::Xaml::GridLength{ 0, winrt::Microsoft::UI::Xaml::GridUnitType::Pixel });
+            OpenSidebarButton().Visibility(winrt::Microsoft::UI::Xaml::Visibility::Visible);
+            ToggleSidebarIcon().Glyph(L"\uE89F");
+        }
+    }
+
+    void MainWindow::OnCloseSidebarClick(IInspectable const&, RoutedEventArgs const&)
+    {
+        SetSidebarVisible(false);
+    }
+
+    void MainWindow::OnOpenSidebarClick(IInspectable const&, RoutedEventArgs const&)
+    {
+        SetSidebarVisible(true);
+    }
+
+    void MainWindow::OnToggleSidebarClick(IInspectable const&, RoutedEventArgs const&)
+    {
+        SetSidebarVisible(!m_isSidebarVisible);
+    }
+
+    void MainWindow::OnRootGridKeyDown(IInspectable const&, winrt::Microsoft::UI::Xaml::Input::KeyRoutedEventArgs const& e)
+    {
+        if (e.Key() == winrt::Windows::System::VirtualKey::F11 || e.Key() == winrt::Windows::System::VirtualKey::Escape)
+        {
+            SetSidebarVisible(!m_isSidebarVisible);
+            e.Handled(true);
+        }
+    }
+
     void MainWindow::OnBookmarkSelectionChanged(IInspectable const&, SelectionChangedEventArgs const&)
     {
         if (m_suppressEvents) return;

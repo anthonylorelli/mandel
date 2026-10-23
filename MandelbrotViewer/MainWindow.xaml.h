@@ -23,6 +23,12 @@ namespace winrt::MandelbrotViewer::implementation
         void OnZoomOutClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
         void OnResetViewClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
 
+        // Sidebar panel visibility
+        void OnCloseSidebarClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
+        void OnOpenSidebarClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
+        void OnToggleSidebarClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
+        void OnRootGridKeyDown(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::Input::KeyRoutedEventArgs const& e);
+
         // Sidebar parameters
         void OnBookmarkSelectionChanged(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::Controls::SelectionChangedEventArgs const& e);
         void OnIterationsSliderChanged(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::Controls::Primitives::RangeBaseValueChangedEventArgs const& e);
@@ -56,6 +62,7 @@ namespace winrt::MandelbrotViewer::implementation
         void PopulateStopSelector();
         void UpdateStopControlsFromSelected();
         void ApplyZoom(double factor, double centerPivotX, double centerPivotY);
+        void SetSidebarVisible(bool visible);
 
         Mandelbrot::MandelbrotEngine m_engine;
         Mandelbrot::ColorTheme m_theme;
@@ -71,6 +78,7 @@ namespace winrt::MandelbrotViewer::implementation
         double m_dragStartCenterX{ 0.0 };
         double m_dragStartCenterY{ 0.0 };
 
+        bool m_isSidebarVisible{ true };
         bool m_suppressEvents{ false };
         float m_frequency{ 1.0f };
         float m_phaseOffset{ 0.0f };
