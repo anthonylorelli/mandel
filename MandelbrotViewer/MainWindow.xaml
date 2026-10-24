@@ -8,7 +8,13 @@
     mc:Ignorable="d"
     Title="Mandelbrot Explorer">
 
-    <Grid Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" KeyDown="OnRootGridKeyDown">
+    <Grid Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" KeyboardAcceleratorPlacementMode="Hidden">
+        <!-- Window-wide shortcuts (work regardless of which control has focus) -->
+        <Grid.KeyboardAccelerators>
+            <KeyboardAccelerator Key="F11" Invoked="OnFullScreenAcceleratorInvoked"/>
+            <KeyboardAccelerator Key="Escape" Invoked="OnEscapeAcceleratorInvoked"/>
+        </Grid.KeyboardAccelerators>
+
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="*" />
             <ColumnDefinition x:Name="SidebarColumn" Width="380" MinWidth="0" MaxWidth="440" />
@@ -40,7 +46,7 @@
 
             <!-- Floating Controls Panel Toggle Button (visible when sidebar is closed) -->
             <Button x:Name="OpenSidebarButton" HorizontalAlignment="Right" VerticalAlignment="Top"
-                    Margin="16" Click="OnOpenSidebarClick" ToolTipService.ToolTip="Show Controls Panel (F11 or Escape to toggle)"
+                    Margin="16" Click="OnOpenSidebarClick" ToolTipService.ToolTip="Show Controls Panel (Esc to toggle)"
                     Background="#D0161622" BorderBrush="#33FFFFFF" BorderThickness="1"
                     Padding="12,8" CornerRadius="8" Visibility="Collapsed">
                 <StackPanel Orientation="Horizontal" Spacing="8">
@@ -68,6 +74,10 @@
                 <Button x:Name="ToggleSidebarButton" Click="OnToggleSidebarClick" ToolTipService.ToolTip="Toggle Controls Panel (Full Window View)"
                         Background="#CC1E1E28" Padding="10,6" CornerRadius="6">
                     <FontIcon x:Name="ToggleSidebarIcon" Glyph="&#xE8A0;" FontSize="14" />
+                </Button>
+                <Button x:Name="ToggleFullScreenButton" Click="OnToggleFullScreenClick" ToolTipService.ToolTip="Enter Full Screen (F11)"
+                        Background="#CC1E1E28" Padding="10,6" CornerRadius="6">
+                    <FontIcon x:Name="ToggleFullScreenIcon" Glyph="&#xE740;" FontSize="14" />
                 </Button>
             </StackPanel>
         </Grid>

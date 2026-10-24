@@ -325,13 +325,58 @@ namespace winrt::MandelbrotViewer::implementation
         SetSidebarVisible(!m_isSidebarVisible);
     }
 
-    void MainWindow::OnRootGridKeyDown(IInspectable const&, winrt::Microsoft::UI::Xaml::Input::KeyRoutedEventArgs const& e)
+    bool MainWindow::IsFullScreen()
     {
-        if (e.Key() == winrt::Windows::System::VirtualKey::F11 || e.Key() == winrt::Windows::System::VirtualKey::Escape)
+        return AppWindow().Presenter().Kind() == winrt::Microsoft::UI::Windowing::AppWindowPresenterKind::FullScreen;
+    }
+
+    void MainWindow::SetFullScreen(bool fullScreen)
+    {
+        if (fullScreen == IsFullScreen()) return;
+
+        if (fullScreen)
+        {
+            // Remember the panel state so it can be restored, then give the fractal the whole screen
+            m_sidebarVisibleBeforeFullScreen = m_isSidebarVisible;
+            SetSidebarVisible(false);
+
+            // FullScreen presenter removes title bar, borders and covers the taskbar
+            AppWindow().SetPresenter(winrt::Microsoft::UI::Windowing::AppWindowPresenterKind::FullScreen);
+            ToggleFullScreenIcon().Glyph(L"\uE73F");
+            winrt::Microsoft::UI::Xaml::Controls::ToolTipService::SetToolTip(ToggleFullScreenButton(), box_value(L"Exit Full Screen (F11 or Esc)"));
+        }
+        else
+        {
+            AppWindow().SetPresenter(winrt::Microsoft::UI::Windowing::AppWindowPresenterKind::Overlapped);
+            SetSidebarVisible(m_sidebarVisibleBeforeFullScreen);
+            ToggleFullScreenIcon().Glyph(L"\uE740");
+            winrt::Microsoft::UI::Xaml::Controls::ToolTipService::SetToolTip(ToggleFullScreenButton(), box_value(L"Enter Full Screen (F11)"));
+        }
+    }
+
+    void MainWindow::OnToggleFullScreenClick(IInspectable const&, RoutedEventArgs const&)
+    {
+        SetFullScreen(!IsFullScreen());
+    }
+
+    void MainWindow::OnFullScreenAcceleratorInvoked(winrt::Microsoft::UI::Xaml::Input::KeyboardAccelerator const&, winrt::Microsoft::UI::Xaml::Input::KeyboardAcceleratorInvokedEventArgs const& e)
+    {
+        SetFullScreen(!IsFullScreen());
+        e.Handled(true);
+    }
+
+    void MainWindow::OnEscapeAcceleratorInvoked(winrt::Microsoft::UI::Xaml::Input::KeyboardAccelerator const&, winrt::Microsoft::UI::Xaml::Input::KeyboardAcceleratorInvokedEventArgs const& e)
+    {
+        // Esc leaves full screen first; otherwise it toggles the controls panel
+        if (IsFullScreen())
+        {
+            SetFullScreen(false);
+        }
+        else
         {
             SetSidebarVisible(!m_isSidebarVisible);
-            e.Handled(true);
         }
+        e.Handled(true);
     }
 
     void MainWindow::OnBookmarkSelectionChanged(IInspectable const&, SelectionChangedEventArgs const&)
