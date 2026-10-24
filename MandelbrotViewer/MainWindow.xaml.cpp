@@ -177,7 +177,8 @@ namespace winrt::MandelbrotViewer::implementation
             m_frequency,
             m_phaseOffset,
             m_invertColors,
-            m_interiorColor);
+            m_interiorColor,
+            m_config.fractalType);
 
         m_bitmap.Invalidate();
     }

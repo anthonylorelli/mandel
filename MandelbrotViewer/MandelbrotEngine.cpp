@@ -13,6 +13,7 @@ namespace Mandelbrot
         case FractalType::Mandelbrot:  return L"Mandelbrot Set";
         case FractalType::BurningShip: return L"Burning Ship";
         case FractalType::Tricorn:     return L"Tricorn (Mandelbar)";
+        case FractalType::Newton:      return L"Newton's Fractal";
         default:                       return L"Unknown";
         }
     }
@@ -22,7 +23,8 @@ namespace Mandelbrot
         static const std::vector<FractalType> types = {
             FractalType::Mandelbrot,
             FractalType::BurningShip,
-            FractalType::Tricorn
+            FractalType::Tricorn,
+            FractalType::Newton
         };
         return types;
     }
@@ -57,12 +59,23 @@ namespace Mandelbrot
             { L"Deep Tricorn Core", L"Dense geometric crystalline lattice in deep zoom", -1.4113, 0.002, 25000.0, 2500 }
         };
 
+        static const std::vector<BookmarkLocation> newtonBookmarks = {
+            { L"Overview", L"Full 3-fold symmetric view of the three attraction basins", 0.0, 0.0, 1.0, 100 },
+            { L"Origin Rosette Cusp", L"Infinite self-similar rosettes where all three basins meet", 0.0, 0.0, 25.0, 200 },
+            { L"Triple Junction Vortex", L"Intense whorls and alternating color tendrils on the boundary", -0.765, 0.0, 60.0, 300 },
+            { L"Feathered Filament Border", L"Delicate feather-like lace separating convergence domains", 0.38, 0.65, 120.0, 400 },
+            { L"Miniature Tri-Star", L"Self-similar three-point satellite embedded in boundary webs", -0.3252, 0.5638, 1500.0, 500 },
+            { L"Deep Chaos Spiral", L"Ultra-deep fractal spiral vortex on the basin threshold", -0.50125, 0.86498, 8000.0, 800 }
+        };
+
         switch (type)
         {
         case FractalType::BurningShip:
             return burningShipBookmarks;
         case FractalType::Tricorn:
             return tricornBookmarks;
+        case FractalType::Newton:
+            return newtonBookmarks;
         case FractalType::Mandelbrot:
         default:
             return mandelbrotBookmarks;
@@ -168,70 +181,155 @@ namespace Mandelbrot
                     continue;
                 }
 
-                double zr = 0.0;
-                double zi = 0.0;
-                double zr2 = 0.0;
-                double zi2 = 0.0;
-                int iter = 0;
-
-                switch (type)
+                if (type == FractalType::Newton)
                 {
-                case FractalType::Mandelbrot:
-                    while (iter < maxIter && (zr2 + zi2) <= bailoutRadius2)
+                    double zr = cx;
+                    double zi = cy;
+                    int iter = 0;
+                    int rootIndex = -1;
+                    double distSq = 0.0;
+
+                    constexpr double ROOT1_Y = 0.86602540378443864676;
+                    constexpr double TOLERANCE_SQ = 1e-8;
+
+                    while (iter < maxIter)
                     {
-                        zi = 2.0 * zr * zi + cy;
-                        zr = zr2 - zi2 + cx;
-                        zr2 = zr * zr;
-                        zi2 = zi * zi;
+                        const double zr2 = zr * zr;
+                        const double zi2 = zi * zi;
+                        const double r2 = zr2 + zi2;
+
+                        if (r2 < 1e-14)
+                        {
+                            break;
+                        }
+
+                        // Check distance squared to Root 0: (1, 0)
+                        const double d0 = (zr - 1.0) * (zr - 1.0) + zi2;
+                        if (d0 < TOLERANCE_SQ)
+                        {
+                            rootIndex = 0;
+                            distSq = d0;
+                            break;
+                        }
+
+                        // Check distance squared to Root 1: (-0.5, +ROOT1_Y)
+                        const double d1 = (zr + 0.5) * (zr + 0.5) + (zi - ROOT1_Y) * (zi - ROOT1_Y);
+                        if (d1 < TOLERANCE_SQ)
+                        {
+                            rootIndex = 1;
+                            distSq = d1;
+                            break;
+                        }
+
+                        // Check distance squared to Root 2: (-0.5, -ROOT1_Y)
+                        const double d2 = (zr + 0.5) * (zr + 0.5) + (zi + ROOT1_Y) * (zi + ROOT1_Y);
+                        if (d2 < TOLERANCE_SQ)
+                        {
+                            rootIndex = 2;
+                            distSq = d2;
+                            break;
+                        }
+
+                        // Newton step for z^3 - 1:
+                        // z_{n+1} = (2/3)*z + (1/3)*(1 / z^2)
+                        // 1 / z^2 = conj(z^2) / |z|^4 = (zr2 - zi2 - i * 2 * zr * zi) / (r2 * r2)
+                        const double invR4 = 1.0 / (r2 * r2);
+                        const double nextZr = (2.0 / 3.0) * zr + (1.0 / 3.0) * (zr2 - zi2) * invR4;
+                        const double nextZi = (2.0 / 3.0) * zi - (1.0 / 3.0) * (2.0 * zr * zi) * invR4;
+
+                        zr = nextZr;
+                        zi = nextZi;
                         iter++;
                     }
-                    break;
 
-                case FractalType::BurningShip:
-                    while (iter < maxIter && (zr2 + zi2) <= bailoutRadius2)
+                    if (rootIndex < 0 || iter >= maxIter)
                     {
-                        // Burning Ship: z = (|Re(z)| + i|Im(z)|)^2 + c
-                        // Negating the imaginary component orients the ship upright with masts rising into view
-                        zi = -2.0 * std::abs(zr * zi) + cy;
-                        zr = zr2 - zi2 + cx;
-                        zr2 = zr * zr;
-                        zi2 = zi * zi;
-                        iter++;
-                    }
-                    break;
-
-                case FractalType::Tricorn:
-                    while (iter < maxIter && (zr2 + zi2) <= bailoutRadius2)
-                    {
-                        // Tricorn (Mandelbar): z = (conj(z))^2 + c
-                        zi = -2.0 * zr * zi + cy;
-                        zr = zr2 - zi2 + cx;
-                        zr2 = zr * zr;
-                        zi2 = zi * zi;
-                        iter++;
-                    }
-                    break;
-                }
-
-                if (iter >= maxIter)
-                {
-                    rowPtr[px] = -1.0f; // Inside set
-                }
-                else
-                {
-                    if (smooth)
-                    {
-                        // Continuous potential formula:
-                        // nu = iter + 1 - ln(ln(|z|)) / ln(2)
-                        // With |z| = sqrt(zr2 + zi2), ln(|z|) = 0.5 * ln(zr2 + zi2)
-                        const double mod2 = zr2 + zi2;
-                        const double logZn = std::log(mod2) * 0.5;
-                        const double nu = iter + 1.0 - std::log(logZn) * invLn2;
-                        rowPtr[px] = static_cast<float>(nu > 0.0 ? nu : 0.0);
+                        rowPtr[px] = -1.0f; // Did not converge
                     }
                     else
                     {
-                        rowPtr[px] = static_cast<float>(iter);
+                        float smoothVal = static_cast<float>(iter);
+                        if (smooth)
+                        {
+                            const double dist = std::max(std::sqrt(distSq), 1e-12);
+                            constexpr double logEps = -9.210340371976184; // log(1e-4)
+                            const double ratio = std::log(dist) / logEps;
+                            if (ratio > 1.0)
+                            {
+                                const double frac = std::log(ratio) * invLn2;
+                                smoothVal = static_cast<float>(std::max(0.0, iter - frac));
+                            }
+                        }
+                        rowPtr[px] = rootIndex * 1000000.0f + smoothVal;
+                    }
+                }
+                else
+                {
+                    double zr = 0.0;
+                    double zi = 0.0;
+                    double zr2 = 0.0;
+                    double zi2 = 0.0;
+                    int iter = 0;
+
+                    switch (type)
+                    {
+                    case FractalType::Mandelbrot:
+                        while (iter < maxIter && (zr2 + zi2) <= bailoutRadius2)
+                        {
+                            zi = 2.0 * zr * zi + cy;
+                            zr = zr2 - zi2 + cx;
+                            zr2 = zr * zr;
+                            zi2 = zi * zi;
+                            iter++;
+                        }
+                        break;
+
+                    case FractalType::BurningShip:
+                        while (iter < maxIter && (zr2 + zi2) <= bailoutRadius2)
+                        {
+                            // Burning Ship: z = (|Re(z)| + i|Im(z)|)^2 + c
+                            // Negating the imaginary component orients the ship upright with masts rising into view
+                            zi = -2.0 * std::abs(zr * zi) + cy;
+                            zr = zr2 - zi2 + cx;
+                            zr2 = zr * zr;
+                            zi2 = zi * zi;
+                            iter++;
+                        }
+                        break;
+
+                    case FractalType::Tricorn:
+                        while (iter < maxIter && (zr2 + zi2) <= bailoutRadius2)
+                        {
+                            // Tricorn (Mandelbar): z = (conj(z))^2 + c
+                            zi = -2.0 * zr * zi + cy;
+                            zr = zr2 - zi2 + cx;
+                            zr2 = zr * zr;
+                            zi2 = zi * zi;
+                            iter++;
+                        }
+                        break;
+                    }
+
+                    if (iter >= maxIter)
+                    {
+                        rowPtr[px] = -1.0f; // Inside set
+                    }
+                    else
+                    {
+                        if (smooth)
+                        {
+                            // Continuous potential formula:
+                            // nu = iter + 1 - ln(ln(|z|)) / ln(2)
+                            // With |z| = sqrt(zr2 + zi2), ln(|z|) = 0.5 * ln(zr2 + zi2)
+                            const double mod2 = zr2 + zi2;
+                            const double logZn = std::log(mod2) * 0.5;
+                            const double nu = iter + 1.0 - std::log(logZn) * invLn2;
+                            rowPtr[px] = static_cast<float>(nu > 0.0 ? nu : 0.0);
+                        }
+                        else
+                        {
+                            rowPtr[px] = static_cast<float>(iter);
+                        }
                     }
                 }
             }
