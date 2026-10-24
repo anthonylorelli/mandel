@@ -10,7 +10,8 @@ namespace Mandelbrot
     {
         Mandelbrot = 0,
         BurningShip,
-        Tricorn
+        Tricorn,
+        Newton
     };
 
     std::wstring GetFractalTypeName(FractalType type);

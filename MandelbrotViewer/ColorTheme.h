@@ -5,6 +5,8 @@
 
 namespace Mandelbrot
 {
+    enum class FractalType;
+
     struct GradientStop
     {
         float position{ 0.0f }; // 0.0 to 1.0
@@ -57,7 +59,8 @@ namespace Mandelbrot
             float frequency,
             float phaseOffset,
             bool invert,
-            uint32_t interiorColor = 0xFF000000) const;
+            uint32_t interiorColor = 0xFF000000,
+            FractalType fractalType = static_cast<FractalType>(0)) const;
 
         // Generates preview pixel line of size width
         void GeneratePreview(uint32_t* pDestPixels, size_t width) const;

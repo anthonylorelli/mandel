@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "ColorTheme.h"
+#include "MandelbrotEngine.h"
 #include <cmath>
 #include <algorithm>
 #include <numbers>
@@ -256,7 +257,8 @@ namespace Mandelbrot
         float frequency,
         float phaseOffset,
         bool invert,
-        uint32_t interiorColor) const
+        uint32_t interiorColor,
+        FractalType fractalType) const
     {
         if (!pDestPixels || iterationBuffer.size() < count || m_lut.empty()) return;
 
@@ -264,25 +266,71 @@ namespace Mandelbrot
         const uint32_t* lutData = m_lut.data();
         const float* iterData = iterationBuffer.data();
 
-        #pragma omp parallel for schedule(static, 4096)
-        for (intptr_t idx = 0; idx < static_cast<intptr_t>(count); ++idx)
+        if (fractalType == FractalType::Newton)
         {
-            const float iter = iterData[idx];
-
-            if (iter < 0.0f)
+            #pragma omp parallel for schedule(static, 4096)
+            for (intptr_t idx = 0; idx < static_cast<intptr_t>(count); ++idx)
             {
-                // Point is inside Mandelbrot set
-                pDestPixels[idx] = interiorColor;
-                continue;
+                const float val = iterData[idx];
+                if (val < 0.0f)
+                {
+                    pDestPixels[idx] = interiorColor;
+                    continue;
+                }
+
+                const int root = static_cast<int>(val / 1000000.0f);
+                const float iter = val - (root * 1000000.0f);
+
+                // Map root index (0, 1, 2) to base partition of the palette [0, 1)
+                const float rootBase = static_cast<float>(root % 3) / 3.0f;
+
+                // Modulate with iteration count for fine concentric bands / ripple contours
+                float ring = std::fmod((iter * 0.06f * frequency + phaseOffset), 1.0f);
+                if (ring < 0.0f) ring += 1.0f;
+
+                float u = rootBase + ring * (1.0f / 3.0f);
+                if (u >= 1.0f) u -= 1.0f;
+                if (invert) u = 1.0f - u;
+
+                const size_t lutIdx = static_cast<size_t>(u * lutMax);
+                uint32_t color = lutData[lutIdx & (LUT_SIZE - 1)];
+
+                // Subtle smooth shading: points taking more iterations darken slightly
+                const float shading = std::max(0.35f, 1.0f / (1.0f + 0.015f * iter));
+                if (shading < 0.99f)
+                {
+                    const uint32_t a = (color >> 24) & 0xFF;
+                    const uint32_t r = static_cast<uint32_t>(((color >> 16) & 0xFF) * shading);
+                    const uint32_t g = static_cast<uint32_t>(((color >> 8) & 0xFF) * shading);
+                    const uint32_t b = static_cast<uint32_t>((color & 0xFF) * shading);
+                    color = (a << 24) | (r << 16) | (g << 8) | b;
+                }
+
+                pDestPixels[idx] = color;
             }
+        }
+        else
+        {
+            #pragma omp parallel for schedule(static, 4096)
+            for (intptr_t idx = 0; idx < static_cast<intptr_t>(count); ++idx)
+            {
+                const float iter = iterData[idx];
 
-            // Map iteration count into continuous [0, 1) cyclic space
-            float u = std::fmod((iter * frequency + phaseOffset), 1.0f);
-            if (u < 0.0f) u += 1.0f;
-            if (invert) u = 1.0f - u;
+                if (iter < 0.0f)
+                {
+                    // Point is inside Mandelbrot set
+                    pDestPixels[idx] = interiorColor;
+                    continue;
+                }
 
-            const size_t lutIdx = static_cast<size_t>(u * lutMax);
-            pDestPixels[idx] = lutData[lutIdx & (LUT_SIZE - 1)];
+                // Map iteration count into continuous [0, 1) cyclic space
+                float u = std::fmod((iter * frequency + phaseOffset), 1.0f);
+                if (u < 0.0f) u += 1.0f;
+                if (invert) u = 1.0f - u;
+
+                const size_t lutIdx = static_cast<size_t>(u * lutMax);
+                pDestPixels[idx] = lutData[lutIdx & (LUT_SIZE - 1)];
+            }
         }
     }
 }
