@@ -34,6 +34,7 @@ namespace winrt::MandelbrotViewer::implementation
         void OnEscapeAcceleratorInvoked(winrt::Microsoft::UI::Xaml::Input::KeyboardAccelerator const& sender, winrt::Microsoft::UI::Xaml::Input::KeyboardAcceleratorInvokedEventArgs const& e);
 
         // Sidebar parameters
+        void OnFractalTypeSelectionChanged(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::Controls::SelectionChangedEventArgs const& e);
         void OnBookmarkSelectionChanged(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::Controls::SelectionChangedEventArgs const& e);
         void OnIterationsSliderChanged(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::Controls::Primitives::RangeBaseValueChangedEventArgs const& e);
         void OnSmoothToggleChanged(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
@@ -59,6 +60,7 @@ namespace winrt::MandelbrotViewer::implementation
 
     private:
         void InitializeControls();
+        void PopulateBookmarks();
         void RenderFractal();
         void RecolorBuffer();
         void UpdateHud(double fractalTimeMs, double colorTimeMs);

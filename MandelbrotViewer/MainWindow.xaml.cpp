@@ -50,7 +50,7 @@ namespace winrt::MandelbrotViewer::implementation
     MainWindow::MainWindow()
     {
         InitializeComponent();
-        Title(L"Mandelbrot Set Explorer - WinUI 3");
+        Title(L"Fractal Studio - Mandelbrot Set");
 
         InitializeControls();
     }
@@ -63,13 +63,15 @@ namespace winrt::MandelbrotViewer::implementation
         m_previewBitmap = WriteableBitmap(256, 1);
         PalettePreviewImage().Source(m_previewBitmap);
 
-        // Populate Landmark Bookmarks
-        const auto& bookmarks = Mandelbrot::GetBookmarks();
-        for (const auto& bm : bookmarks)
+        // Populate Fractal Formulas
+        for (const auto& type : Mandelbrot::GetAllFractalTypes())
         {
-            BookmarksComboBox().Items().Append(box_value(bm.name));
+            FractalTypeComboBox().Items().Append(box_value(Mandelbrot::GetFractalTypeName(type)));
         }
-        BookmarksComboBox().SelectedIndex(0);
+        FractalTypeComboBox().SelectedIndex(0);
+
+        // Populate Landmark Bookmarks
+        PopulateBookmarks();
 
         // Populate Theme Presets
         const auto& presets = Mandelbrot::GetAllPresets();
@@ -100,6 +102,22 @@ namespace winrt::MandelbrotViewer::implementation
         m_suppressEvents = false;
 
         UpdateGradientPreview();
+    }
+
+    void MainWindow::PopulateBookmarks()
+    {
+        m_suppressEvents = true;
+        BookmarksComboBox().Items().Clear();
+        const auto& bookmarks = Mandelbrot::GetBookmarks(m_config.fractalType);
+        for (const auto& bm : bookmarks)
+        {
+            BookmarksComboBox().Items().Append(box_value(bm.name));
+        }
+        if (!bookmarks.empty())
+        {
+            BookmarksComboBox().SelectedIndex(0);
+        }
+        m_suppressEvents = false;
     }
 
     void MainWindow::OnViewportSizeChanged(IInspectable const&, SizeChangedEventArgs const& e)
@@ -277,16 +295,33 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::OnResetViewClick(IInspectable const&, RoutedEventArgs const&)
     {
-        m_config.centerX = -0.75;
-        m_config.centerY = 0.0;
-        m_config.zoom = 1.0;
-        m_config.maxIterations = 500;
+        const auto& bookmarks = Mandelbrot::GetBookmarks(m_config.fractalType);
+        if (!bookmarks.empty())
+        {
+            const auto& bm = bookmarks[0];
+            m_config.centerX = bm.centerX;
+            m_config.centerY = bm.centerY;
+            m_config.zoom = bm.zoom;
+            m_config.maxIterations = bm.maxIterations;
 
-        m_suppressEvents = true;
-        IterationsSlider().Value(500);
-        IterationsValueText().Text(L"500");
-        BookmarksComboBox().SelectedIndex(0);
-        m_suppressEvents = false;
+            m_suppressEvents = true;
+            IterationsSlider().Value(bm.maxIterations);
+            IterationsValueText().Text(winrt::to_hstring(bm.maxIterations));
+            BookmarksComboBox().SelectedIndex(0);
+            m_suppressEvents = false;
+        }
+        else
+        {
+            m_config.centerX = -0.75;
+            m_config.centerY = 0.0;
+            m_config.zoom = 1.0;
+            m_config.maxIterations = 500;
+
+            m_suppressEvents = true;
+            IterationsSlider().Value(500);
+            IterationsValueText().Text(L"500");
+            m_suppressEvents = false;
+        }
 
         RenderFractal();
     }
@@ -379,12 +414,48 @@ namespace winrt::MandelbrotViewer::implementation
         e.Handled(true);
     }
 
+    void MainWindow::OnFractalTypeSelectionChanged(IInspectable const&, SelectionChangedEventArgs const&)
+    {
+        if (m_suppressEvents) return;
+
+        const int index = FractalTypeComboBox().SelectedIndex();
+        const auto& types = Mandelbrot::GetAllFractalTypes();
+        if (index >= 0 && index < static_cast<int>(types.size()))
+        {
+            const auto type = types[index];
+            m_config.fractalType = type;
+
+            const auto typeName = Mandelbrot::GetFractalTypeName(type);
+            HudTitleText().Text(winrt::hstring(typeName));
+            Title(winrt::hstring(L"Fractal Studio - " + typeName));
+
+            PopulateBookmarks();
+
+            const auto& bookmarks = Mandelbrot::GetBookmarks(type);
+            if (!bookmarks.empty())
+            {
+                const auto& bm = bookmarks[0];
+                m_config.centerX = bm.centerX;
+                m_config.centerY = bm.centerY;
+                m_config.zoom = bm.zoom;
+                m_config.maxIterations = bm.maxIterations;
+
+                m_suppressEvents = true;
+                IterationsSlider().Value(bm.maxIterations);
+                IterationsValueText().Text(winrt::to_hstring(bm.maxIterations));
+                m_suppressEvents = false;
+            }
+
+            RenderFractal();
+        }
+    }
+
     void MainWindow::OnBookmarkSelectionChanged(IInspectable const&, SelectionChangedEventArgs const&)
     {
         if (m_suppressEvents) return;
 
         const int index = BookmarksComboBox().SelectedIndex();
-        const auto& bookmarks = Mandelbrot::GetBookmarks();
+        const auto& bookmarks = Mandelbrot::GetBookmarks(m_config.fractalType);
         if (index >= 0 && index < static_cast<int>(bookmarks.size()))
         {
             const auto& bm = bookmarks[index];
@@ -612,7 +683,7 @@ namespace winrt::MandelbrotViewer::implementation
             auto picker = winrt::Windows::Storage::Pickers::FileSavePicker();
             picker.SuggestedStartLocation(winrt::Windows::Storage::Pickers::PickerLocationId::PicturesLibrary);
             picker.FileTypeChoices().Insert(L"PNG Image (*.png)", winrt::single_threaded_vector<winrt::hstring>({ L".png" }));
-            picker.SuggestedFileName(L"Mandelbrot_Capture.png");
+            picker.SuggestedFileName(winrt::hstring(Mandelbrot::GetFractalTypeName(m_config.fractalType) + L"_Capture.png"));
 
             // WinUI 3 Desktop requires HWND initialization for FileSavePicker
             HWND hwnd = nullptr;
@@ -654,6 +725,7 @@ namespace winrt::MandelbrotViewer::implementation
     {
         std::wostringstream ss;
         ss << L"{\n"
+           << L"  \"fractalType\": \"" << Mandelbrot::GetFractalTypeName(m_config.fractalType) << L"\",\n"
            << L"  \"centerX\": " << std::setprecision(16) << m_config.centerX << L",\n"
            << L"  \"centerY\": " << std::setprecision(16) << m_config.centerY << L",\n"
            << L"  \"zoom\": " << std::setprecision(6) << m_config.zoom << L",\n"

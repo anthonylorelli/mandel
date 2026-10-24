@@ -6,46 +6,67 @@
 
 namespace Mandelbrot
 {
-    const std::vector<BookmarkLocation>& GetBookmarks()
+    std::wstring GetFractalTypeName(FractalType type)
     {
-        static const std::vector<BookmarkLocation> bookmarks = {
-            {
-                L"Overview",
-                L"Full view of the iconic Mandelbrot set",
-                -0.75, 0.0, 1.0, 300
-            },
-            {
-                L"Seahorse Valley",
-                L"Intricate spiral filaments connecting cardioid and bulb",
-                -0.7436438870371587, 0.1318259042053119, 85000.0, 1000
-            },
-            {
-                L"Elephant Valley",
-                L"Elephant trunk formations on the East side of main cardioid",
-                0.274, 0.482, 250.0, 500
-            },
-            {
-                L"Triple Spiral",
-                L"Hypnotic three-arm vortex of fractal energy",
-                -0.088, 0.654, 1200.0, 800
-            },
-            {
-                L"Mini Mandelbrot Satellite",
-                L"Self-similar satellite island along the primary spike",
-                -1.768778833, -0.001738994, 30000.0, 1500
-            },
-            {
-                L"Scepter Valley",
-                L"Branching candelabras and crowned antennae",
-                -1.25066, 0.02012, 1000.0, 600
-            },
-            {
-                L"Deep Spiral Core",
-                L"Deep zoom revealing dense cosmic spiral clusters",
-                -0.743643135, 0.131825963, 1500000.0, 2500
-            }
+        switch (type)
+        {
+        case FractalType::Mandelbrot:  return L"Mandelbrot Set";
+        case FractalType::BurningShip: return L"Burning Ship";
+        case FractalType::Tricorn:     return L"Tricorn (Mandelbar)";
+        default:                       return L"Unknown";
+        }
+    }
+
+    const std::vector<FractalType>& GetAllFractalTypes()
+    {
+        static const std::vector<FractalType> types = {
+            FractalType::Mandelbrot,
+            FractalType::BurningShip,
+            FractalType::Tricorn
         };
-        return bookmarks;
+        return types;
+    }
+
+    const std::vector<BookmarkLocation>& GetBookmarks(FractalType type)
+    {
+        static const std::vector<BookmarkLocation> mandelbrotBookmarks = {
+            { L"Overview", L"Full view of the iconic Mandelbrot set", -0.75, 0.0, 1.0, 300 },
+            { L"Seahorse Valley", L"Intricate spiral filaments connecting cardioid and bulb", -0.7436438870371587, 0.1318259042053119, 85000.0, 1000 },
+            { L"Elephant Valley", L"Elephant trunk formations on the East side of main cardioid", 0.274, 0.482, 250.0, 500 },
+            { L"Triple Spiral", L"Hypnotic three-arm vortex of fractal energy", -0.088, 0.654, 1200.0, 800 },
+            { L"Mini Mandelbrot Satellite", L"Self-similar satellite island along the primary spike", -1.768778833, -0.001738994, 30000.0, 1500 },
+            { L"Scepter Valley", L"Branching candelabras and crowned antennae", -1.25066, 0.02012, 1000.0, 600 },
+            { L"Deep Spiral Core", L"Deep zoom revealing dense cosmic spiral clusters", -0.743643135, 0.131825963, 1500000.0, 2500 }
+        };
+
+        static const std::vector<BookmarkLocation> burningShipBookmarks = {
+            { L"Burning Ship Overview", L"Full view of the burning ship with glowing masts", -0.45, 0.5, 1.2, 400 },
+            { L"The Grand Mast", L"Towering mast and rigging formations rising into the sky", -1.75, 0.03, 35.0, 800 },
+            { L"The Armada Fleet", L"Endless miniature burning ships aligned along the horizon", -1.762, 0.028, 250.0, 1200 },
+            { L"Celtic Cross", L"Intricate cross-shaped filigree deep within the ship framework", -1.861, 0.005, 800.0, 1500 },
+            { L"Ship Bow & Ribs", L"Structural skeletal beams and burning embers", -0.47, 0.58, 15.0, 600 },
+            { L"Ghost Ship Satellite", L"Self-similar phantom ship adrift in deep fractal space", -1.7495, 0.0255, 1800.0, 2000 }
+        };
+
+        static const std::vector<BookmarkLocation> tricornBookmarks = {
+            { L"Tricorn Overview", L"Iconic three-cornered cardioid boundary and antennas", -0.4, 0.0, 1.0, 300 },
+            { L"Triple Corner Cusp", L"Sharp triangular pinch point connecting perimeter ridges", 0.25, 0.0, 15.0, 500 },
+            { L"Cauliflower Valley", L"Curving cauliflower plumes with anti-holomorphic symmetry", -0.75, 0.35, 80.0, 800 },
+            { L"Mini Tricorn Satellite", L"Perfect miniature replica of the main tricorn body", -1.41, 0.0, 120.0, 1200 },
+            { L"Antenna Spirals", L"Needle-thin branching spirals emanating from outer spikes", -0.12, 0.72, 300.0, 1000 },
+            { L"Deep Tricorn Core", L"Dense geometric crystalline lattice in deep zoom", -1.4113, 0.002, 25000.0, 2500 }
+        };
+
+        switch (type)
+        {
+        case FractalType::BurningShip:
+            return burningShipBookmarks;
+        case FractalType::Tricorn:
+            return tricornBookmarks;
+        case FractalType::Mandelbrot:
+        default:
+            return mandelbrotBookmarks;
+        }
     }
 
     void MandelbrotEngine::ScreenToComplex(
@@ -103,6 +124,7 @@ namespace Mandelbrot
         const int height = config.height;
         const int maxIter = config.maxIterations;
         const bool smooth = config.smooth;
+        const FractalType type = config.fractalType;
 
         if (width <= 0 || height <= 0) return 0.0;
 
@@ -139,8 +161,8 @@ namespace Mandelbrot
             {
                 const double cx = minX + (px + 0.5) * dx;
 
-                // Fast check for points in cardioid or main bulb
-                if (IsInMainCardioidOrBulb(cx, cy))
+                // Fast check for points in cardioid or main bulb (Mandelbrot only)
+                if (type == FractalType::Mandelbrot && IsInMainCardioidOrBulb(cx, cy))
                 {
                     rowPtr[px] = -1.0f; // Inside set
                     continue;
@@ -152,13 +174,43 @@ namespace Mandelbrot
                 double zi2 = 0.0;
                 int iter = 0;
 
-                while (iter < maxIter && (zr2 + zi2) <= bailoutRadius2)
+                switch (type)
                 {
-                    zi = 2.0 * zr * zi + cy;
-                    zr = zr2 - zi2 + cx;
-                    zr2 = zr * zr;
-                    zi2 = zi * zi;
-                    iter++;
+                case FractalType::Mandelbrot:
+                    while (iter < maxIter && (zr2 + zi2) <= bailoutRadius2)
+                    {
+                        zi = 2.0 * zr * zi + cy;
+                        zr = zr2 - zi2 + cx;
+                        zr2 = zr * zr;
+                        zi2 = zi * zi;
+                        iter++;
+                    }
+                    break;
+
+                case FractalType::BurningShip:
+                    while (iter < maxIter && (zr2 + zi2) <= bailoutRadius2)
+                    {
+                        // Burning Ship: z = (|Re(z)| + i|Im(z)|)^2 + c
+                        // Negating the imaginary component orients the ship upright with masts rising into view
+                        zi = -2.0 * std::abs(zr * zi) + cy;
+                        zr = zr2 - zi2 + cx;
+                        zr2 = zr * zr;
+                        zi2 = zi * zi;
+                        iter++;
+                    }
+                    break;
+
+                case FractalType::Tricorn:
+                    while (iter < maxIter && (zr2 + zi2) <= bailoutRadius2)
+                    {
+                        // Tricorn (Mandelbar): z = (conj(z))^2 + c
+                        zi = -2.0 * zr * zi + cy;
+                        zr = zr2 - zi2 + cx;
+                        zr2 = zr * zr;
+                        zi2 = zi * zi;
+                        iter++;
+                    }
+                    break;
                 }
 
                 if (iter >= maxIter)

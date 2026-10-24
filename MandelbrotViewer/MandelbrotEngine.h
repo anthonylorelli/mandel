@@ -6,8 +6,19 @@
 
 namespace Mandelbrot
 {
+    enum class FractalType
+    {
+        Mandelbrot = 0,
+        BurningShip,
+        Tricorn
+    };
+
+    std::wstring GetFractalTypeName(FractalType type);
+    const std::vector<FractalType>& GetAllFractalTypes();
+
     struct MandelbrotConfig
     {
+        FractalType fractalType{ FractalType::Mandelbrot };
         double centerX{ -0.75 };
         double centerY{ 0.0 };
         double zoom{ 1.0 }; // Viewport span = 3.0 / zoom
@@ -27,7 +38,7 @@ namespace Mandelbrot
         int maxIterations;
     };
 
-    const std::vector<BookmarkLocation>& GetBookmarks();
+    const std::vector<BookmarkLocation>& GetBookmarks(FractalType type = FractalType::Mandelbrot);
 
     class MandelbrotEngine
     {

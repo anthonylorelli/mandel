@@ -37,7 +37,7 @@
                     Margin="16" CornerRadius="8" Padding="14,10"
                     Background="#D012121A" BorderBrush="#33FFFFFF" BorderThickness="1">
                 <StackPanel Spacing="4">
-                    <TextBlock Text="MANDELBROT SET" FontWeight="SemiBold" FontSize="11" Foreground="#99FFFFFF" CharacterSpacing="100"/>
+                    <TextBlock x:Name="HudTitleText" Text="MANDELBROT SET" FontWeight="SemiBold" FontSize="11" Foreground="#99FFFFFF" CharacterSpacing="100"/>
                     <TextBlock x:Name="HudCoordsText" Text="Center: (-0.75000000, +0.00000000)" FontFamily="Consolas" FontSize="12" Foreground="#EEFFFFFF"/>
                     <TextBlock x:Name="HudZoomText" Text="Zoom: 1.0x" FontFamily="Consolas" FontSize="12" Foreground="#80D8FF"/>
                     <TextBlock x:Name="HudTimingText" Text="Fractal: 0.0 ms | Color: 0.0 ms" FontFamily="Consolas" FontSize="11" Foreground="#80E8A0"/>
@@ -106,6 +106,13 @@
                     </Grid>
 
                     <MenuFlyoutSeparator />
+
+                    <!-- Fractal Formula Selector -->
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Fractal Formula" FontWeight="SemiBold" FontSize="13"/>
+                        <ComboBox x:Name="FractalTypeComboBox" HorizontalAlignment="Stretch"
+                                  SelectionChanged="OnFractalTypeSelectionChanged"/>
+                    </StackPanel>
 
                     <!-- Presets & Bookmarks -->
                     <StackPanel Spacing="8">
