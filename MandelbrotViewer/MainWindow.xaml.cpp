@@ -490,7 +490,10 @@ namespace winrt::MandelbrotViewer::implementation
     void MainWindow::OnIterationsSliderChanged(IInspectable const&, Primitives::RangeBaseValueChangedEventArgs const& e)
     {
         const int iter = static_cast<int>(e.NewValue());
-        IterationsValueText().Text(winrt::to_hstring(iter));
+        if (IterationsValueText())
+        {
+            IterationsValueText().Text(winrt::to_hstring(iter));
+        }
 
         if (m_suppressEvents) return;
         m_baseIterations = iter;
@@ -500,7 +503,7 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::OnAutoIterationsToggleChanged(IInspectable const&, RoutedEventArgs const&)
     {
-        if (m_suppressEvents) return;
+        if (m_suppressEvents || !AutoIterationsToggle() || !IterationsSlider() || !IterationsValueText()) return;
         m_autoScaleIterations = AutoIterationsToggle().IsOn();
         if (m_autoScaleIterations)
         {
@@ -518,7 +521,7 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::OnSmoothToggleChanged(IInspectable const&, RoutedEventArgs const&)
     {
-        if (m_suppressEvents) return;
+        if (m_suppressEvents || !SmoothToggle()) return;
         m_config.smooth = SmoothToggle().IsOn();
         RenderFractal();
     }
@@ -541,7 +544,10 @@ namespace winrt::MandelbrotViewer::implementation
     void MainWindow::OnFrequencySliderChanged(IInspectable const&, Primitives::RangeBaseValueChangedEventArgs const& e)
     {
         m_frequency = static_cast<float>(e.NewValue());
-        FrequencyValueText().Text(FormatFloat(m_frequency, 2) + L"x");
+        if (FrequencyValueText())
+        {
+            FrequencyValueText().Text(FormatFloat(m_frequency, 2) + L"x");
+        }
 
         if (m_suppressEvents) return;
         RecolorBuffer();
@@ -550,7 +556,10 @@ namespace winrt::MandelbrotViewer::implementation
     void MainWindow::OnPhaseSliderChanged(IInspectable const&, Primitives::RangeBaseValueChangedEventArgs const& e)
     {
         m_phaseOffset = static_cast<float>(e.NewValue());
-        PhaseValueText().Text(FormatFloat(m_phaseOffset, 2));
+        if (PhaseValueText())
+        {
+            PhaseValueText().Text(FormatFloat(m_phaseOffset, 2));
+        }
 
         if (m_suppressEvents) return;
         RecolorBuffer();
@@ -666,7 +675,10 @@ namespace winrt::MandelbrotViewer::implementation
     void MainWindow::OnStopPositionSliderChanged(IInspectable const&, Primitives::RangeBaseValueChangedEventArgs const& e)
     {
         const float pos = static_cast<float>(e.NewValue());
-        StopPositionText().Text(FormatFloat(pos, 2));
+        if (StopPositionText())
+        {
+            StopPositionText().Text(FormatFloat(pos, 2));
+        }
 
         if (m_suppressEvents) return;
         const int index = StopSelectorComboBox().SelectedIndex();

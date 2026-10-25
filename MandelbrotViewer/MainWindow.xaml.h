@@ -92,7 +92,7 @@ namespace winrt::MandelbrotViewer::implementation
 
         bool m_isSidebarVisible{ true };
         bool m_sidebarVisibleBeforeFullScreen{ true };
-        bool m_suppressEvents{ false };
+        bool m_suppressEvents{ true };
         float m_frequency{ 1.0f };
         float m_phaseOffset{ 0.0f };
         bool m_invertColors{ false };
