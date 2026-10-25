@@ -133,8 +133,14 @@
                             <TextBlock Text="Max Iterations" VerticalAlignment="Center"/>
                             <TextBlock x:Name="IterationsValueText" Grid.Column="1" Text="500" FontWeight="SemiBold" FontFamily="Consolas"/>
                         </Grid>
-                        <Slider x:Name="IterationsSlider" Minimum="50" Maximum="5000" StepFrequency="50" Value="500"
+                        <Slider x:Name="IterationsSlider" Minimum="50" Maximum="50000" StepFrequency="50" Value="500"
                                 ValueChanged="OnIterationsSliderChanged"/>
+
+                        <ToggleSwitch x:Name="AutoIterationsToggle" Header="Auto-Scale Iterations"
+                                      OnContent="Dynamic (Scales with Deep Zoom)"
+                                      OffContent="Manual Fixed"
+                                      IsOn="True"
+                                      Toggled="OnAutoIterationsToggleChanged"/>
 
                         <ToggleSwitch x:Name="SmoothToggle" Header="Coloring Mode"
                                       OnContent="Continuous (Smooth Potential)"

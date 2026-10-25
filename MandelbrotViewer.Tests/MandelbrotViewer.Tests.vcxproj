@@ -101,6 +101,7 @@
   <ItemGroup>
     <ClInclude Include="pch.h" />
     <ClInclude Include="TestHarness.h" />
+    <ClInclude Include="..\MandelbrotViewer\HighPrecision.h" />
     <ClInclude Include="..\MandelbrotViewer\MandelbrotEngine.h" />
     <ClInclude Include="..\MandelbrotViewer\ColorTheme.h" />
   </ItemGroup>
