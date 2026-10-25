@@ -38,34 +38,37 @@ namespace Mandelbrot
             { L"Triple Spiral", L"Hypnotic three-arm vortex of fractal energy", -0.088, 0.654, 1200.0, 800 },
             { L"Mini Mandelbrot Satellite", L"Self-similar satellite island along the primary spike", -1.768778833, -0.001738994, 30000.0, 1500 },
             { L"Scepter Valley", L"Branching candelabras and crowned antennae", -1.25066, 0.02012, 1000.0, 600 },
-            { L"Deep Spiral Core", L"Deep zoom revealing dense cosmic spiral clusters", -0.743643135, 0.131825963, 1500000.0, 2500 }
+            { L"Deep Spiral Core", L"Deep zoom revealing dense cosmic spiral clusters", -0.7436438870371587, 0.1318259042053119, 500000.0, 2000 }
         };
 
         static const std::vector<BookmarkLocation> burningShipBookmarks = {
             { L"Burning Ship Overview", L"Full view of the burning ship with glowing masts", -0.45, 0.5, 1.2, 400 },
             { L"The Grand Mast", L"Towering mast and rigging formations rising into the sky", -1.75, 0.03, 35.0, 800 },
             { L"The Armada Fleet", L"Endless miniature burning ships aligned along the horizon", -1.762, 0.028, 250.0, 1200 },
-            { L"Celtic Cross", L"Intricate cross-shaped filigree deep within the ship framework", -1.861, 0.005, 800.0, 1500 },
-            { L"Ship Bow & Ribs", L"Structural skeletal beams and burning embers", -0.47, 0.58, 15.0, 600 },
+            { L"Celtic Cross", L"Intricate cross-shaped filigree deep within the ship framework", -1.861, 0.0, 800.0, 1500 },
+            { L"Central Mast & Rigging", L"Towering spire and intricate ember rigging", -0.48, 0.86, 20.0, 600 },
+            { L"Keel & Burning Ribs", L"Structural skeletal beam embers along the bottom keel", -0.32, -0.15, 15.0, 500 },
             { L"Ghost Ship Satellite", L"Self-similar phantom ship adrift in deep fractal space", -1.7495, 0.0255, 1800.0, 2000 }
         };
 
         static const std::vector<BookmarkLocation> tricornBookmarks = {
             { L"Tricorn Overview", L"Iconic three-cornered cardioid boundary and antennas", -0.4, 0.0, 1.0, 300 },
             { L"Triple Corner Cusp", L"Sharp triangular pinch point connecting perimeter ridges", 0.25, 0.0, 15.0, 500 },
-            { L"Cauliflower Valley", L"Curving cauliflower plumes with anti-holomorphic symmetry", -0.75, 0.35, 80.0, 800 },
-            { L"Mini Tricorn Satellite", L"Perfect miniature replica of the main tricorn body", -1.41, 0.0, 120.0, 1200 },
-            { L"Antenna Spirals", L"Needle-thin branching spirals emanating from outer spikes", -0.12, 0.72, 300.0, 1000 },
-            { L"Deep Tricorn Core", L"Dense geometric crystalline lattice in deep zoom", -1.4113, 0.002, 25000.0, 2500 }
+            { L"Cauliflower Valley", L"Curving cauliflower plumes with anti-holomorphic symmetry", 0.0, 0.30, 25.0, 800 },
+            { L"Filament Valley Web", L"Intricate filament network connecting outer cusps", 0.20, 0.50, 30.0, 800 },
+            { L"Upper Horn Antenna", L"Towering crystal antenna horn reaching into outer space", 0.45, 1.00, 20.0, 600 },
+            { L"Mini Tricorn Satellite", L"Perfect miniature replica of the main tricorn body", -1.40, 0.0, 100.0, 1000 },
+            { L"Deep Tricorn Core", L"Dense geometric crystalline lattice in deep zoom", -1.4011, 0.0, 3000.0, 1500 }
         };
 
         static const std::vector<BookmarkLocation> newtonBookmarks = {
             { L"Overview", L"Full 3-fold symmetric view of the three attraction basins", 0.0, 0.0, 1.0, 100 },
-            { L"Origin Rosette Cusp", L"Infinite self-similar rosettes where all three basins meet", 0.0, 0.0, 25.0, 200 },
-            { L"Triple Junction Vortex", L"Intense whorls and alternating color tendrils on the boundary", -0.765, 0.0, 60.0, 300 },
-            { L"Feathered Filament Border", L"Delicate feather-like lace separating convergence domains", 0.38, 0.65, 120.0, 400 },
-            { L"Miniature Tri-Star", L"Self-similar three-point satellite embedded in boundary webs", -0.3252, 0.5638, 1500.0, 500 },
-            { L"Deep Chaos Spiral", L"Ultra-deep fractal spiral vortex on the basin threshold", -0.50125, 0.86498, 8000.0, 800 }
+            { L"Origin Rosette", L"Intricate self-similar rosettes where all three basins meet", 0.0, 0.0, 8.0, 150 },
+            { L"Deep Origin Core", L"Infinite recursive rosette petals meeting at the singularity", 0.0, 0.0, 60.0, 250 },
+            { L"Triple Basin Junction", L"Pinched boundary filaments where all three colors converge", -0.75, 0.0, 15.0, 200 },
+            { L"Basin Boundary Web", L"Interlocking fractal webs along the domain threshold", -0.60, 0.20, 15.0, 200 },
+            { L"Outer Pinched Filament", L"Needle-thin pinched filigree between alternating lobes", -1.40, 0.0, 15.0, 200 },
+            { L"Interlocking Lobe Vortex", L"Swirling vortex of interleaved color basins", -1.20, 0.20, 15.0, 200 }
         };
 
         switch (type)
