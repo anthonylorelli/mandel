@@ -398,3 +398,184 @@ TEST_CASE(MandelbrotEngine, FractalTypeHelpers)
         ASSERT_FALSE(name.empty());
     }
 }
+
+TEST_CASE(HighPrecision, BigFloat_ArithmeticAndNoCancellation)
+{
+    // Verify basic arithmetic
+    BigFloat a(1.5);
+    BigFloat b(-2.25);
+    ASSERT_NEAR(-0.75, (a + b).ToDouble(), 1e-12);
+    ASSERT_NEAR(3.75, (a - b).ToDouble(), 1e-12);
+    ASSERT_NEAR(-3.375, (a * b).ToDouble(), 1e-12);
+    ASSERT_NEAR(2.25, a.Sqr().ToDouble(), 1e-12);
+    ASSERT_NEAR(1.0 / 3.0, (BigFloat(1.0) / BigFloat(3.0)).ToDouble(), 1e-12);
+
+    // Crucial test: adding a 1e-40 offset to -0.75 and subtracting -0.75 must preserve 1e-40 without cancellation!
+    BigFloat base(-0.75);
+    BigFloat tiny(1e-40);
+    BigFloat sum = base + tiny;
+    BigFloat deltaResult = sum - base;
+    ASSERT_NEAR(1e-40, deltaResult.ToDouble(), 1e-52);
+
+    // String round-trip
+    BigFloat parsed("-0.743643887037158704752191506114774");
+    ASSERT_NEAR(-0.7436438870371587, parsed.ToDouble(), 1e-15);
+    std::string str = parsed.ToString(20);
+    ASSERT_TRUE(str.find("-0.743643887037158") == 0);
+}
+
+TEST_CASE(MandelbrotEngine, ZoomAndPanViewport_DeepPrecision)
+{
+    MandelbrotConfig config;
+    config.width = 800;
+    config.height = 600;
+    config.SetCenter(-0.7436438870371587, 0.1318259042053119);
+    config.zoom = 1e40;
+
+    const BigFloat initialX = config.hpCenterX;
+    const BigFloat initialY = config.hpCenterY;
+
+    // Zoom in off-center at (600, 150) at 1e40 magnification
+    MandelbrotEngine::ZoomViewport(config, 2.0, 600.0, 150.0);
+    ASSERT_NEAR(2e40, config.zoom, 1e26);
+
+    // In standard double, initialX and config.hpCenterX have the exact same double representation,
+    // but in 1024-bit BigFloat they differ by ~3.75e-41!
+    const double shiftX = (config.hpCenterX - initialX).ToDouble();
+    const double shiftY = (config.hpCenterY - initialY).ToDouble();
+    ASSERT_GT(std::abs(shiftX), 1e-42);
+    ASSERT_GT(std::abs(shiftY), 1e-42);
+
+    // Pan viewport by 100 pixels at 2e40 zoom
+    const BigFloat beforePanX = config.hpCenterX;
+    MandelbrotEngine::PanViewport(config, beforePanX, config.hpCenterY, 100.0, -50.0);
+    const double panDeltaX = (config.hpCenterX - beforePanX).ToDouble();
+    ASSERT_GT(std::abs(panDeltaX), 1e-42);
+}
+
+TEST_CASE(MandelbrotEngine, RecommendMaxIterations_ScalesWithZoom)
+{
+    const int iter1 = MandelbrotEngine::RecommendMaxIterations(1.0, FractalType::Mandelbrot, 300);
+    const int iter1e6 = MandelbrotEngine::RecommendMaxIterations(1e6, FractalType::Mandelbrot, 300);
+    const int iter1e20 = MandelbrotEngine::RecommendMaxIterations(1e20, FractalType::Mandelbrot, 300);
+
+    ASSERT_GE(iter1, 300);
+    ASSERT_GT(iter1e6, iter1);
+    ASSERT_GT(iter1e20, iter1e6);
+}
+
+TEST_CASE(MandelbrotEngine, Compute_DeepZoom_AllFractals_NoPixelation)
+{
+    MandelbrotEngine engine;
+    const int w = 32;
+    const int h = 24;
+
+    // 1. Mandelbrot at zoom = 1e25 at the Misiurewicz antenna tip (-2.0, 0.0)
+    // (In 64-bit double, zoom = 1e25 collapses the entire viewport to a single constant pixel value,
+    // whereas with 1024-bit Perturbation Theory, every pixel resolves the exact 4^n escape gradient!)
+    {
+        MandelbrotConfig config;
+        config.fractalType = FractalType::Mandelbrot;
+        config.width = w;
+        config.height = h;
+        config.SetCenter(BigFloat(-2.0) + BigFloat(1e-25), BigFloat(1e-25));
+        config.zoom = 1e25;
+        config.maxIterations = 1000;
+        config.smooth = true;
+
+        std::vector<float> iters;
+        engine.Compute(config, iters);
+
+        int distinctNeighbors = 0;
+        const int midRow = (h / 2) * w;
+        for (int px = 1; px < w; ++px)
+        {
+            if (iters[midRow + px] != iters[midRow + px - 1])
+            {
+                distinctNeighbors++;
+            }
+        }
+        ASSERT_GT(distinctNeighbors, w / 2);
+    }
+
+    // 2. Burning Ship at zoom = 1e25 at the Misiurewicz antenna tip (-2.0, 0.0)
+    {
+        MandelbrotConfig config;
+        config.fractalType = FractalType::BurningShip;
+        config.width = w;
+        config.height = h;
+        config.SetCenter(BigFloat(-2.0) + BigFloat(1e-25), BigFloat(1e-25));
+        config.zoom = 1e25;
+        config.maxIterations = 1000;
+        config.smooth = true;
+
+        std::vector<float> iters;
+        engine.Compute(config, iters);
+
+        int distinctNeighbors = 0;
+        const int midRow = (h / 2) * w;
+        for (int px = 1; px < w; ++px)
+        {
+            if (iters[midRow + px] != iters[midRow + px - 1])
+            {
+                distinctNeighbors++;
+            }
+        }
+        ASSERT_GT(distinctNeighbors, w / 2);
+    }
+
+    // 3. Tricorn at zoom = 1e25 at the Misiurewicz antenna tip (-2.0, 0.0)
+    {
+        MandelbrotConfig config;
+        config.fractalType = FractalType::Tricorn;
+        config.width = w;
+        config.height = h;
+        config.SetCenter(BigFloat(-2.0) + BigFloat(1e-25), BigFloat(1e-25));
+        config.zoom = 1e25;
+        config.maxIterations = 1000;
+        config.smooth = true;
+
+        std::vector<float> iters;
+        engine.Compute(config, iters);
+
+        int distinctNeighbors = 0;
+        const int midRow = (h / 2) * w;
+        for (int px = 1; px < w; ++px)
+        {
+            if (iters[midRow + px] != iters[midRow + px - 1])
+            {
+                distinctNeighbors++;
+            }
+        }
+        ASSERT_GT(distinctNeighbors, w / 2);
+    }
+
+    // 4. Newton's Fractal at zoom = 1e25 right at the Origin Singularity (0, 0) and at (-0.75, 0.0)
+    {
+        MandelbrotConfig config;
+        config.fractalType = FractalType::Newton;
+        config.width = w;
+        config.height = h;
+        config.SetCenter(0.0, 0.0);
+        config.zoom = 1e25;
+        config.maxIterations = 500;
+        config.smooth = true;
+
+        std::vector<float> iters;
+        engine.Compute(config, iters);
+
+        // At (0, 0) all 3 roots meet in a rosette at EVERY scale down to 1e-300!
+        bool seenRoot[3] = { false, false, false };
+        for (float v : iters)
+        {
+            if (v >= 0.0f)
+            {
+                int r = static_cast<int>(v / 1000000.0f);
+                if (r >= 0 && r < 3) seenRoot[r] = true;
+            }
+        }
+        ASSERT_TRUE(seenRoot[0]);
+        ASSERT_TRUE(seenRoot[1]);
+        ASSERT_TRUE(seenRoot[2]);
+    }
+}

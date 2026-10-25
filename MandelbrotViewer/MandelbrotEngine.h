@@ -3,6 +3,7 @@
 #include <string>
 #include <atomic>
 #include <cstdint>
+#include "HighPrecision.h"
 
 namespace Mandelbrot
 {
@@ -22,11 +23,29 @@ namespace Mandelbrot
         FractalType fractalType{ FractalType::Mandelbrot };
         double centerX{ -0.75 };
         double centerY{ 0.0 };
+        BigFloat hpCenterX{ -0.75 };
+        BigFloat hpCenterY{ 0.0 };
         double zoom{ 1.0 }; // Viewport span = 3.0 / zoom
         int width{ 1024 };
         int height{ 768 };
         int maxIterations{ 500 };
         bool smooth{ true };
+
+        void SetCenter(double x, double y)
+        {
+            centerX = x;
+            centerY = y;
+            hpCenterX = BigFloat(x);
+            hpCenterY = BigFloat(y);
+        }
+
+        void SetCenter(const BigFloat& x, const BigFloat& y)
+        {
+            hpCenterX = x;
+            hpCenterY = y;
+            centerX = x.ToDouble();
+            centerY = y.ToDouble();
+        }
     };
 
     struct BookmarkLocation
@@ -44,6 +63,10 @@ namespace Mandelbrot
     class MandelbrotEngine
     {
     public:
+        static constexpr double DeepZoomThreshold = 1e11;
+        static constexpr double MaxZoom = 1e300;
+        static constexpr double MinZoom = 0.15;
+
         MandelbrotEngine() = default;
 
         // Computes fractional iteration values into outIterations (size: width * height)
@@ -52,6 +75,35 @@ namespace Mandelbrot
             const MandelbrotConfig& config,
             std::vector<float>& outIterations,
             const std::atomic<bool>* cancelToken = nullptr);
+
+        // High-precision Perturbation Theory & Dynamic Rebasing solver for deep zooms
+        double ComputeDeepZoom(
+            const MandelbrotConfig& config,
+            const BigFloat& centerX,
+            const BigFloat& centerY,
+            std::vector<float>& outIterations,
+            const std::atomic<bool>* cancelToken = nullptr);
+
+        // High-precision cursor-centered zoom without double cancellation
+        static void ZoomViewport(
+            MandelbrotConfig& config,
+            double factor,
+            double pivotPx,
+            double pivotPy);
+
+        // High-precision viewport pan without double cancellation
+        static void PanViewport(
+            MandelbrotConfig& config,
+            const BigFloat& startX,
+            const BigFloat& startY,
+            double deltaPx,
+            double deltaPy);
+
+        // Recommends an iteration budget scaled to the current magnification depth
+        static int RecommendMaxIterations(
+            double zoom,
+            FractalType type,
+            int baseIterations = 300);
 
         static void ScreenToComplex(
             double px, double py,

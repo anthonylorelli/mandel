@@ -186,15 +186,31 @@ namespace winrt::MandelbrotViewer::implementation
     void MainWindow::UpdateHud(double fractalTimeMs, double colorTimeMs)
     {
         std::wostringstream coords;
-        coords << L"Center: (" << FormatCoordinate(m_config.centerX).c_str()
-               << L", " << FormatCoordinate(m_config.centerY).c_str() << L")";
+        if (m_config.zoom >= 1e6)
+        {
+            const std::wstring xStr = m_config.hpCenterX.ToWString(16);
+            const std::wstring yStr = m_config.hpCenterY.ToWString(16);
+            coords << L"Center: (" << (xStr[0] == L'-' ? L"" : L"+") << xStr
+                   << L", " << (yStr[0] == L'-' ? L"" : L"+") << yStr << L")";
+        }
+        else
+        {
+            coords << L"Center: (" << FormatCoordinate(m_config.centerX).c_str()
+                   << L", " << FormatCoordinate(m_config.centerY).c_str() << L")";
+        }
         HudCoordsText().Text(coords.str());
 
-        HudZoomText().Text(L"Zoom: " + FormatZoom(m_config.zoom));
+        std::wstring zoomLabel = L"Zoom: " + std::wstring(FormatZoom(m_config.zoom).c_str());
+        if (m_config.zoom >= Mandelbrot::MandelbrotEngine::DeepZoomThreshold)
+        {
+            zoomLabel += L" [1024-bit Perturbation]";
+        }
+        HudZoomText().Text(zoomLabel);
 
         std::wostringstream timing;
         timing << L"Fractal: " << std::fixed << std::setprecision(1) << fractalTimeMs
-               << L" ms | Color: " << std::fixed << std::setprecision(1) << colorTimeMs << L" ms";
+               << L" ms | Color: " << std::fixed << std::setprecision(1) << colorTimeMs
+               << L" ms | Iter: " << m_config.maxIterations;
         HudTimingText().Text(timing.str());
     }
 
@@ -218,18 +234,19 @@ namespace winrt::MandelbrotViewer::implementation
     {
         if (m_currentPixelWidth <= 0 || m_currentPixelHeight <= 0) return;
 
-        double cursorCx = 0.0, cursorCy = 0.0;
-        Mandelbrot::MandelbrotEngine::ScreenToComplex(
-            pivotX, pivotY,
-            m_currentPixelWidth, m_currentPixelHeight,
-            m_config.centerX, m_config.centerY, m_config.zoom,
-            cursorCx, cursorCy);
+        Mandelbrot::MandelbrotEngine::ZoomViewport(m_config, factor, pivotX, pivotY);
 
-        m_config.zoom *= factor;
+        if (m_autoScaleIterations)
+        {
+            const int recommended = Mandelbrot::MandelbrotEngine::RecommendMaxIterations(
+                m_config.zoom, m_config.fractalType, m_baseIterations);
+            m_config.maxIterations = recommended;
 
-        // Keep the complex coordinate at cursor fixed
-        m_config.centerX = cursorCx + (m_config.centerX - cursorCx) / factor;
-        m_config.centerY = cursorCy + (m_config.centerY - cursorCy) / factor;
+            m_suppressEvents = true;
+            IterationsSlider().Value(recommended);
+            IterationsValueText().Text(winrt::to_hstring(recommended));
+            m_suppressEvents = false;
+        }
 
         RenderFractal();
     }
@@ -238,8 +255,8 @@ namespace winrt::MandelbrotViewer::implementation
     {
         m_isDragging = true;
         m_dragStartPoint = e.GetCurrentPoint(FractalImage()).Position();
-        m_dragStartCenterX = m_config.centerX;
-        m_dragStartCenterY = m_config.centerY;
+        m_dragStartHpCenterX = m_config.hpCenterX;
+        m_dragStartHpCenterY = m_config.hpCenterY;
         FractalImage().CapturePointer(e.Pointer());
     }
 
@@ -251,12 +268,8 @@ namespace winrt::MandelbrotViewer::implementation
         const double dx = currentPoint.X - m_dragStartPoint.X;
         const double dy = currentPoint.Y - m_dragStartPoint.Y;
 
-        const double aspect = static_cast<double>(m_currentPixelHeight) / static_cast<double>(m_currentPixelWidth);
-        const double spanX = 3.0 / m_config.zoom;
-        const double spanY = spanX * aspect;
-
-        m_config.centerX = m_dragStartCenterX - (dx / static_cast<double>(m_currentPixelWidth)) * spanX;
-        m_config.centerY = m_dragStartCenterY + (dy / static_cast<double>(m_currentPixelHeight)) * spanY;
+        Mandelbrot::MandelbrotEngine::PanViewport(
+            m_config, m_dragStartHpCenterX, m_dragStartHpCenterY, dx, dy);
 
         RenderFractal();
     }
@@ -300,9 +313,9 @@ namespace winrt::MandelbrotViewer::implementation
         if (!bookmarks.empty())
         {
             const auto& bm = bookmarks[0];
-            m_config.centerX = bm.centerX;
-            m_config.centerY = bm.centerY;
+            m_config.SetCenter(bm.centerX, bm.centerY);
             m_config.zoom = bm.zoom;
+            m_baseIterations = bm.maxIterations;
             m_config.maxIterations = bm.maxIterations;
 
             m_suppressEvents = true;
@@ -313,9 +326,9 @@ namespace winrt::MandelbrotViewer::implementation
         }
         else
         {
-            m_config.centerX = -0.75;
-            m_config.centerY = 0.0;
+            m_config.SetCenter(-0.75, 0.0);
             m_config.zoom = 1.0;
+            m_baseIterations = 500;
             m_config.maxIterations = 500;
 
             m_suppressEvents = true;
@@ -436,9 +449,9 @@ namespace winrt::MandelbrotViewer::implementation
             if (!bookmarks.empty())
             {
                 const auto& bm = bookmarks[0];
-                m_config.centerX = bm.centerX;
-                m_config.centerY = bm.centerY;
+                m_config.SetCenter(bm.centerX, bm.centerY);
                 m_config.zoom = bm.zoom;
+                m_baseIterations = bm.maxIterations;
                 m_config.maxIterations = bm.maxIterations;
 
                 m_suppressEvents = true;
@@ -460,9 +473,9 @@ namespace winrt::MandelbrotViewer::implementation
         if (index >= 0 && index < static_cast<int>(bookmarks.size()))
         {
             const auto& bm = bookmarks[index];
-            m_config.centerX = bm.centerX;
-            m_config.centerY = bm.centerY;
+            m_config.SetCenter(bm.centerX, bm.centerY);
             m_config.zoom = bm.zoom;
+            m_baseIterations = bm.maxIterations;
             m_config.maxIterations = bm.maxIterations;
 
             m_suppressEvents = true;
@@ -480,8 +493,27 @@ namespace winrt::MandelbrotViewer::implementation
         IterationsValueText().Text(winrt::to_hstring(iter));
 
         if (m_suppressEvents) return;
+        m_baseIterations = iter;
         m_config.maxIterations = iter;
         RenderFractal();
+    }
+
+    void MainWindow::OnAutoIterationsToggleChanged(IInspectable const&, RoutedEventArgs const&)
+    {
+        if (m_suppressEvents) return;
+        m_autoScaleIterations = AutoIterationsToggle().IsOn();
+        if (m_autoScaleIterations)
+        {
+            const int recommended = Mandelbrot::MandelbrotEngine::RecommendMaxIterations(
+                m_config.zoom, m_config.fractalType, m_baseIterations);
+            m_config.maxIterations = recommended;
+
+            m_suppressEvents = true;
+            IterationsSlider().Value(recommended);
+            IterationsValueText().Text(winrt::to_hstring(recommended));
+            m_suppressEvents = false;
+            RenderFractal();
+        }
     }
 
     void MainWindow::OnSmoothToggleChanged(IInspectable const&, RoutedEventArgs const&)
@@ -727,9 +759,9 @@ namespace winrt::MandelbrotViewer::implementation
         std::wostringstream ss;
         ss << L"{\n"
            << L"  \"fractalType\": \"" << Mandelbrot::GetFractalTypeName(m_config.fractalType) << L"\",\n"
-           << L"  \"centerX\": " << std::setprecision(16) << m_config.centerX << L",\n"
-           << L"  \"centerY\": " << std::setprecision(16) << m_config.centerY << L",\n"
-           << L"  \"zoom\": " << std::setprecision(6) << m_config.zoom << L",\n"
+           << L"  \"centerX\": \"" << m_config.hpCenterX.ToWString(32) << L"\",\n"
+           << L"  \"centerY\": \"" << m_config.hpCenterY.ToWString(32) << L"\",\n"
+           << L"  \"zoom\": " << std::scientific << std::setprecision(6) << m_config.zoom << std::fixed << L",\n"
            << L"  \"maxIterations\": " << m_config.maxIterations << L",\n"
            << L"  \"smooth\": " << (m_config.smooth ? L"true" : L"false") << L",\n"
            << L"  \"frequency\": " << m_frequency << L",\n"

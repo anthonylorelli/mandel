@@ -37,6 +37,7 @@ namespace winrt::MandelbrotViewer::implementation
         void OnFractalTypeSelectionChanged(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::Controls::SelectionChangedEventArgs const& e);
         void OnBookmarkSelectionChanged(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::Controls::SelectionChangedEventArgs const& e);
         void OnIterationsSliderChanged(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::Controls::Primitives::RangeBaseValueChangedEventArgs const& e);
+        void OnAutoIterationsToggleChanged(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
         void OnSmoothToggleChanged(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
 
         // Color theme & live tuning
@@ -83,8 +84,11 @@ namespace winrt::MandelbrotViewer::implementation
 
         bool m_isDragging{ false };
         winrt::Windows::Foundation::Point m_dragStartPoint{ 0, 0 };
-        double m_dragStartCenterX{ 0.0 };
-        double m_dragStartCenterY{ 0.0 };
+        Mandelbrot::BigFloat m_dragStartHpCenterX{ -0.75 };
+        Mandelbrot::BigFloat m_dragStartHpCenterY{ 0.0 };
+
+        bool m_autoScaleIterations{ true };
+        int m_baseIterations{ 500 };
 
         bool m_isSidebarVisible{ true };
         bool m_sidebarVisibleBeforeFullScreen{ true };
