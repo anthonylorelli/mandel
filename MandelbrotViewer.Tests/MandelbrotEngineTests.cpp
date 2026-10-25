@@ -422,6 +422,13 @@ TEST_CASE(HighPrecision, BigFloat_ArithmeticAndNoCancellation)
     ASSERT_NEAR(-0.7436438870371587, parsed.ToDouble(), 1e-15);
     std::string str = parsed.ToString(20);
     ASSERT_TRUE(str.find("-0.743643887037158") == 0);
+
+    // Regression test for 64-bit limb product carry overflow when squaring values with large 32-bit limbs (> 2^31)
+    const double testVal = -0.7436438870371587;
+    const BigFloat bfVal(testVal);
+    ASSERT_NEAR(testVal * testVal, bfVal.Sqr().ToDouble(), 1e-15);
+    ASSERT_NEAR(testVal * testVal, (bfVal * bfVal).ToDouble(), 1e-15);
+    ASSERT_NEAR(testVal * testVal, bfVal.Sqr(6).ToDouble(), 1e-15);
 }
 
 TEST_CASE(MandelbrotEngine, ZoomAndPanViewport_DeepPrecision)
@@ -577,5 +584,80 @@ TEST_CASE(MandelbrotEngine, Compute_DeepZoom_AllFractals_NoPixelation)
         ASSERT_TRUE(seenRoot[0]);
         ASSERT_TRUE(seenRoot[1]);
         ASSERT_TRUE(seenRoot[2]);
+    }
+}
+
+TEST_CASE(MandelbrotEngine, PanViewport_PixelShiftConsistency_AllZoomLevels)
+{
+    MandelbrotEngine engine;
+    const int w = 32;
+    const int h = 24;
+    const int deltaPx = 4;
+    const int deltaPy = 3;
+
+    // Test panning consistency across standard double zoom levels and 1024-bit perturbation zoom levels
+    const double testZooms[] = { 100.0, 1e8, 1e12, 1e25 };
+
+    for (double zoom : testZooms)
+    {
+        MandelbrotConfig beforeCfg;
+        beforeCfg.fractalType = FractalType::Mandelbrot;
+        beforeCfg.width = w;
+        beforeCfg.height = h;
+        beforeCfg.SetCenter(
+            BigFloat("-0.743643887037158704752191506114774"),
+            BigFloat("0.131825904205311970493132056385139"));
+        beforeCfg.zoom = zoom;
+        beforeCfg.maxIterations = 600;
+        beforeCfg.smooth = true;
+
+        std::vector<float> itersBefore;
+        engine.Compute(beforeCfg, itersBefore);
+
+        MandelbrotConfig afterCfg = beforeCfg;
+        MandelbrotEngine::PanViewport(
+            afterCfg,
+            beforeCfg.hpCenterX,
+            beforeCfg.hpCenterY,
+            static_cast<double>(deltaPx),
+            static_cast<double>(deltaPy));
+
+        std::vector<float> itersAfter;
+        engine.Compute(afterCfg, itersAfter);
+
+        // Dragging right by +deltaPx and down by +deltaPy shifts the rendered image by (+deltaPx, +deltaPy)
+        for (int py = 0; py < h - deltaPy; ++py)
+        {
+            for (int px = 0; px < w - deltaPx; ++px)
+            {
+                const float vBefore = itersBefore[static_cast<size_t>(py) * w + px];
+                const float vAfter = itersAfter[static_cast<size_t>(py + deltaPy) * w + (px + deltaPx)];
+                ASSERT_NEAR(vBefore, vAfter, 1e-2f);
+            }
+        }
+    }
+}
+
+TEST_CASE(MandelbrotEngine, DeepZoomThreshold_Continuity)
+{
+    MandelbrotEngine engine;
+    MandelbrotConfig config;
+    config.fractalType = FractalType::Mandelbrot;
+    config.width = 24;
+    config.height = 18;
+    config.SetCenter(-0.7436438870371587, 0.1318259042053119);
+    config.zoom = 1e4;
+    config.maxIterations = 250;
+    config.smooth = true;
+
+    std::vector<float> stdIters;
+    engine.Compute(config, stdIters);
+
+    std::vector<float> deepIters;
+    engine.ComputeDeepZoom(config, config.hpCenterX, config.hpCenterY, deepIters);
+
+    for (size_t i = 0; i < stdIters.size(); ++i)
+    {
+        ASSERT_NEAR(stdIters[i], deepIters[i], 1e-2f);
     }
 }
