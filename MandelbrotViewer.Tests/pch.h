@@ -1,0 +1,20 @@
+#pragma once
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <omp.h>
+#include <vector>
+#include <string>
+#include <cmath>
+#include <chrono>
+#include <algorithm>
+#include <numbers>
+#include <cstdint>
+#include <atomic>
+#include <iostream>
+#include <sstream>
+#include <memory>
+#include <functional>
+#include <iomanip>
+#include <stdexcept>
