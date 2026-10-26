@@ -199,7 +199,7 @@ namespace Mandelbrot
         }
 
         // Escape-time fractals require progressively higher iteration budgets as filaments thin out at depth
-        const int scaled = static_cast<int>(std::round(300.0 + 180.0 * log10Zoom + 22.0 * log10Zoom * log10Zoom));
+        const int scaled = static_cast<int>(std::round(300.0 + 100.0 * log10Zoom + 8.0 * log10Zoom * log10Zoom));
         return std::clamp(std::max(baseIterations, scaled), 50, 50000);
     }
 
@@ -271,10 +271,10 @@ namespace Mandelbrot
         const double spanX = 3.0 / (config.zoom > 1e-12 ? config.zoom : 1e-12);
         const double spanY = spanX * aspect;
 
-        const double minX = config.centerX - (spanX * 0.5);
-        const double maxY = config.centerY + (spanY * 0.5);
         const double dx = spanX / static_cast<double>(width);
         const double dy = spanY / static_cast<double>(height);
+        const double halfW = static_cast<double>(width) * 0.5;
+        const double halfH = static_cast<double>(height) * 0.5;
 
         constexpr double bailoutRadius2 = 16.0; // R=4, R^2=16 for smooth coloring
         const double invLn2 = 1.0 / std::log(2.0);
@@ -287,12 +287,12 @@ namespace Mandelbrot
                 continue;
             }
 
-            const double cy = maxY - (py + 0.5) * dy;
+            const double cy = config.centerY + (halfH - (static_cast<double>(py) + 0.5)) * dy;
             float* rowPtr = &outIterations[static_cast<size_t>(py) * width];
 
             for (int px = 0; px < width; ++px)
             {
-                const double cx = minX + (px + 0.5) * dx;
+                const double cx = config.centerX + ((static_cast<double>(px) + 0.5) - halfW) * dx;
 
                 // Fast check for points in cardioid or main bulb (Mandelbrot only)
                 if (type == FractalType::Mandelbrot && IsInMainCardioidOrBulb(cx, cy))
@@ -491,6 +491,13 @@ namespace Mandelbrot
         const double stepY = spanY / static_cast<double>(height);
         const double invLn2 = 1.0 / std::log(2.0);
 
+        // Adaptive precision limb count: only multiply the limbs required for the current zoom depth
+        // plus ~96 guard bits (3 limbs), clamped to [4, BigFloat::N].
+        const int activeLimbs = std::clamp(
+            static_cast<int>(std::ceil((std::log2(clampedZoom) + 96.0) / 32.0)),
+            4,
+            BigFloat::N);
+
         if (type == FractalType::Newton)
         {
             // Reference pixel for Newton's Fractal: avoid exact origin singularity if center is (0, 0)
@@ -530,20 +537,20 @@ namespace Mandelbrot
 
                 if (m == maxIter) break;
 
-                const BigFloat Zx2 = Zx.Sqr();
-                const BigFloat Zy2 = Zy.Sqr();
+                const BigFloat Zx2 = Zx.Sqr(activeLimbs);
+                const BigFloat Zy2 = Zy.Sqr(activeLimbs);
                 const BigFloat R2 = Zx2 + Zy2;
                 if (R2.IsZero()) break;
 
-                const BigFloat R4 = R2.Sqr();
+                const BigFloat R4 = R2.Sqr(activeLimbs);
                 if (R4.IsZero()) break;
                 const BigFloat invR4 = R4.Reciprocal();
 
-                const BigFloat Zxy = Zx * Zy;
+                const BigFloat Zxy = Zx.Mul(Zy, activeLimbs);
                 const BigFloat twoZxy = Zxy + Zxy;
 
-                const BigFloat nextZx = Zx * twoThirds + (Zx2 - Zy2) * invR4 * oneThird;
-                const BigFloat nextZy = Zy * twoThirds - twoZxy * invR4 * oneThird;
+                const BigFloat nextZx = Zx.Mul(twoThirds, activeLimbs) + (Zx2 - Zy2).Mul(invR4, activeLimbs).Mul(oneThird, activeLimbs);
+                const BigFloat nextZy = Zy.Mul(twoThirds, activeLimbs) - twoZxy.Mul(invR4, activeLimbs).Mul(oneThird, activeLimbs);
                 Zx = nextZx;
                 Zy = nextZy;
             }
@@ -737,55 +744,46 @@ namespace Mandelbrot
 
         // Escape-time fractals (Mandelbrot, Burning Ship, Tricorn):
         // High-precision reference orbit + hardware double perturbation with Zhuoran's dynamic rebasing
-        // and multi-pass reference orbit fallback if the initial reference orbit escapes early.
+        // and fast sample-grid reference search when the center pixel escapes early.
         constexpr double bailoutRadius2 = 16.0;
-        constexpr double refBailoutRadius2 = 1e6; // Continue reference orbit slightly past pixel bailout
-        constexpr int maxPasses = 4;
 
-        std::vector<double> refX(static_cast<size_t>(maxIter) + 1);
-        std::vector<double> refY(static_cast<size_t>(maxIter) + 1);
-        std::vector<uint8_t> needsRetry(totalPixels, 1);
-
-        int refPx = width / 2;
-        int refPy = height / 2;
-
-        for (int pass = 0; pass < maxPasses; ++pass)
+        struct ComplexOrbitPt
         {
-            if (cancelToken && cancelToken->load(std::memory_order_relaxed))
-            {
-                return 0.0;
-            }
+            double x;
+            double y;
+        };
 
-            const double refOffsetX = ((static_cast<double>(refPx) + 0.5) / static_cast<double>(width) - 0.5) * spanX;
-            const double refOffsetY = (0.5 - (static_cast<double>(refPy) + 0.5) / static_cast<double>(height)) * spanY;
+        auto computeRefOrbit = [&](int candidatePx, int candidatePy, std::vector<ComplexOrbitPt>& outOrbit) -> int
+        {
+            const double refOffsetX = ((static_cast<double>(candidatePx) + 0.5) / static_cast<double>(width) - 0.5) * spanX;
+            const double refOffsetY = (0.5 - (static_cast<double>(candidatePy) + 0.5) / static_cast<double>(height)) * spanY;
             const BigFloat cRefX = centerX + BigFloat(refOffsetX);
             const BigFloat cRefY = centerY + BigFloat(refOffsetY);
 
             BigFloat Zx(0.0);
             BigFloat Zy(0.0);
-            int refLen = 0;
+            int len = 0;
 
             for (int m = 0; m <= maxIter; ++m)
             {
                 if (cancelToken && cancelToken->load(std::memory_order_relaxed))
                 {
-                    return 0.0;
+                    return 0;
                 }
 
                 const double rx = Zx.ToDouble();
                 const double ry = Zy.ToDouble();
-                refX[m] = rx;
-                refY[m] = ry;
-                refLen = m;
+                outOrbit[m] = { rx, ry };
+                len = m;
 
-                if (rx * rx + ry * ry > refBailoutRadius2 || m == maxIter)
+                if (rx * rx + ry * ry > bailoutRadius2 || m == maxIter)
                 {
                     break;
                 }
 
-                const BigFloat Zx2 = Zx.Sqr();
-                const BigFloat Zy2 = Zy.Sqr();
-                const BigFloat Zxy = Zx * Zy;
+                const BigFloat Zx2 = Zx.Sqr(activeLimbs);
+                const BigFloat Zy2 = Zy.Sqr(activeLimbs);
+                const BigFloat Zxy = Zx.Mul(Zy, activeLimbs);
                 const BigFloat twoZxy = Zxy + Zxy;
 
                 if (type == FractalType::Mandelbrot)
@@ -804,39 +802,167 @@ namespace Mandelbrot
                     Zx = Zx2 - Zy2 + cRefX;
                 }
             }
+            return len;
+        };
 
-            const bool allowRetry = (pass < maxPasses - 1) && (refLen < maxIter);
-            std::atomic<bool> anyRetryNeeded{ false };
+        std::vector<ComplexOrbitPt> bestOrbit(static_cast<size_t>(maxIter) + 1);
+        int refPx = width / 2;
+        int refPy = height / 2;
+        int bestRefLen = computeRefOrbit(refPx, refPy, bestOrbit);
 
-            #pragma omp parallel for schedule(dynamic, 16)
-            for (int py = 0; py < height; ++py)
+        if (cancelToken && cancelToken->load(std::memory_order_relaxed))
+        {
+            return 0.0;
+        }
+
+        // If the center pixel escaped before maxIter, probe an 8x8 sample grid across the viewport
+        // (up to 3 upgrades) to find a reference pixel near a deeper minibrot/filament (minimum |z| at m == bestRefLen).
+        if (bestRefLen < maxIter && width >= 4 && height >= 4)
+        {
+            std::vector<ComplexOrbitPt> candidateOrbit(static_cast<size_t>(maxIter) + 1);
+            constexpr int gridN = 8;
+
+            for (int attempt = 0; attempt < 3 && bestRefLen < maxIter; ++attempt)
             {
-                if (cancelToken && cancelToken->load(std::memory_order_relaxed))
+                int nextCandPx = -1;
+                int nextCandPy = -1;
+                double minMod2AtRefEnd = 1e300;
+                const ComplexOrbitPt* orbitPtr = bestOrbit.data();
+
+                for (int gy = 0; gy < gridN; ++gy)
                 {
-                    continue;
+                    const int spy = ((2 * gy + 1) * height) / (2 * gridN);
+                    const double dcy = static_cast<double>(refPy - spy) * stepY;
+
+                    for (int gx = 0; gx < gridN; ++gx)
+                    {
+                        const int spx = ((2 * gx + 1) * width) / (2 * gridN);
+                        if (spx == refPx && spy == refPy) continue;
+
+                        const double dcx = static_cast<double>(spx - refPx) * stepX;
+                        double dx = 0.0;
+                        double dy = 0.0;
+                        int m = 0;
+                        int iter = 0;
+
+                        while (iter < maxIter)
+                        {
+                            const double rx = orbitPtr[m].x;
+                            const double ry = orbitPtr[m].y;
+                            const double zx = rx + dx;
+                            const double zy = ry + dy;
+                            const double mod2 = zx * zx + zy * zy;
+
+                            if (mod2 > bailoutRadius2)
+                            {
+                                break;
+                            }
+
+                            if (m == bestRefLen)
+                            {
+                                if (mod2 < minMod2AtRefEnd)
+                                {
+                                    minMod2AtRefEnd = mod2;
+                                    nextCandPx = spx;
+                                    nextCandPy = spy;
+                                }
+                                break;
+                            }
+
+                            const double dz2 = dx * dx + dy * dy;
+                            if (m > 0 && mod2 < dz2)
+                            {
+                                dx = zx;
+                                dy = zy;
+                                m = 0;
+                                continue;
+                            }
+
+                            if (type == FractalType::Mandelbrot)
+                            {
+                                const double nextDx = 2.0 * (rx * dx - ry * dy) + (dx * dx - dy * dy) + dcx;
+                                const double nextDy = 2.0 * (rx * dy + ry * dx + dx * dy) + dcy;
+                                dx = nextDx;
+                                dy = nextDy;
+                            }
+                            else if (type == FractalType::BurningShip)
+                            {
+                                const double daX = DiffAbs(rx, dx);
+                                const double daY = DiffAbs(ry, dy);
+                                const double nextDx = 2.0 * (rx * dx - ry * dy) + (dx * dx - dy * dy) + dcx;
+                                const double nextDy = -2.0 * (std::abs(rx) * daY + std::abs(ry) * daX + daX * daY) + dcy;
+                                dx = nextDx;
+                                dy = nextDy;
+                            }
+                            else
+                            {
+                                const double nextDx = 2.0 * (rx * dx - ry * dy) + (dx * dx - dy * dy) + dcx;
+                                const double nextDy = -2.0 * (rx * dy + ry * dx + dx * dy) + dcy;
+                                dx = nextDx;
+                                dy = nextDy;
+                            }
+
+                            m++;
+                            iter++;
+                        }
+                    }
                 }
 
-                const double dcy = static_cast<double>(refPy - py) * stepY;
-                float* rowPtr = &outIterations[static_cast<size_t>(py) * width];
-                uint8_t* retryRow = &needsRetry[static_cast<size_t>(py) * width];
-
-                for (int px = 0; px < width; ++px)
+                if (nextCandPx < 0)
                 {
-                    if (!retryRow[px]) continue;
+                    break;
+                }
 
-                    const double dcx = static_cast<double>(px - refPx) * stepX;
-                    double dx = 0.0;
-                    double dy = 0.0;
-                    int m = 0;
-                    int iter = 0;
-                    double escapedMod2 = 0.0;
-                    bool hasRebased = false;
-                    bool deferredToNextPass = false;
+                const int candLen = computeRefOrbit(nextCandPx, nextCandPy, candidateOrbit);
+                if (cancelToken && cancelToken->load(std::memory_order_relaxed))
+                {
+                    return 0.0;
+                }
 
+                if (candLen > bestRefLen)
+                {
+                    bestOrbit.swap(candidateOrbit);
+                    bestRefLen = candLen;
+                    refPx = nextCandPx;
+                    refPy = nextCandPy;
+                }
+                else
+                {
+                    break;
+                }
+            }
+        }
+
+        const int refLen = bestRefLen;
+        const ComplexOrbitPt* orbitPtr = bestOrbit.data();
+
+        #pragma omp parallel for schedule(dynamic, 16)
+        for (int py = 0; py < height; ++py)
+        {
+            if (cancelToken && cancelToken->load(std::memory_order_relaxed))
+            {
+                continue;
+            }
+
+            const double dcy = static_cast<double>(refPy - py) * stepY;
+            float* rowPtr = &outIterations[static_cast<size_t>(py) * width];
+
+            for (int px = 0; px < width; ++px)
+            {
+                const double dcx = static_cast<double>(px - refPx) * stepX;
+                double dx = 0.0;
+                double dy = 0.0;
+                int m = 0;
+                int iter = 0;
+                double escapedMod2 = 0.0;
+
+                switch (type)
+                {
+                case FractalType::Mandelbrot:
                     while (iter < maxIter)
                     {
-                        const double rx = refX[m];
-                        const double ry = refY[m];
+                        double rx = orbitPtr[m].x;
+                        double ry = orbitPtr[m].y;
                         const double zx = rx + dx;
                         const double zy = ry + dy;
                         const double mod2 = zx * zx + zy * zy;
@@ -848,127 +974,114 @@ namespace Mandelbrot
                         }
 
                         const double dz2 = dx * dx + dy * dy;
-
-                        // If the primary reference orbit escaped early while this pixel is still unescaped
-                        // and has not separated from the reference orbit yet, defer to a deeper reference pass
-                        if (m == refLen)
-                        {
-                            if (allowRetry && !hasRebased && dz2 < 1e-6)
-                            {
-                                deferredToNextPass = true;
-                                break;
-                            }
-                            dx = zx;
-                            dy = zy;
-                            m = 0;
-                            hasRebased = true;
-                            continue;
-                        }
-
-                        // Zhuoran's dynamic rebasing: when |z| < |dz|, rebase perturbation to z_0 = 0
-                        if (m > 0 && mod2 < dz2)
+                        if (m == refLen || (m > 0 && mod2 < dz2))
                         {
                             dx = zx;
                             dy = zy;
                             m = 0;
-                            hasRebased = true;
-                            continue;
+                            rx = 0.0;
+                            ry = 0.0;
                         }
 
-                        double nextDx = 0.0;
-                        double nextDy = 0.0;
-
-                        if (type == FractalType::Mandelbrot)
-                        {
-                            nextDx = 2.0 * (rx * dx - ry * dy) + (dx * dx - dy * dy) + dcx;
-                            nextDy = 2.0 * (rx * dy + ry * dx + dx * dy) + dcy;
-                        }
-                        else if (type == FractalType::BurningShip)
-                        {
-                            const double daX = DiffAbs(rx, dx);
-                            const double daY = DiffAbs(ry, dy);
-                            nextDx = 2.0 * (rx * dx - ry * dy) + (dx * dx - dy * dy) + dcx;
-                            nextDy = -2.0 * (std::abs(rx) * daY + std::abs(ry) * daX + daX * daY) + dcy;
-                        }
-                        else // FractalType::Tricorn
-                        {
-                            nextDx = 2.0 * (rx * dx - ry * dy) + (dx * dx - dy * dy) + dcx;
-                            nextDy = -2.0 * (rx * dy + ry * dx + dx * dy) + dcy;
-                        }
-
+                        const double nextDx = 2.0 * (rx * dx - ry * dy) + (dx * dx - dy * dy) + dcx;
+                        const double nextDy = 2.0 * (rx * dy + ry * dx + dx * dy) + dcy;
                         dx = nextDx;
                         dy = nextDy;
                         m++;
                         iter++;
                     }
+                    break;
 
-                    if (deferredToNextPass)
+                case FractalType::BurningShip:
+                    while (iter < maxIter)
                     {
-                        retryRow[px] = 1;
-                        anyRetryNeeded.store(true, std::memory_order_relaxed);
-                        continue;
+                        double rx = orbitPtr[m].x;
+                        double ry = orbitPtr[m].y;
+                        const double zx = rx + dx;
+                        const double zy = ry + dy;
+                        const double mod2 = zx * zx + zy * zy;
+
+                        if (mod2 > bailoutRadius2)
+                        {
+                            escapedMod2 = mod2;
+                            break;
+                        }
+
+                        const double dz2 = dx * dx + dy * dy;
+                        if (m == refLen || (m > 0 && mod2 < dz2))
+                        {
+                            dx = zx;
+                            dy = zy;
+                            m = 0;
+                            rx = 0.0;
+                            ry = 0.0;
+                        }
+
+                        const double daX = DiffAbs(rx, dx);
+                        const double daY = DiffAbs(ry, dy);
+                        const double nextDx = 2.0 * (rx * dx - ry * dy) + (dx * dx - dy * dy) + dcx;
+                        const double nextDy = -2.0 * (std::abs(rx) * daY + std::abs(ry) * daX + daX * daY) + dcy;
+                        dx = nextDx;
+                        dy = nextDy;
+                        m++;
+                        iter++;
                     }
+                    break;
 
-                    retryRow[px] = 0;
-
-                    if (iter >= maxIter)
+                case FractalType::Tricorn:
+                default:
+                    while (iter < maxIter)
                     {
-                        rowPtr[px] = -1.0f;
+                        double rx = orbitPtr[m].x;
+                        double ry = orbitPtr[m].y;
+                        const double zx = rx + dx;
+                        const double zy = ry + dy;
+                        const double mod2 = zx * zx + zy * zy;
+
+                        if (mod2 > bailoutRadius2)
+                        {
+                            escapedMod2 = mod2;
+                            break;
+                        }
+
+                        const double dz2 = dx * dx + dy * dy;
+                        if (m == refLen || (m > 0 && mod2 < dz2))
+                        {
+                            dx = zx;
+                            dy = zy;
+                            m = 0;
+                            rx = 0.0;
+                            ry = 0.0;
+                        }
+
+                        const double nextDx = 2.0 * (rx * dx - ry * dy) + (dx * dx - dy * dy) + dcx;
+                        const double nextDy = -2.0 * (rx * dy + ry * dx + dx * dy) + dcy;
+                        dx = nextDx;
+                        dy = nextDy;
+                        m++;
+                        iter++;
+                    }
+                    break;
+                }
+
+                if (iter >= maxIter)
+                {
+                    rowPtr[px] = -1.0f;
+                }
+                else
+                {
+                    if (smooth)
+                    {
+                        const double logZn = std::log(escapedMod2) * 0.5;
+                        const double nu = iter + 1.0 - std::log(logZn) * invLn2;
+                        rowPtr[px] = static_cast<float>(nu > 0.0 ? nu : 0.0);
                     }
                     else
                     {
-                        if (smooth)
-                        {
-                            const double logZn = std::log(escapedMod2) * 0.5;
-                            const double nu = iter + 1.0 - std::log(logZn) * invLn2;
-                            rowPtr[px] = static_cast<float>(nu > 0.0 ? nu : 0.0);
-                        }
-                        else
-                        {
-                            rowPtr[px] = static_cast<float>(iter);
-                        }
+                        rowPtr[px] = static_cast<float>(iter);
                     }
                 }
             }
-
-            if (!allowRetry || !anyRetryNeeded.load(std::memory_order_relaxed))
-            {
-                break;
-            }
-
-            // Select the pixel closest to the viewport center among those needing a deeper reference orbit
-            int bestPx = -1;
-            int bestPy = -1;
-            int64_t bestDistSq = INT64_MAX;
-            const int centerPx = width / 2;
-            const int centerPy = height / 2;
-
-            for (int py = 0; py < height; ++py)
-            {
-                const uint8_t* retryRow = &needsRetry[static_cast<size_t>(py) * width];
-                const int64_t dyCenter = static_cast<int64_t>(py - centerPy);
-                for (int px = 0; px < width; ++px)
-                {
-                    if (retryRow[px])
-                    {
-                        const int64_t dxCenter = static_cast<int64_t>(px - centerPx);
-                        const int64_t d2 = dxCenter * dxCenter + dyCenter * dyCenter;
-                        if (d2 < bestDistSq)
-                        {
-                            bestDistSq = d2;
-                            bestPx = px;
-                            bestPy = py;
-                        }
-                    }
-                }
-            }
-
-            if (bestPx < 0)
-            {
-                break;
-            }
-            refPx = bestPx;
-            refPy = bestPy;
         }
 
         const auto endTime = std::chrono::high_resolution_clock::now();

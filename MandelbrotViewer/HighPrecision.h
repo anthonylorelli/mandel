@@ -340,19 +340,24 @@ namespace Mandelbrot
             return *this;
         }
 
-        BigFloat operator*(const BigFloat& rhs) const
+        BigFloat Mul(const BigFloat& rhs, int activeLimbs = N) const
         {
             if (isZero || rhs.isZero) return BigFloat();
 
+            const int limit = std::clamp(activeLimbs, 1, N);
             uint64_t prod[N + 3]{};
-            for (int i = 0; i < N; ++i)
+            for (int i = 0; i < limit; ++i)
             {
                 uint64_t ai = limbs[i];
                 if (ai == 0) continue;
-                int maxJ = std::min(N - 1, N + 1 - i);
+                int maxJ = std::min(limit - 1, N + 1 - i);
                 for (int j = 0; j <= maxJ; ++j)
                 {
-                    prod[i + j + 1] += ai * static_cast<uint64_t>(rhs.limbs[j]);
+                    uint64_t bj = rhs.limbs[j];
+                    if (bj == 0) continue;
+                    uint64_t p = ai * bj;
+                    prod[i + j + 1] += (p & 0xFFFFFFFFULL);
+                    prod[i + j] += (p >> 32);
                 }
             }
 
@@ -387,9 +392,14 @@ namespace Mandelbrot
             return res;
         }
 
-        BigFloat Sqr() const
+        BigFloat operator*(const BigFloat& rhs) const
         {
-            return (*this) * (*this);
+            return Mul(rhs, N);
+        }
+
+        BigFloat Sqr(int activeLimbs = N) const
+        {
+            return Mul(*this, activeLimbs);
         }
 
         BigFloat MulUInt32(uint32_t m) const
