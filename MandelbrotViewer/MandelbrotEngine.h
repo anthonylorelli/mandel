@@ -99,6 +99,15 @@ namespace Mandelbrot
             double deltaPx,
             double deltaPy);
 
+        // Smoothly steps an animated zoom (in or out) toward a target complex coordinate.
+        // zoomFactor > 1.0 zooms in; zoomFactor < 1.0 zooms out.
+        // Returns true if the zoom step was applied, or false if zoom reached [MinZoom, MaxZoom] bounds.
+        static bool StepZoomAnimation(
+            MandelbrotConfig& config,
+            const BigFloat& targetX,
+            const BigFloat& targetY,
+            double zoomFactor);
+
         // Recommends an iteration budget scaled to the current magnification depth
         static int RecommendMaxIterations(
             double zoom,

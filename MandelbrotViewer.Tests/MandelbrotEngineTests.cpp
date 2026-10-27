@@ -661,3 +661,69 @@ TEST_CASE(MandelbrotEngine, DeepZoomThreshold_Continuity)
         ASSERT_NEAR(stdIters[i], deepIters[i], 1e-2f);
     }
 }
+
+TEST_CASE(HighPrecision, BigFloat_TryParse_StringsAndScientific)
+{
+    BigFloat out;
+    ASSERT_TRUE(BigFloat::TryParse(L" -0.743643887037158704752191506114774 ", out));
+    ASSERT_NEAR(-0.7436438870371587, out.ToDouble(), 1e-15);
+
+    ASSERT_TRUE(BigFloat::TryParse(L"+1.25e-4", out));
+    ASSERT_NEAR(1.25e-4, out.ToDouble(), 1e-18);
+
+    ASSERT_TRUE(BigFloat::TryParse("-2.5E+2", out));
+    ASSERT_NEAR(-250.0, out.ToDouble(), 1e-12);
+
+    ASSERT_FALSE(BigFloat::TryParse(L"", out));
+    ASSERT_FALSE(BigFloat::TryParse(L"   ", out));
+    ASSERT_FALSE(BigFloat::TryParse(L"not_a_number", out));
+    ASSERT_FALSE(BigFloat::TryParse(L"1.23e", out));
+}
+
+TEST_CASE(MandelbrotEngine, StepZoomAnimation_ZoomInAndOut_TargetConvergence)
+{
+    MandelbrotConfig config;
+    config.width = 800;
+    config.height = 600;
+    config.SetCenter(-0.75, 0.0);
+    config.zoom = 1.0;
+
+    const BigFloat targetX("-0.743643887037158704752191506114774");
+    const BigFloat targetY("0.131825904205311970493132056385139");
+
+    double prevDist = std::hypot((config.hpCenterX - targetX).ToDouble(), (config.hpCenterY - targetY).ToDouble());
+    ASSERT_GT(prevDist, 0.1);
+
+    // Step zoom-in animation smoothly toward (targetX, targetY)
+    for (int step = 0; step < 30; ++step)
+    {
+        const bool cont = MandelbrotEngine::StepZoomAnimation(config, targetX, targetY, 1.15);
+        ASSERT_TRUE(cont);
+        const double dist = std::hypot((config.hpCenterX - targetX).ToDouble(), (config.hpCenterY - targetY).ToDouble());
+        ASSERT_LE(dist, prevDist);
+        prevDist = dist;
+    }
+
+    // Center should now be locked onto the exact 1024-bit target coordinate
+    ASSERT_EQ(0, BigFloat::CompareMagnitude(config.hpCenterX - targetX, BigFloat(0.0)));
+    ASSERT_EQ(0, BigFloat::CompareMagnitude(config.hpCenterY - targetY, BigFloat(0.0)));
+    ASSERT_GT(config.zoom, 50.0);
+
+    // Now animate zooming out (factor < 1.0) and verify zoom decreases while staying on target
+    const double peakZoom = config.zoom;
+    for (int step = 0; step < 10; ++step)
+    {
+        const bool cont = MandelbrotEngine::StepZoomAnimation(config, targetX, targetY, 0.85);
+        ASSERT_TRUE(cont);
+    }
+    ASSERT_LT(config.zoom, peakZoom);
+    ASSERT_EQ(0, BigFloat::CompareMagnitude(config.hpCenterX - targetX, BigFloat(0.0)));
+    ASSERT_EQ(0, BigFloat::CompareMagnitude(config.hpCenterY - targetY, BigFloat(0.0)));
+
+    // Verify zoom limits return false when reached
+    config.zoom = MandelbrotEngine::MaxZoom;
+    ASSERT_FALSE(MandelbrotEngine::StepZoomAnimation(config, targetX, targetY, 1.1));
+
+    config.zoom = MandelbrotEngine::MinZoom;
+    ASSERT_FALSE(MandelbrotEngine::StepZoomAnimation(config, targetX, targetY, 0.9));
+}
