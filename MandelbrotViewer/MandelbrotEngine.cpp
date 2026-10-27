@@ -183,6 +183,63 @@ namespace Mandelbrot
         config.centerY = config.hpCenterY.ToDouble();
     }
 
+    bool MandelbrotEngine::StepZoomAnimation(
+        MandelbrotConfig& config,
+        const BigFloat& targetX,
+        const BigFloat& targetY,
+        double zoomFactor)
+    {
+        if (zoomFactor <= 0.0 || std::isnan(zoomFactor) || std::isinf(zoomFactor) || zoomFactor == 1.0)
+        {
+            return false;
+        }
+
+        const double oldZoom = std::clamp(config.zoom, MinZoom, MaxZoom);
+        if ((zoomFactor > 1.0 && oldZoom >= MaxZoom) || (zoomFactor < 1.0 && oldZoom <= MinZoom))
+        {
+            config.SetCenter(targetX, targetY);
+            return false;
+        }
+
+        const double newZoom = std::clamp(oldZoom * zoomFactor, MinZoom, MaxZoom);
+        const BigFloat dx = config.hpCenterX - targetX;
+        const BigFloat dy = config.hpCenterY - targetY;
+
+        if (dx.IsZero() && dy.IsZero())
+        {
+            config.SetCenter(targetX, targetY);
+        }
+        else
+        {
+            const double width = static_cast<double>(std::max(1, config.width));
+            const double height = static_cast<double>(std::max(1, config.height));
+            const double aspect = height / width;
+            const double spanX = 3.0 / oldZoom;
+            const double spanY = spanX * aspect;
+
+            const double absDx = std::abs(dx.ToDouble());
+            const double absDy = std::abs(dy.ToDouble());
+            const double pxDistX = (absDx / spanX) * width;
+            const double pxDistY = (absDy / spanY) * height;
+
+            // If target is outside the central viewport or already within 0.25 pixels of center, lock directly
+            if (absDx > spanX * 0.45 || absDy > spanY * 0.45 || (pxDistX < 0.25 && pxDistY < 0.25))
+            {
+                config.SetCenter(targetX, targetY);
+            }
+            else
+            {
+                const double stepRatio = (zoomFactor >= 1.0) ? (oldZoom / newZoom) : (newZoom / oldZoom);
+                const double decay = stepRatio * stepRatio * stepRatio;
+                const BigFloat bfDecay(decay);
+                config.SetCenter(targetX + dx * bfDecay, targetY + dy * bfDecay);
+            }
+        }
+
+        config.zoom = newZoom;
+        return (newZoom > MinZoom && newZoom < MaxZoom);
+    }
+
     int MandelbrotEngine::RecommendMaxIterations(
         double zoom,
         FractalType type,

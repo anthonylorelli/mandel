@@ -3,6 +3,7 @@
 #include "MainWindow.g.h"
 #include "MandelbrotEngine.h"
 #include "ColorTheme.h"
+#include <chrono>
 
 namespace winrt::MandelbrotViewer::implementation
 {
@@ -19,9 +20,18 @@ namespace winrt::MandelbrotViewer::implementation
         void OnViewportDoubleTapped(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::Input::DoubleTappedRoutedEventArgs const& e);
 
         // Overlay & HUD buttons
+        void OnOverlayZoomToggleClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
         void OnZoomInClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
         void OnZoomOutClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
         void OnResetViewClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
+
+        // Animated Zoom controls
+        void OnUseCurrentCenterClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
+        void OnZoomDirectionInClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
+        void OnZoomDirectionOutClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
+        void OnZoomSpeedSliderChanged(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::Controls::Primitives::RangeBaseValueChangedEventArgs const& e);
+        void OnStartZoomClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
+        void OnStopZoomClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
 
         // Sidebar panel visibility
         void OnCloseSidebarClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
@@ -69,6 +79,10 @@ namespace winrt::MandelbrotViewer::implementation
         void PopulateStopSelector();
         void UpdateStopControlsFromSelected();
         void ApplyZoom(double factor, double centerPivotX, double centerPivotY);
+        void SyncTargetInputsFromCenter();
+        void StartZoomAnimation();
+        void StopZoomAnimation();
+        void SetZoomDirection(bool zoomIn);
         void SetSidebarVisible(bool visible);
         void SetFullScreen(bool fullScreen);
         bool IsFullScreen();
@@ -81,6 +95,14 @@ namespace winrt::MandelbrotViewer::implementation
         winrt::Microsoft::UI::Xaml::Media::Imaging::WriteableBitmap m_bitmap{ nullptr };
         winrt::Microsoft::UI::Xaml::Media::Imaging::WriteableBitmap m_previewBitmap{ nullptr };
         winrt::Microsoft::UI::Xaml::DispatcherTimer m_animateTimer{ nullptr };
+        winrt::Microsoft::UI::Xaml::DispatcherTimer m_zoomTimer{ nullptr };
+
+        bool m_isZoomAnimating{ false };
+        bool m_zoomInDirection{ true };
+        double m_zoomSpeed{ 1.0 };
+        Mandelbrot::BigFloat m_zoomTargetX{ -0.75 };
+        Mandelbrot::BigFloat m_zoomTargetY{ 0.0 };
+        std::chrono::steady_clock::time_point m_lastZoomFrameTime{};
 
         bool m_isDragging{ false };
         winrt::Windows::Foundation::Point m_dragStartPoint{ 0, 0 };

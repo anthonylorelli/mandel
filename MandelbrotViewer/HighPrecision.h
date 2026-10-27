@@ -519,31 +519,50 @@ namespace Mandelbrot
 
         void FromString(std::string_view str)
         {
-            SetZero();
+            BigFloat parsed;
+            if (TryParse(str, parsed))
+            {
+                *this = parsed;
+            }
+            else
+            {
+                SetZero();
+            }
+        }
+
+        static bool TryParse(std::string_view str, BigFloat& out)
+        {
+            out.SetZero();
             size_t pos = 0;
-            while (pos < str.size() && (str[pos] == ' ' || str[pos] == '\t')) pos++;
-            if (pos >= str.size()) return;
+            while (pos < str.size() && (str[pos] == ' ' || str[pos] == '\t' || str[pos] == '\r' || str[pos] == '\n'))
+            {
+                pos++;
+            }
+            if (pos >= str.size()) return false;
 
             bool neg = false;
             if (str[pos] == '-') { neg = true; pos++; }
             else if (str[pos] == '+') { pos++; }
 
+            bool hasDigits = false;
             BigFloat intPart(0.0);
             while (pos < str.size() && str[pos] >= '0' && str[pos] <= '9')
             {
+                hasDigits = true;
                 uint32_t digit = static_cast<uint32_t>(str[pos] - '0');
                 intPart = intPart.MulUInt32(10) + BigFloat(static_cast<double>(digit));
                 pos++;
             }
 
             BigFloat fracPart(0.0);
+            const BigFloat tenth = BigFloat(1.0) / BigFloat(10.0);
             if (pos < str.size() && str[pos] == '.')
             {
                 pos++;
-                BigFloat tenth = BigFloat(1.0) / BigFloat(10.0);
                 BigFloat scale = tenth;
                 while (pos < str.size() && str[pos] >= '0' && str[pos] <= '9')
                 {
+                    hasDigits = true;
                     uint32_t digit = static_cast<uint32_t>(str[pos] - '0');
                     if (digit != 0)
                     {
@@ -554,8 +573,80 @@ namespace Mandelbrot
                 }
             }
 
-            *this = intPart + fracPart;
-            if (!isZero) sign = neg;
+            if (!hasDigits) return false;
+
+            int exp10 = 0;
+            if (pos < str.size() && (str[pos] == 'e' || str[pos] == 'E'))
+            {
+                pos++;
+                bool expNeg = false;
+                if (pos < str.size() && str[pos] == '-') { expNeg = true; pos++; }
+                else if (pos < str.size() && str[pos] == '+') { pos++; }
+
+                bool hasExpDigits = false;
+                while (pos < str.size() && str[pos] >= '0' && str[pos] <= '9')
+                {
+                    hasExpDigits = true;
+                    if (exp10 < 10000)
+                    {
+                        exp10 = exp10 * 10 + static_cast<int>(str[pos] - '0');
+                    }
+                    pos++;
+                }
+                if (!hasExpDigits) return false;
+                if (expNeg) exp10 = -exp10;
+            }
+
+            while (pos < str.size() && (str[pos] == ' ' || str[pos] == '\t' || str[pos] == '\r' || str[pos] == '\n'))
+            {
+                pos++;
+            }
+            if (pos != str.size()) return false;
+
+            out = intPart + fracPart;
+            if (!out.isZero)
+            {
+                if (exp10 > 0)
+                {
+                    BigFloat pow10(1.0);
+                    BigFloat base(10.0);
+                    int e = std::min(exp10, 308);
+                    while (e > 0)
+                    {
+                        if (e & 1) pow10 = pow10 * base;
+                        base = base.Sqr();
+                        e >>= 1;
+                    }
+                    out = out * pow10;
+                }
+                else if (exp10 < 0)
+                {
+                    BigFloat pow10Inv(1.0);
+                    BigFloat base = tenth;
+                    int e = std::min(-exp10, 308);
+                    while (e > 0)
+                    {
+                        if (e & 1) pow10Inv = pow10Inv * base;
+                        base = base.Sqr();
+                        e >>= 1;
+                    }
+                    out = out * pow10Inv;
+                }
+                if (!out.isZero) out.sign = neg;
+            }
+            return true;
+        }
+
+        static bool TryParse(std::wstring_view wstr, BigFloat& out)
+        {
+            std::string ascii;
+            ascii.reserve(wstr.size());
+            for (wchar_t wc : wstr)
+            {
+                if (wc > 127) return false;
+                ascii.push_back(static_cast<char>(wc));
+            }
+            return TryParse(std::string_view(ascii), out);
         }
     };
 }

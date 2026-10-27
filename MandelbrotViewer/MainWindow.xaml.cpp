@@ -96,8 +96,58 @@ namespace winrt::MandelbrotViewer::implementation
             RecolorBuffer();
         });
 
+        // Setup smooth continuous zoom timer
+        m_zoomTimer = DispatcherTimer();
+        m_zoomTimer.Interval(std::chrono::milliseconds(16));
+        m_zoomTimer.Tick([this](auto&&, auto&&)
+        {
+            if (!m_isZoomAnimating)
+            {
+                m_zoomTimer.Stop();
+                return;
+            }
+
+            // Pause timer while computing the frame so timer events never pile up behind a deep-zoom render
+            m_zoomTimer.Stop();
+
+            const auto now = std::chrono::steady_clock::now();
+            double dt = std::chrono::duration<double>(now - m_lastZoomFrameTime).count();
+            m_lastZoomFrameTime = now;
+            dt = std::clamp(dt, 0.008, 0.10);
+
+            const double exponent = (m_zoomInDirection ? 1.0 : -1.0) * m_zoomSpeed * dt;
+            const double factor = std::pow(2.0, exponent);
+
+            const bool canContinue = Mandelbrot::MandelbrotEngine::StepZoomAnimation(
+                m_config, m_zoomTargetX, m_zoomTargetY, factor);
+
+            if (m_autoScaleIterations)
+            {
+                const int recommended = Mandelbrot::MandelbrotEngine::RecommendMaxIterations(
+                    m_config.zoom, m_config.fractalType, m_baseIterations);
+                m_config.maxIterations = recommended;
+
+                m_suppressEvents = true;
+                IterationsSlider().Value(recommended);
+                IterationsValueText().Text(winrt::to_hstring(recommended));
+                m_suppressEvents = false;
+            }
+
+            RenderFractal();
+
+            if (!canContinue)
+            {
+                StopZoomAnimation();
+            }
+            else if (m_isZoomAnimating)
+            {
+                m_zoomTimer.Start();
+            }
+        });
+
         // Populate custom gradient stops UI
         PopulateStopSelector();
+        SyncTargetInputsFromCenter();
 
         m_suppressEvents = false;
 
@@ -205,6 +255,10 @@ namespace winrt::MandelbrotViewer::implementation
         {
             zoomLabel += L" [1024-bit Perturbation]";
         }
+        if (m_isZoomAnimating)
+        {
+            zoomLabel += m_zoomInDirection ? L" [Zooming In]" : L" [Zooming Out]";
+        }
         HudZoomText().Text(zoomLabel);
 
         std::wostringstream timing;
@@ -235,6 +289,7 @@ namespace winrt::MandelbrotViewer::implementation
         if (m_currentPixelWidth <= 0 || m_currentPixelHeight <= 0) return;
 
         Mandelbrot::MandelbrotEngine::ZoomViewport(m_config, factor, pivotX, pivotY);
+        SyncTargetInputsFromCenter();
 
         if (m_autoScaleIterations)
         {
@@ -249,6 +304,158 @@ namespace winrt::MandelbrotViewer::implementation
         }
 
         RenderFractal();
+    }
+
+    void MainWindow::SyncTargetInputsFromCenter()
+    {
+        m_zoomTargetX = m_config.hpCenterX;
+        m_zoomTargetY = m_config.hpCenterY;
+
+        if (!TargetXTextBox() || !TargetYTextBox()) return;
+
+        const size_t decimals = (m_config.zoom >= 1e14) ? 28 : ((m_config.zoom >= 1e6) ? 16 : 10);
+        m_suppressEvents = true;
+        TargetXTextBox().Text(winrt::hstring(m_config.hpCenterX.ToWString(decimals)));
+        TargetYTextBox().Text(winrt::hstring(m_config.hpCenterY.ToWString(decimals)));
+        m_suppressEvents = false;
+    }
+
+    void MainWindow::SetZoomDirection(bool zoomIn)
+    {
+        m_zoomInDirection = zoomIn;
+        if (!ZoomDirectionInToggle() || !ZoomDirectionOutToggle()) return;
+
+        m_suppressEvents = true;
+        ZoomDirectionInToggle().IsChecked(zoomIn);
+        ZoomDirectionOutToggle().IsChecked(!zoomIn);
+        m_suppressEvents = false;
+    }
+
+    void MainWindow::StartZoomAnimation()
+    {
+        if (TargetXTextBox() && TargetYTextBox())
+        {
+            Mandelbrot::BigFloat parsedX;
+            Mandelbrot::BigFloat parsedY;
+            const bool validX = Mandelbrot::BigFloat::TryParse(TargetXTextBox().Text(), parsedX);
+            const bool validY = Mandelbrot::BigFloat::TryParse(TargetYTextBox().Text(), parsedY);
+
+            m_zoomTargetX = validX ? parsedX : m_config.hpCenterX;
+            m_zoomTargetY = validY ? parsedY : m_config.hpCenterY;
+
+            if (!validX || !validY)
+            {
+                SyncTargetInputsFromCenter();
+            }
+        }
+        else
+        {
+            m_zoomTargetX = m_config.hpCenterX;
+            m_zoomTargetY = m_config.hpCenterY;
+        }
+
+        // If already at zoom bound in the chosen direction, flip direction or return
+        if ((m_zoomInDirection && m_config.zoom >= Mandelbrot::MandelbrotEngine::MaxZoom) ||
+            (!m_zoomInDirection && m_config.zoom <= Mandelbrot::MandelbrotEngine::MinZoom))
+        {
+            return;
+        }
+
+        m_isZoomAnimating = true;
+        m_lastZoomFrameTime = std::chrono::steady_clock::now();
+
+        if (StartZoomButton()) StartZoomButton().IsEnabled(false);
+        if (StopZoomButton()) StopZoomButton().IsEnabled(true);
+        if (OverlayPlayZoomIcon())
+        {
+            OverlayPlayZoomIcon().Glyph(L"\uE71A");
+            OverlayPlayZoomIcon().Foreground(Media::SolidColorBrush(winrt::Windows::UI::Color{ 255, 255, 107, 107 }));
+        }
+        if (OverlayPlayZoomButton())
+        {
+            winrt::Microsoft::UI::Xaml::Controls::ToolTipService::SetToolTip(
+                OverlayPlayZoomButton(), box_value(L"Stop Animated Zoom"));
+        }
+
+        if (m_zoomTimer)
+        {
+            m_zoomTimer.Start();
+        }
+    }
+
+    void MainWindow::StopZoomAnimation()
+    {
+        m_isZoomAnimating = false;
+        if (m_zoomTimer)
+        {
+            m_zoomTimer.Stop();
+        }
+
+        if (StartZoomButton()) StartZoomButton().IsEnabled(true);
+        if (StopZoomButton()) StopZoomButton().IsEnabled(false);
+        if (OverlayPlayZoomIcon())
+        {
+            OverlayPlayZoomIcon().Glyph(L"\uE768");
+            OverlayPlayZoomIcon().Foreground(Media::SolidColorBrush(winrt::Windows::UI::Color{ 255, 81, 207, 102 }));
+        }
+        if (OverlayPlayZoomButton())
+        {
+            winrt::Microsoft::UI::Xaml::Controls::ToolTipService::SetToolTip(
+                OverlayPlayZoomButton(), box_value(L"Start Animated Zoom"));
+        }
+
+        SyncTargetInputsFromCenter();
+        RenderFractal();
+    }
+
+    void MainWindow::OnOverlayZoomToggleClick(IInspectable const&, RoutedEventArgs const&)
+    {
+        if (m_isZoomAnimating)
+        {
+            StopZoomAnimation();
+        }
+        else
+        {
+            StartZoomAnimation();
+        }
+    }
+
+    void MainWindow::OnUseCurrentCenterClick(IInspectable const&, RoutedEventArgs const&)
+    {
+        SyncTargetInputsFromCenter();
+    }
+
+    void MainWindow::OnZoomDirectionInClick(IInspectable const&, RoutedEventArgs const&)
+    {
+        if (m_suppressEvents) return;
+        SetZoomDirection(true);
+    }
+
+    void MainWindow::OnZoomDirectionOutClick(IInspectable const&, RoutedEventArgs const&)
+    {
+        if (m_suppressEvents) return;
+        SetZoomDirection(false);
+    }
+
+    void MainWindow::OnZoomSpeedSliderChanged(IInspectable const&, Primitives::RangeBaseValueChangedEventArgs const& e)
+    {
+        m_zoomSpeed = e.NewValue();
+        if (ZoomSpeedValueText())
+        {
+            ZoomSpeedValueText().Text(FormatFloat(m_zoomSpeed, 1) + L"x");
+        }
+    }
+
+    void MainWindow::OnStartZoomClick(IInspectable const&, RoutedEventArgs const&)
+    {
+        if (m_suppressEvents) return;
+        StartZoomAnimation();
+    }
+
+    void MainWindow::OnStopZoomClick(IInspectable const&, RoutedEventArgs const&)
+    {
+        if (m_suppressEvents) return;
+        StopZoomAnimation();
     }
 
     void MainWindow::OnViewportPointerPressed(IInspectable const&, Input::PointerRoutedEventArgs const& e)
@@ -270,6 +477,7 @@ namespace winrt::MandelbrotViewer::implementation
 
         Mandelbrot::MandelbrotEngine::PanViewport(
             m_config, m_dragStartHpCenterX, m_dragStartHpCenterY, dx, dy);
+        SyncTargetInputsFromCenter();
 
         RenderFractal();
     }
@@ -309,6 +517,11 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::OnResetViewClick(IInspectable const&, RoutedEventArgs const&)
     {
+        if (m_isZoomAnimating)
+        {
+            StopZoomAnimation();
+        }
+
         const auto& bookmarks = Mandelbrot::GetBookmarks(m_config.fractalType);
         if (!bookmarks.empty())
         {
@@ -337,6 +550,7 @@ namespace winrt::MandelbrotViewer::implementation
             m_suppressEvents = false;
         }
 
+        SyncTargetInputsFromCenter();
         RenderFractal();
     }
 
@@ -432,6 +646,11 @@ namespace winrt::MandelbrotViewer::implementation
     {
         if (m_suppressEvents) return;
 
+        if (m_isZoomAnimating)
+        {
+            StopZoomAnimation();
+        }
+
         const int index = FractalTypeComboBox().SelectedIndex();
         const auto& types = Mandelbrot::GetAllFractalTypes();
         if (index >= 0 && index < static_cast<int>(types.size()))
@@ -460,6 +679,7 @@ namespace winrt::MandelbrotViewer::implementation
                 m_suppressEvents = false;
             }
 
+            SyncTargetInputsFromCenter();
             RenderFractal();
         }
     }
@@ -467,6 +687,11 @@ namespace winrt::MandelbrotViewer::implementation
     void MainWindow::OnBookmarkSelectionChanged(IInspectable const&, SelectionChangedEventArgs const&)
     {
         if (m_suppressEvents) return;
+
+        if (m_isZoomAnimating)
+        {
+            StopZoomAnimation();
+        }
 
         const int index = BookmarksComboBox().SelectedIndex();
         const auto& bookmarks = Mandelbrot::GetBookmarks(m_config.fractalType);
@@ -483,6 +708,7 @@ namespace winrt::MandelbrotViewer::implementation
             IterationsValueText().Text(winrt::to_hstring(bm.maxIterations));
             m_suppressEvents = false;
 
+            SyncTargetInputsFromCenter();
             RenderFractal();
         }
     }
