@@ -145,6 +145,7 @@ namespace Mandelbrot
         int m_cachedActiveLimbs{ 0 };
         int m_cachedRefLen{ 0 };
         int m_cachedMaxIter{ 0 };
+        double m_cachedSearchZoom{ 0.0 };
         bool m_cachedEscaped{ false };
         std::vector<ComplexOrbitPt> m_cachedOrbit;
     };
