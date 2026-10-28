@@ -100,6 +100,8 @@ namespace winrt::MandelbrotViewer::implementation
         bool m_isZoomAnimating{ false };
         bool m_zoomInDirection{ true };
         double m_zoomSpeed{ 1.0 };
+        int m_animQualityLevel{ 0 };
+        double m_lastFractalTimeMs{ 0.0 };
         Mandelbrot::BigFloat m_zoomTargetX{ -0.75 };
         Mandelbrot::BigFloat m_zoomTargetY{ 0.0 };
         std::chrono::steady_clock::time_point m_lastZoomFrameTime{};

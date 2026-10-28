@@ -123,17 +123,53 @@ namespace winrt::MandelbrotViewer::implementation
 
             if (m_autoScaleIterations)
             {
-                const int recommended = Mandelbrot::MandelbrotEngine::RecommendMaxIterations(
+                const int rawRecommended = Mandelbrot::MandelbrotEngine::RecommendMaxIterations(
                     m_config.zoom, m_config.fractalType, m_baseIterations);
-                m_config.maxIterations = recommended;
+                // Quantize to steps of 25 during animation to avoid 60Hz XAML slider layout updates
+                // and allow cross-frame reference orbit reuse
+                const int quantized = ((rawRecommended + 12) / 25) * 25;
+                if (quantized != m_config.maxIterations)
+                {
+                    m_config.maxIterations = quantized;
+                    m_suppressEvents = true;
+                    IterationsSlider().Value(quantized);
+                    IterationsValueText().Text(winrt::to_hstring(quantized));
+                    m_suppressEvents = false;
+                }
+            }
 
-                m_suppressEvents = true;
-                IterationsSlider().Value(recommended);
-                IterationsValueText().Text(winrt::to_hstring(recommended));
-                m_suppressEvents = false;
+            // Apply current adaptive motion quality level
+            switch (m_animQualityLevel)
+            {
+            case 0:
+                m_config.renderStride = 2;
+                m_config.edgeRefine = true;
+                break;
+            case 1:
+                m_config.renderStride = 2;
+                m_config.edgeRefine = false;
+                break;
+            case 2:
+                m_config.renderStride = 3;
+                m_config.edgeRefine = false;
+                break;
+            default:
+                m_config.renderStride = 4;
+                m_config.edgeRefine = false;
+                break;
             }
 
             RenderFractal();
+
+            // Adaptive frame-time governor: target ~50-60 FPS during active zoom animation
+            if (m_lastFractalTimeMs > 22.0 && m_animQualityLevel < 3)
+            {
+                m_animQualityLevel++;
+            }
+            else if (m_lastFractalTimeMs < 8.0 && m_animQualityLevel > 0)
+            {
+                m_animQualityLevel--;
+            }
 
             if (!canContinue)
             {
@@ -196,6 +232,7 @@ namespace winrt::MandelbrotViewer::implementation
         if (!m_bitmap || m_currentPixelWidth <= 0 || m_currentPixelHeight <= 0) return;
 
         const double fractalTime = m_engine.Compute(m_config, m_iterations);
+        m_lastFractalTimeMs = fractalTime;
 
         const auto colorStart = std::chrono::high_resolution_clock::now();
         RecolorBuffer();
@@ -362,6 +399,7 @@ namespace winrt::MandelbrotViewer::implementation
         }
 
         m_isZoomAnimating = true;
+        m_animQualityLevel = 0;
         m_lastZoomFrameTime = std::chrono::steady_clock::now();
 
         if (StartZoomButton()) StartZoomButton().IsEnabled(false);
@@ -386,6 +424,9 @@ namespace winrt::MandelbrotViewer::implementation
     void MainWindow::StopZoomAnimation()
     {
         m_isZoomAnimating = false;
+        m_animQualityLevel = 0;
+        m_config.renderStride = 1;
+        m_config.edgeRefine = true;
         if (m_zoomTimer)
         {
             m_zoomTimer.Stop();
@@ -402,6 +443,17 @@ namespace winrt::MandelbrotViewer::implementation
         {
             winrt::Microsoft::UI::Xaml::Controls::ToolTipService::SetToolTip(
                 OverlayPlayZoomButton(), box_value(L"Start Animated Zoom"));
+        }
+
+        if (m_autoScaleIterations)
+        {
+            const int recommended = Mandelbrot::MandelbrotEngine::RecommendMaxIterations(
+                m_config.zoom, m_config.fractalType, m_baseIterations);
+            m_config.maxIterations = recommended;
+            m_suppressEvents = true;
+            IterationsSlider().Value(recommended);
+            IterationsValueText().Text(winrt::to_hstring(recommended));
+            m_suppressEvents = false;
         }
 
         SyncTargetInputsFromCenter();
@@ -479,6 +531,12 @@ namespace winrt::MandelbrotViewer::implementation
             m_config, m_dragStartHpCenterX, m_dragStartHpCenterY, dx, dy);
         SyncTargetInputsFromCenter();
 
+        if (!m_isZoomAnimating)
+        {
+            m_config.renderStride = (m_config.zoom >= 1e8 || m_lastFractalTimeMs > 16.0) ? 2 : 1;
+            m_config.edgeRefine = false;
+        }
+
         RenderFractal();
     }
 
@@ -488,6 +546,13 @@ namespace winrt::MandelbrotViewer::implementation
         {
             m_isDragging = false;
             FractalImage().ReleasePointerCapture(e.Pointer());
+
+            if (!m_isZoomAnimating && m_config.renderStride > 1)
+            {
+                m_config.renderStride = 1;
+                m_config.edgeRefine = true;
+                RenderFractal();
+            }
         }
     }
 

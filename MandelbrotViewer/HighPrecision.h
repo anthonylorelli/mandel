@@ -167,6 +167,18 @@ namespace Mandelbrot
             return 0;
         }
 
+        bool operator==(const BigFloat& rhs) const noexcept
+        {
+            if (isZero && rhs.isZero) return true;
+            if (isZero != rhs.isZero || sign != rhs.sign || exp != rhs.exp) return false;
+            return std::memcmp(limbs, rhs.limbs, sizeof(limbs)) == 0;
+        }
+
+        bool operator!=(const BigFloat& rhs) const noexcept
+        {
+            return !(*this == rhs);
+        }
+
         static BigFloat AddMagnitude(const BigFloat& a, const BigFloat& b, bool resultSign)
         {
             if (a.isZero)
