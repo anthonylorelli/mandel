@@ -858,7 +858,8 @@ namespace winrt::MandelbrotViewer::implementation
         m_frequency = static_cast<float>(e.NewValue());
         if (FrequencyValueText())
         {
-            FrequencyValueText().Text(FormatFloat(m_frequency, 2) + L"x");
+            const int decimals = (m_frequency < 0.01f) ? 4 : ((m_frequency < 0.1f) ? 3 : 2);
+            FrequencyValueText().Text(FormatFloat(m_frequency, decimals) + L"x");
         }
 
         if (m_suppressEvents) return;
