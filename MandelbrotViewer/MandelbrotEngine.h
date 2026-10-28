@@ -30,6 +30,8 @@ namespace Mandelbrot
         int height{ 768 };
         int maxIterations{ 500 };
         bool smooth{ true };
+        int renderStride{ 1 };   // 1 = full per-pixel; 2..4 = adaptive coarse grid + smooth/edge reconstruction
+        bool edgeRefine{ true }; // When renderStride > 1, refine high-contrast boundary cells per-pixel
 
         void SetCenter(double x, double y)
         {
@@ -125,5 +127,26 @@ namespace Mandelbrot
             int width, int height,
             double centerX, double centerY, double zoom,
             double& outPx, double& outPy);
+
+        struct ComplexOrbitPt
+        {
+            double x;
+            double y;
+        };
+
+    private:
+        // Cached high-precision reference orbit across consecutive deep-zoom frames
+        bool m_hasCachedOrbit{ false };
+        FractalType m_cachedType{ FractalType::Mandelbrot };
+        BigFloat m_cachedRefX{};
+        BigFloat m_cachedRefY{};
+        BigFloat m_cachedEndZx{};
+        BigFloat m_cachedEndZy{};
+        int m_cachedActiveLimbs{ 0 };
+        int m_cachedRefLen{ 0 };
+        int m_cachedMaxIter{ 0 };
+        double m_cachedSearchZoom{ 0.0 };
+        bool m_cachedEscaped{ false };
+        std::vector<ComplexOrbitPt> m_cachedOrbit;
     };
 }

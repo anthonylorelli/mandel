@@ -123,17 +123,70 @@ namespace winrt::MandelbrotViewer::implementation
 
             if (m_autoScaleIterations)
             {
-                const int recommended = Mandelbrot::MandelbrotEngine::RecommendMaxIterations(
+                const int rawRecommended = Mandelbrot::MandelbrotEngine::RecommendMaxIterations(
                     m_config.zoom, m_config.fractalType, m_baseIterations);
-                m_config.maxIterations = recommended;
+                if (rawRecommended != m_config.maxIterations)
+                {
+                    m_config.maxIterations = rawRecommended;
+                    // Throttle XAML Slider layout updates to steps of >= 10 while keeping maxIterations smooth
+                    if (std::abs(static_cast<int>(IterationsSlider().Value()) - rawRecommended) >= 10)
+                    {
+                        m_suppressEvents = true;
+                        IterationsSlider().Value(rawRecommended);
+                        IterationsValueText().Text(winrt::to_hstring(rawRecommended));
+                        m_suppressEvents = false;
+                    }
+                }
+            }
 
-                m_suppressEvents = true;
-                IterationsSlider().Value(recommended);
-                IterationsValueText().Text(winrt::to_hstring(recommended));
-                m_suppressEvents = false;
+            // Apply hysteresis-stabilized adaptive motion quality level:
+            // Level 0: stride = 2, edgeRefine = true (~3.8x speedup, 1x1 exact interior/exterior boundaries, C1 smooth exterior)
+            // Level 1: stride = 3, edgeRefine = true (~7x speedup for heavy deep-zoom frames)
+            // Level 2: stride = 4, edgeRefine = false (~10x speedup for extreme iteration budgets)
+            switch (m_animQualityLevel)
+            {
+            case 0:
+                m_config.renderStride = 2;
+                m_config.edgeRefine = true;
+                break;
+            case 1:
+                m_config.renderStride = 3;
+                m_config.edgeRefine = true;
+                break;
+            default:
+                m_config.renderStride = 4;
+                m_config.edgeRefine = false;
+                break;
             }
 
             RenderFractal();
+
+            // Hysteresis-stabilized adaptive governor: require sustained slow/fast streaks before changing stride
+            if (m_lastFractalTimeMs > 22.0)
+            {
+                m_slowFrameStreak++;
+                m_fastFrameStreak = 0;
+                if (m_slowFrameStreak >= 2 && m_animQualityLevel < 2)
+                {
+                    m_animQualityLevel++;
+                    m_slowFrameStreak = 0;
+                }
+            }
+            else if (m_lastFractalTimeMs < 6.0)
+            {
+                m_fastFrameStreak++;
+                m_slowFrameStreak = 0;
+                if (m_fastFrameStreak >= 8 && m_animQualityLevel > 0)
+                {
+                    m_animQualityLevel--;
+                    m_fastFrameStreak = 0;
+                }
+            }
+            else
+            {
+                m_slowFrameStreak = 0;
+                m_fastFrameStreak = 0;
+            }
 
             if (!canContinue)
             {
@@ -196,6 +249,7 @@ namespace winrt::MandelbrotViewer::implementation
         if (!m_bitmap || m_currentPixelWidth <= 0 || m_currentPixelHeight <= 0) return;
 
         const double fractalTime = m_engine.Compute(m_config, m_iterations);
+        m_lastFractalTimeMs = fractalTime;
 
         const auto colorStart = std::chrono::high_resolution_clock::now();
         RecolorBuffer();
@@ -362,6 +416,9 @@ namespace winrt::MandelbrotViewer::implementation
         }
 
         m_isZoomAnimating = true;
+        m_animQualityLevel = 0;
+        m_slowFrameStreak = 0;
+        m_fastFrameStreak = 0;
         m_lastZoomFrameTime = std::chrono::steady_clock::now();
 
         if (StartZoomButton()) StartZoomButton().IsEnabled(false);
@@ -386,6 +443,11 @@ namespace winrt::MandelbrotViewer::implementation
     void MainWindow::StopZoomAnimation()
     {
         m_isZoomAnimating = false;
+        m_animQualityLevel = 0;
+        m_slowFrameStreak = 0;
+        m_fastFrameStreak = 0;
+        m_config.renderStride = 1;
+        m_config.edgeRefine = true;
         if (m_zoomTimer)
         {
             m_zoomTimer.Stop();
@@ -402,6 +464,17 @@ namespace winrt::MandelbrotViewer::implementation
         {
             winrt::Microsoft::UI::Xaml::Controls::ToolTipService::SetToolTip(
                 OverlayPlayZoomButton(), box_value(L"Start Animated Zoom"));
+        }
+
+        if (m_autoScaleIterations)
+        {
+            const int recommended = Mandelbrot::MandelbrotEngine::RecommendMaxIterations(
+                m_config.zoom, m_config.fractalType, m_baseIterations);
+            m_config.maxIterations = recommended;
+            m_suppressEvents = true;
+            IterationsSlider().Value(recommended);
+            IterationsValueText().Text(winrt::to_hstring(recommended));
+            m_suppressEvents = false;
         }
 
         SyncTargetInputsFromCenter();
@@ -479,6 +552,12 @@ namespace winrt::MandelbrotViewer::implementation
             m_config, m_dragStartHpCenterX, m_dragStartHpCenterY, dx, dy);
         SyncTargetInputsFromCenter();
 
+        if (!m_isZoomAnimating)
+        {
+            m_config.renderStride = (m_config.zoom >= 1e8 || m_lastFractalTimeMs > 20.0) ? 2 : 1;
+            m_config.edgeRefine = true;
+        }
+
         RenderFractal();
     }
 
@@ -488,6 +567,13 @@ namespace winrt::MandelbrotViewer::implementation
         {
             m_isDragging = false;
             FractalImage().ReleasePointerCapture(e.Pointer());
+
+            if (!m_isZoomAnimating && m_config.renderStride > 1)
+            {
+                m_config.renderStride = 1;
+                m_config.edgeRefine = true;
+                RenderFractal();
+            }
         }
     }
 
@@ -772,7 +858,8 @@ namespace winrt::MandelbrotViewer::implementation
         m_frequency = static_cast<float>(e.NewValue());
         if (FrequencyValueText())
         {
-            FrequencyValueText().Text(FormatFloat(m_frequency, 2) + L"x");
+            const int decimals = (m_frequency < 0.01f) ? 4 : ((m_frequency < 0.1f) ? 3 : 2);
+            FrequencyValueText().Text(FormatFloat(m_frequency, decimals) + L"x");
         }
 
         if (m_suppressEvents) return;

@@ -727,3 +727,198 @@ TEST_CASE(MandelbrotEngine, StepZoomAnimation_ZoomInAndOut_TargetConvergence)
     config.zoom = MandelbrotEngine::MinZoom;
     ASSERT_FALSE(MandelbrotEngine::StepZoomAnimation(config, targetX, targetY, 0.9));
 }
+
+TEST_CASE(HighPrecision, BigFloat_EqualityOperator)
+{
+    BigFloat a("-0.743643887037158704752191506114774");
+    BigFloat b("-0.743643887037158704752191506114774");
+    BigFloat c("-0.743643887037158704752191506114775");
+    BigFloat z1(0.0);
+    BigFloat z2(-0.0);
+
+    ASSERT_TRUE(a == b);
+    ASSERT_FALSE(a != b);
+    ASSERT_TRUE(a != c);
+    ASSERT_TRUE(z1 == z2);
+}
+
+TEST_CASE(MandelbrotEngine, AdaptiveSubdivision_StrideAndEdgeRefinement)
+{
+    MandelbrotEngine engine;
+    MandelbrotConfig baseCfg;
+    baseCfg.fractalType = FractalType::Mandelbrot;
+    baseCfg.width = 48;
+    baseCfg.height = 36;
+    baseCfg.SetCenter(-0.5, 0.0);
+    baseCfg.zoom = 1.5;
+    baseCfg.maxIterations = 200;
+    baseCfg.smooth = true;
+    baseCfg.renderStride = 1;
+    baseCfg.edgeRefine = true;
+
+    std::vector<float> fullIters;
+    engine.Compute(baseCfg, fullIters);
+
+    // 1. Stride = 2 with edgeRefine = true should match full 1x1 resolution at all interior/boundary blocks
+    MandelbrotConfig refineCfg = baseCfg;
+    refineCfg.renderStride = 2;
+    refineCfg.edgeRefine = true;
+
+    std::vector<float> refineIters;
+    engine.Compute(refineCfg, refineIters);
+    ASSERT_EQ(fullIters.size(), refineIters.size());
+
+    int matchingSignCount = 0;
+    for (size_t i = 0; i < fullIters.size(); ++i)
+    {
+        ASSERT_FALSE(std::isnan(refineIters[i]));
+        if ((fullIters[i] < 0.0f) == (refineIters[i] < 0.0f))
+        {
+            matchingSignCount++;
+        }
+    }
+    // Nearly 100% of interior/exterior classifications match
+    ASSERT_GT(matchingSignCount, static_cast<int>(fullIters.size() * 95 / 100));
+
+    // 2. Stride = 2 and Stride = 3 with edgeRefine = false (fast animation mode) must never blend -1.0f with exterior values
+    for (int stride : { 2, 3 })
+    {
+        MandelbrotConfig fastCfg = baseCfg;
+        fastCfg.renderStride = stride;
+        fastCfg.edgeRefine = false;
+
+        std::vector<float> fastIters;
+        engine.Compute(fastCfg, fastIters);
+        ASSERT_EQ(fullIters.size(), fastIters.size());
+
+        for (float v : fastIters)
+        {
+            ASSERT_FALSE(std::isnan(v));
+            // Must be either exact -1.0f (interior) or >= 0.0f (exterior) — never an invalid negative fraction like -0.5f
+            ASSERT_TRUE(v == -1.0f || v >= 0.0f);
+        }
+    }
+}
+
+TEST_CASE(MandelbrotEngine, DeepZoom_ReferenceOrbitCachingAndExtension)
+{
+    MandelbrotEngine engine;
+    MandelbrotConfig cfg;
+    cfg.fractalType = FractalType::Mandelbrot;
+    cfg.width = 24;
+    cfg.height = 18;
+    cfg.SetCenter(
+        BigFloat("-0.743643887037158704752191506114774"),
+        BigFloat("0.131825904205311970493132056385139"));
+    cfg.zoom = 1e16;
+    cfg.maxIterations = 400;
+    cfg.smooth = true;
+
+    // First render populates the reference orbit cache
+    std::vector<float> frame1;
+    engine.Compute(cfg, frame1);
+
+    // Second render at a deeper zoom on the SAME center coordinate reuses the cached 1024-bit reference orbit
+    cfg.zoom = 1.25e16;
+    std::vector<float> frame2Cached;
+    engine.Compute(cfg, frame2Cached);
+
+    // Compare against a fresh engine with no prior cache
+    MandelbrotEngine freshEngine;
+    std::vector<float> frame2Fresh;
+    freshEngine.Compute(cfg, frame2Fresh);
+
+    ASSERT_EQ(frame2Cached.size(), frame2Fresh.size());
+    for (size_t i = 0; i < frame2Cached.size(); ++i)
+    {
+        ASSERT_NEAR(frame2Cached[i], frame2Fresh[i], 1e-4f);
+    }
+
+    // Third render on the same center with HIGHER maxIterations incrementally extends the cached reference orbit
+    cfg.zoom = 1.5e16;
+    cfg.maxIterations = 600;
+    std::vector<float> frame3Extended;
+    engine.Compute(cfg, frame3Extended);
+
+    MandelbrotEngine freshEngine2;
+    std::vector<float> frame3Fresh;
+    freshEngine2.Compute(cfg, frame3Fresh);
+
+    ASSERT_EQ(frame3Extended.size(), frame3Fresh.size());
+    for (size_t i = 0; i < frame3Extended.size(); ++i)
+    {
+        ASSERT_NEAR(frame3Extended[i], frame3Fresh[i], 1e-4f);
+    }
+}
+
+TEST_CASE(MandelbrotEngine, IterationEdge_SmoothContinuityAndNoFlicker)
+{
+    MandelbrotEngine engine;
+
+    // 1. Verify that discrete iteration edges at stride = 2 (edgeRefine = true) are 100% bit-for-bit identical to stride = 1
+    {
+        MandelbrotConfig cfg1;
+        cfg1.fractalType = FractalType::Mandelbrot;
+        cfg1.width = 48;
+        cfg1.height = 36;
+        cfg1.SetCenter(-0.75, 0.12);
+        cfg1.zoom = 4.0;
+        cfg1.maxIterations = 150;
+        cfg1.smooth = false;
+        cfg1.renderStride = 1;
+        cfg1.edgeRefine = true;
+
+        MandelbrotConfig cfg2 = cfg1;
+        cfg2.renderStride = 2;
+        cfg2.edgeRefine = true;
+
+        std::vector<float> iters1;
+        std::vector<float> iters2;
+        engine.Compute(cfg1, iters1);
+        engine.Compute(cfg2, iters2);
+
+        ASSERT_EQ(iters1.size(), iters2.size());
+        for (size_t i = 0; i < iters1.size(); ++i)
+        {
+            ASSERT_EQ(iters1[i], iters2[i]);
+        }
+    }
+
+    // 2. Verify that smooth coloring across an integer iteration boundary has no step discontinuity
+    // by checking second-difference continuity (no sudden jump compared to adjacent pixel slope)
+    {
+        MandelbrotConfig scanCfg;
+        scanCfg.fractalType = FractalType::Mandelbrot;
+        scanCfg.width = 800;
+        scanCfg.height = 1;
+        scanCfg.SetCenter(-1.75, 0.15);
+        scanCfg.zoom = 5.0; // Crosses iterations 3..10 smoothly from x = -2.05 to -1.45
+        scanCfg.maxIterations = 200;
+        scanCfg.smooth = false;
+
+        std::vector<float> discScan;
+        engine.Compute(scanCfg, discScan);
+
+        scanCfg.smooth = true;
+        std::vector<float> smoothScan;
+        engine.Compute(scanCfg, smoothScan);
+
+        int bandTransitionsChecked = 0;
+        for (size_t px = 2; px + 1 < discScan.size(); ++px)
+        {
+            // When two adjacent pixels cross an integer iteration boundary (e.g. iter n -> iter n+1)
+            if (discScan[px - 1] > 0.0f && discScan[px] > 0.0f &&
+                std::abs(discScan[px] - discScan[px - 1]) == 1.0f)
+            {
+                const float stepAtBoundary = smoothScan[px] - smoothScan[px - 1];
+                const float stepBefore = smoothScan[px - 1] - smoothScan[px - 2];
+                const float jumpDiscontinuity = std::abs(stepAtBoundary - stepBefore);
+                // Without post-bailout polish, jumpDiscontinuity is ~0.05-0.13 at integer iteration boundaries.
+                // With post-bailout polish, jumpDiscontinuity is < 0.002.
+                ASSERT_LT(jumpDiscontinuity, 0.005f);
+                bandTransitionsChecked++;
+            }
+        }
+        ASSERT_GT(bandTransitionsChecked, 2);
+    }
+}

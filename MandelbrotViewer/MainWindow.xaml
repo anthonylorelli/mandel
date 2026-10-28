@@ -267,7 +267,7 @@
                             <TextBlock Text="Color Frequency" VerticalAlignment="Center"/>
                             <TextBlock x:Name="FrequencyValueText" Grid.Column="1" Text="1.00x" FontFamily="Consolas"/>
                         </Grid>
-                        <Slider x:Name="FrequencySlider" Minimum="0.05" Maximum="5.0" StepFrequency="0.05" Value="1.0"
+                        <Slider x:Name="FrequencySlider" Minimum="0.0005" Maximum="2.0" StepFrequency="0.0005" SmallChange="0.0005" LargeChange="0.01" Value="1.0"
                                 ValueChanged="OnFrequencySliderChanged"/>
 
                         <!-- Live Phase / Cycle Offset Slider -->
