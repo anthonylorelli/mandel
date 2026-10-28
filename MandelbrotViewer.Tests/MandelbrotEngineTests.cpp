@@ -850,3 +850,75 @@ TEST_CASE(MandelbrotEngine, DeepZoom_ReferenceOrbitCachingAndExtension)
         ASSERT_NEAR(frame3Extended[i], frame3Fresh[i], 1e-4f);
     }
 }
+
+TEST_CASE(MandelbrotEngine, IterationEdge_SmoothContinuityAndNoFlicker)
+{
+    MandelbrotEngine engine;
+
+    // 1. Verify that discrete iteration edges at stride = 2 (edgeRefine = true) are 100% bit-for-bit identical to stride = 1
+    {
+        MandelbrotConfig cfg1;
+        cfg1.fractalType = FractalType::Mandelbrot;
+        cfg1.width = 48;
+        cfg1.height = 36;
+        cfg1.SetCenter(-0.75, 0.12);
+        cfg1.zoom = 4.0;
+        cfg1.maxIterations = 150;
+        cfg1.smooth = false;
+        cfg1.renderStride = 1;
+        cfg1.edgeRefine = true;
+
+        MandelbrotConfig cfg2 = cfg1;
+        cfg2.renderStride = 2;
+        cfg2.edgeRefine = true;
+
+        std::vector<float> iters1;
+        std::vector<float> iters2;
+        engine.Compute(cfg1, iters1);
+        engine.Compute(cfg2, iters2);
+
+        ASSERT_EQ(iters1.size(), iters2.size());
+        for (size_t i = 0; i < iters1.size(); ++i)
+        {
+            ASSERT_EQ(iters1[i], iters2[i]);
+        }
+    }
+
+    // 2. Verify that smooth coloring across an integer iteration boundary has no step discontinuity
+    // by checking second-difference continuity (no sudden jump compared to adjacent pixel slope)
+    {
+        MandelbrotConfig scanCfg;
+        scanCfg.fractalType = FractalType::Mandelbrot;
+        scanCfg.width = 800;
+        scanCfg.height = 1;
+        scanCfg.SetCenter(-1.75, 0.15);
+        scanCfg.zoom = 5.0; // Crosses iterations 3..10 smoothly from x = -2.05 to -1.45
+        scanCfg.maxIterations = 200;
+        scanCfg.smooth = false;
+
+        std::vector<float> discScan;
+        engine.Compute(scanCfg, discScan);
+
+        scanCfg.smooth = true;
+        std::vector<float> smoothScan;
+        engine.Compute(scanCfg, smoothScan);
+
+        int bandTransitionsChecked = 0;
+        for (size_t px = 2; px + 1 < discScan.size(); ++px)
+        {
+            // When two adjacent pixels cross an integer iteration boundary (e.g. iter n -> iter n+1)
+            if (discScan[px - 1] > 0.0f && discScan[px] > 0.0f &&
+                std::abs(discScan[px] - discScan[px - 1]) == 1.0f)
+            {
+                const float stepAtBoundary = smoothScan[px] - smoothScan[px - 1];
+                const float stepBefore = smoothScan[px - 1] - smoothScan[px - 2];
+                const float jumpDiscontinuity = std::abs(stepAtBoundary - stepBefore);
+                // Without post-bailout polish, jumpDiscontinuity is ~0.05-0.13 at integer iteration boundaries.
+                // With post-bailout polish, jumpDiscontinuity is < 0.002.
+                ASSERT_LT(jumpDiscontinuity, 0.005f);
+                bandTransitionsChecked++;
+            }
+        }
+        ASSERT_GT(bandTransitionsChecked, 2);
+    }
+}

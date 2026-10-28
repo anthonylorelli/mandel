@@ -125,50 +125,52 @@ namespace winrt::MandelbrotViewer::implementation
             {
                 const int rawRecommended = Mandelbrot::MandelbrotEngine::RecommendMaxIterations(
                     m_config.zoom, m_config.fractalType, m_baseIterations);
-                // Quantize to steps of 25 during animation to avoid 60Hz XAML slider layout updates
-                // and allow cross-frame reference orbit reuse
-                const int quantized = ((rawRecommended + 12) / 25) * 25;
-                if (quantized != m_config.maxIterations)
+                if (rawRecommended != m_config.maxIterations)
                 {
-                    m_config.maxIterations = quantized;
-                    m_suppressEvents = true;
-                    IterationsSlider().Value(quantized);
-                    IterationsValueText().Text(winrt::to_hstring(quantized));
-                    m_suppressEvents = false;
+                    m_config.maxIterations = rawRecommended;
+                    // Throttle XAML Slider layout updates to steps of >= 10 while keeping maxIterations smooth
+                    if (std::abs(static_cast<int>(IterationsSlider().Value()) - rawRecommended) >= 10)
+                    {
+                        m_suppressEvents = true;
+                        IterationsSlider().Value(rawRecommended);
+                        IterationsValueText().Text(winrt::to_hstring(rawRecommended));
+                        m_suppressEvents = false;
+                    }
                 }
             }
 
-            // Apply current adaptive motion quality level
-            switch (m_animQualityLevel)
-            {
-            case 0:
-                m_config.renderStride = 2;
-                m_config.edgeRefine = true;
-                break;
-            case 1:
-                m_config.renderStride = 2;
-                m_config.edgeRefine = false;
-                break;
-            case 2:
-                m_config.renderStride = 3;
-                m_config.edgeRefine = false;
-                break;
-            default:
-                m_config.renderStride = 4;
-                m_config.edgeRefine = false;
-                break;
-            }
+            // Always keep edgeRefine = true so all iteration boundaries and filaments are evaluated
+            // at exact 1x1 pixel resolution without frame-to-frame flickering.
+            m_config.edgeRefine = true;
+            m_config.renderStride = (m_animQualityLevel == 0) ? 1 : 2;
 
             RenderFractal();
 
-            // Adaptive frame-time governor: target ~50-60 FPS during active zoom animation
-            if (m_lastFractalTimeMs > 22.0 && m_animQualityLevel < 3)
+            // Hysteresis-stabilized adaptive governor: require sustained slow/fast streaks before changing stride
+            if (m_lastFractalTimeMs > 26.0)
             {
-                m_animQualityLevel++;
+                m_slowFrameStreak++;
+                m_fastFrameStreak = 0;
+                if (m_slowFrameStreak >= 4 && m_animQualityLevel < 1)
+                {
+                    m_animQualityLevel = 1;
+                    m_slowFrameStreak = 0;
+                }
             }
-            else if (m_lastFractalTimeMs < 8.0 && m_animQualityLevel > 0)
+            else if (m_lastFractalTimeMs < 7.0)
             {
-                m_animQualityLevel--;
+                m_fastFrameStreak++;
+                m_slowFrameStreak = 0;
+                if (m_fastFrameStreak >= 8 && m_animQualityLevel > 0)
+                {
+                    m_animQualityLevel = 0;
+                    m_fastFrameStreak = 0;
+                }
+            }
+            else
+            {
+                m_slowFrameStreak = 0;
+                m_fastFrameStreak = 0;
             }
 
             if (!canContinue)
@@ -400,6 +402,8 @@ namespace winrt::MandelbrotViewer::implementation
 
         m_isZoomAnimating = true;
         m_animQualityLevel = 0;
+        m_slowFrameStreak = 0;
+        m_fastFrameStreak = 0;
         m_lastZoomFrameTime = std::chrono::steady_clock::now();
 
         if (StartZoomButton()) StartZoomButton().IsEnabled(false);
@@ -425,6 +429,8 @@ namespace winrt::MandelbrotViewer::implementation
     {
         m_isZoomAnimating = false;
         m_animQualityLevel = 0;
+        m_slowFrameStreak = 0;
+        m_fastFrameStreak = 0;
         m_config.renderStride = 1;
         m_config.edgeRefine = true;
         if (m_zoomTimer)
@@ -533,8 +539,8 @@ namespace winrt::MandelbrotViewer::implementation
 
         if (!m_isZoomAnimating)
         {
-            m_config.renderStride = (m_config.zoom >= 1e8 || m_lastFractalTimeMs > 16.0) ? 2 : 1;
-            m_config.edgeRefine = false;
+            m_config.renderStride = (m_config.zoom >= 1e8 || m_lastFractalTimeMs > 20.0) ? 2 : 1;
+            m_config.edgeRefine = true;
         }
 
         RenderFractal();

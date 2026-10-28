@@ -315,10 +315,8 @@ namespace Mandelbrot
                 return;
             }
 
-            constexpr float UNCOMPUTED = -2.0f;
-            std::fill(outIterations.begin(), outIterations.end(), UNCOMPUTED);
-
-            // Pass 1: Evaluate coarse grid vertices (stride x stride, including right and bottom borders)
+            // Pass 1: Evaluate coarse grid vertices (stride x stride, including right and bottom borders).
+            // Only coarse vertex coordinates are written in Pass 1.
             const int numCoarseY = (height - 1 + stride - 1) / stride + 1;
             #pragma omp parallel for schedule(dynamic, 4)
             for (int cyIdx = 0; cyIdx < numCoarseY; ++cyIdx)
@@ -345,9 +343,11 @@ namespace Mandelbrot
                 return;
             }
 
-            // Pass 2: Reconstruct interior & smooth cells, and refine or smart-sample high-contrast cells
+            // Pass 2: Each cell [x0, x1] x [y0, y1] writes strictly to its disjoint ownership region
+            // [x0, writeXEnd) x [y0, writeYEnd) (skipping the 4 coarse corners already computed in Pass 1).
+            // This guarantees zero OpenMP thread data races and 100% deterministic edge evaluation.
             const int numCellsY = numCoarseY - 1;
-            const float smoothThreshold = edgeRefine ? (0.65f * static_cast<float>(stride)) : 24.0f;
+            const float smoothThreshold = edgeRefine ? (0.15f * static_cast<float>(stride)) : 12.0f;
 
             #pragma omp parallel for schedule(dynamic, 4)
             for (int cyIdx = 0; cyIdx < numCellsY; ++cyIdx)
@@ -361,6 +361,9 @@ namespace Mandelbrot
                 const int y1 = std::min(y0 + stride, height - 1);
                 if (y0 >= y1) continue;
 
+                const int writeYEnd = (y1 == height - 1) ? height : y1;
+                const int yPrev = std::max(0, y0 - stride);
+                const int yNext = std::min(height - 1, y1 + stride);
                 const float invDy = 1.0f / static_cast<float>(y1 - y0);
 
                 for (int x0 = 0; x0 < width - 1; x0 += stride)
@@ -368,62 +371,137 @@ namespace Mandelbrot
                     const int x1 = std::min(x0 + stride, width - 1);
                     if (x0 >= x1) continue;
 
+                    const int writeXEnd = (x1 == width - 1) ? width : x1;
+                    const int xPrev = std::max(0, x0 - stride);
+                    const int xNext = std::min(width - 1, x1 + stride);
+
                     const float v00 = outIterations[static_cast<size_t>(y0) * width + x0];
                     const float v10 = outIterations[static_cast<size_t>(y0) * width + x1];
                     const float v01 = outIterations[static_cast<size_t>(y1) * width + x0];
                     const float v11 = outIterations[static_cast<size_t>(y1) * width + x1];
 
-                    // Case 1: All 4 corners are interior (-1.0f)
+                    auto isCoarseCorner = [&](int px, int py) noexcept -> bool
+                    {
+                        return (py == y0 || py == y1) && (px == x0 || px == x1);
+                    };
+
+                    // Case 1: All 4 corners are interior (-1.0f).
+                    // When edgeRefine is enabled, also verify that the 1-ring of adjacent coarse vertices is interior
+                    // so cells immediately bordering the fractal boundary are always refined per-pixel.
                     if (v00 < 0.0f && v10 < 0.0f && v01 < 0.0f && v11 < 0.0f)
                     {
-                        for (int py = y0; py <= y1; ++py)
+                        bool interiorSafe = true;
+                        if (edgeRefine)
                         {
-                            float* rowPtr = &outIterations[static_cast<size_t>(py) * width];
-                            for (int px = x0; px <= x1; ++px)
-                            {
-                                rowPtr[px] = -1.0f;
-                            }
+                            const float nLeft0 = outIterations[static_cast<size_t>(y0) * width + xPrev];
+                            const float nRight0 = outIterations[static_cast<size_t>(y0) * width + xNext];
+                            const float nLeft1 = outIterations[static_cast<size_t>(y1) * width + xPrev];
+                            const float nRight1 = outIterations[static_cast<size_t>(y1) * width + xNext];
+                            const float nTop0 = outIterations[static_cast<size_t>(yPrev) * width + x0];
+                            const float nBot0 = outIterations[static_cast<size_t>(yNext) * width + x0];
+                            const float nTop1 = outIterations[static_cast<size_t>(yPrev) * width + x1];
+                            const float nBot1 = outIterations[static_cast<size_t>(yNext) * width + x1];
+                            interiorSafe = (nLeft0 < 0.0f && nRight0 < 0.0f && nLeft1 < 0.0f && nRight1 < 0.0f &&
+                                            nTop0 < 0.0f && nBot0 < 0.0f && nTop1 < 0.0f && nBot1 < 0.0f);
                         }
-                        continue;
-                    }
 
-                    // Case 2: All 4 corners escaped in the same basin
-                    if (v00 >= 0.0f && v10 >= 0.0f && v01 >= 0.0f && v11 >= 0.0f &&
-                        SameBasin(v00, v10, type) && SameBasin(v00, v01, type) && SameBasin(v00, v11, type))
-                    {
-                        const float minV = std::min({ v00, v10, v01, v11 });
-                        const float maxV = std::max({ v00, v10, v01, v11 });
-
-                        if (maxV - minV <= smoothThreshold)
+                        if (interiorSafe)
                         {
-                            const float invDx = 1.0f / static_cast<float>(x1 - x0);
-                            for (int py = y0; py <= y1; ++py)
+                            for (int py = y0; py < writeYEnd; ++py)
                             {
-                                const float ty = static_cast<float>(py - y0) * invDy;
                                 float* rowPtr = &outIterations[static_cast<size_t>(py) * width];
-                                for (int px = x0; px <= x1; ++px)
+                                for (int px = x0; px < writeXEnd; ++px)
                                 {
-                                    if (rowPtr[px] != UNCOMPUTED) continue;
-                                    const float tx = static_cast<float>(px - x0) * invDx;
-                                    const float top = v00 + tx * (v10 - v00);
-                                    const float bot = v01 + tx * (v11 - v01);
-                                    const float interp = top + ty * (bot - top);
-                                    rowPtr[px] = smooth ? interp : std::round(interp);
+                                    if (!isCoarseCorner(px, py))
+                                    {
+                                        rowPtr[px] = -1.0f;
+                                    }
                                 }
                             }
                             continue;
                         }
                     }
 
-                    // Case 3: Boundary or high-gradient filament cell
+                    // Case 2: All 4 corners escaped in the same basin.
+                    // When edgeRefine is enabled, only interpolate if all 4 corners lie within the exact same
+                    // integer iteration band (no iteration boundary crosses the cell) and have a gentle gradient
+                    // confirmed by adjacent coarse neighbors.
+                    if (v00 >= 0.0f && v10 >= 0.0f && v01 >= 0.0f && v11 >= 0.0f &&
+                        SameBasin(v00, v10, type) && SameBasin(v00, v01, type) && SameBasin(v00, v11, type))
+                    {
+                        const float minV = std::min({ v00, v10, v01, v11 });
+                        const float maxV = std::max({ v00, v10, v01, v11 });
+                        bool canInterpolate = false;
+
+                        if (!edgeRefine)
+                        {
+                            canInterpolate = (maxV - minV <= smoothThreshold);
+                        }
+                        else if (!smooth)
+                        {
+                            // Discrete mode: only fast-fill when all corners and neighbors share the exact integer iteration
+                            if (minV == maxV)
+                            {
+                                const float nL = outIterations[static_cast<size_t>(y0) * width + xPrev];
+                                const float nR = outIterations[static_cast<size_t>(y0) * width + xNext];
+                                const float nT = outIterations[static_cast<size_t>(yPrev) * width + x0];
+                                const float nB = outIterations[static_cast<size_t>(yNext) * width + x0];
+                                canInterpolate = (nL == v00 && nR == v00 && nT == v00 && nB == v00);
+                            }
+                        }
+                        else
+                        {
+                            // Smooth mode with edgeRefine: require identical integer iteration band and gentle slope
+                            const float band0 = std::floor(v00);
+                            if (maxV - minV <= smoothThreshold &&
+                                std::floor(v10) == band0 &&
+                                std::floor(v01) == band0 &&
+                                std::floor(v11) == band0)
+                            {
+                                const float nL = outIterations[static_cast<size_t>(y0) * width + xPrev];
+                                const float nR = outIterations[static_cast<size_t>(y0) * width + xNext];
+                                const float nT = outIterations[static_cast<size_t>(yPrev) * width + x0];
+                                const float nB = outIterations[static_cast<size_t>(yNext) * width + x0];
+                                const float neighborLimit = smoothThreshold * 2.5f;
+                                canInterpolate =
+                                    (nL >= 0.0f && nR >= 0.0f && nT >= 0.0f && nB >= 0.0f &&
+                                     std::abs(nL - v00) <= neighborLimit &&
+                                     std::abs(nR - v10) <= neighborLimit &&
+                                     std::abs(nT - v00) <= neighborLimit &&
+                                     std::abs(nB - v01) <= neighborLimit);
+                            }
+                        }
+
+                        if (canInterpolate)
+                        {
+                            const float invDx = 1.0f / static_cast<float>(x1 - x0);
+                            for (int py = y0; py < writeYEnd; ++py)
+                            {
+                                const float ty = static_cast<float>(py - y0) * invDy;
+                                float* rowPtr = &outIterations[static_cast<size_t>(py) * width];
+                                for (int px = x0; px < writeXEnd; ++px)
+                                {
+                                    if (isCoarseCorner(px, py)) continue;
+                                    const float tx = static_cast<float>(px - x0) * invDx;
+                                    const float top = v00 + tx * (v10 - v00);
+                                    const float bot = v01 + tx * (v11 - v01);
+                                    const float interp = top + ty * (bot - top);
+                                    rowPtr[px] = smooth ? interp : v00;
+                                }
+                            }
+                            continue;
+                        }
+                    }
+
+                    // Case 3: Boundary, iteration-edge, or filament cell
                     if (edgeRefine)
                     {
-                        for (int py = y0; py <= y1; ++py)
+                        for (int py = y0; py < writeYEnd; ++py)
                         {
                             float* rowPtr = &outIterations[static_cast<size_t>(py) * width];
-                            for (int px = x0; px <= x1; ++px)
+                            for (int px = x0; px < writeXEnd; ++px)
                             {
-                                if (rowPtr[px] == UNCOMPUTED)
+                                if (!isCoarseCorner(px, py))
                                 {
                                     rowPtr[px] = evalPixel(px, py);
                                 }
@@ -432,7 +510,7 @@ namespace Mandelbrot
                     }
                     else
                     {
-                        // Fast motion mode: evaluate cell midpoint when stride >= 3 to preserve thin filaments,
+                        // Fast drag preview mode: evaluate cell midpoint when stride >= 2,
                         // and use sign-safe interpolation so interior (-1.0f) never blends with exterior values.
                         const int xm = (x0 + x1) / 2;
                         const int ym = (y0 + y1) / 2;
@@ -440,7 +518,6 @@ namespace Mandelbrot
                         if (x1 - x0 >= 2 && y1 - y0 >= 2)
                         {
                             vm = evalPixel(xm, ym);
-                            outIterations[static_cast<size_t>(ym) * width + xm] = vm;
                         }
 
                         const float invDx = 1.0f / static_cast<float>(x1 - x0);
@@ -449,13 +526,19 @@ namespace Mandelbrot
                              SameBasin(v00, v10, type) && SameBasin(v00, v01, type) &&
                              SameBasin(v00, v11, type) && SameBasin(v00, vm, type));
 
-                        for (int py = y0; py <= y1; ++py)
+                        for (int py = y0; py < writeYEnd; ++py)
                         {
                             const float ty = static_cast<float>(py - y0) * invDy;
                             float* rowPtr = &outIterations[static_cast<size_t>(py) * width];
-                            for (int px = x0; px <= x1; ++px)
+                            for (int px = x0; px < writeXEnd; ++px)
                             {
-                                if (rowPtr[px] != UNCOMPUTED) continue;
+                                if (isCoarseCorner(px, py)) continue;
+                                if (px == xm && py == ym && x1 - x0 >= 2 && y1 - y0 >= 2)
+                                {
+                                    rowPtr[px] = vm;
+                                    continue;
+                                }
+
                                 const float tx = static_cast<float>(px - x0) * invDx;
                                 if (allExteriorSameBasin)
                                 {
@@ -735,12 +818,36 @@ namespace Mandelbrot
 
                 if (smooth)
                 {
+                    // Perform up to 3 extra post-bailout iterations so |z| is large enough (|z| >= ~65536)
+                    // that the +c term in z_{n+1} = z_n^2 + c has zero float-precision effect (< 1e-9) across
+                    // integer iteration boundaries, eliminating contour seams and edge shimmering.
+                    int smoothIter = iter;
+                    for (int extra = 0; extra < 3 && (zr2 + zi2) < 1e100; ++extra)
+                    {
+                        if (type == FractalType::Mandelbrot)
+                        {
+                            zi = 2.0 * zr * zi + cy;
+                        }
+                        else if (type == FractalType::BurningShip)
+                        {
+                            zi = -2.0 * std::abs(zr * zi) + cy;
+                        }
+                        else
+                        {
+                            zi = -2.0 * zr * zi + cy;
+                        }
+                        zr = zr2 - zi2 + cx;
+                        zr2 = zr * zr;
+                        zi2 = zi * zi;
+                        smoothIter++;
+                    }
+
                     // Continuous potential formula:
-                    // nu = iter + 1 - ln(ln(|z|)) / ln(2)
+                    // nu = smoothIter + 1 - ln(ln(|z|)) / ln(2)
                     // With |z| = sqrt(zr2 + zi2), ln(|z|) = 0.5 * ln(zr2 + zi2)
                     const double mod2 = zr2 + zi2;
                     const double logZn = std::log(mod2) * 0.5;
-                    const double nu = iter + 1.0 - std::log(logZn) * invLn2;
+                    const double nu = smoothIter + 1.0 - std::log(logZn) * invLn2;
                     return static_cast<float>(nu > 0.0 ? nu : 0.0);
                 }
 
@@ -1160,27 +1267,34 @@ namespace Mandelbrot
             BigFloat bestEndZy(0.0);
             bool bestEscaped = false;
 
-            // Check if the cached orbit is already at the exact current center (e.g., zooming on fixed target)
+            const double cachedDiffX = m_hasCachedOrbit ? (m_cachedRefX - centerX).ToDouble() : 1e300;
+            const double cachedDiffY = m_hasCachedOrbit ? (m_cachedRefY - centerY).ToDouble() : 1e300;
+
+            // Reuse the cached orbit as our starting reference if it is at the current center or still well within the central viewport
             if (m_hasCachedOrbit &&
                 m_cachedType == type &&
                 m_cachedActiveLimbs >= activeLimbs &&
-                m_cachedRefX == centerX &&
-                m_cachedRefY == centerY &&
-                !m_cachedOrbit.empty())
+                !m_cachedOrbit.empty() &&
+                ((m_cachedRefX == centerX && m_cachedRefY == centerY) ||
+                 (std::abs(cachedDiffX) <= spanX * 0.30 && std::abs(cachedDiffY) <= spanY * 0.30)))
             {
                 if (!m_cachedEscaped && maxIter > m_cachedMaxIter)
                 {
                     m_cachedRefLen = stepBigFloatOrbit(
-                        centerX,
-                        centerY,
+                        m_cachedRefX,
+                        m_cachedRefY,
                         m_cachedMaxIter,
                         maxIter,
                         m_cachedEndZx,
                         m_cachedEndZy,
                         m_cachedOrbit,
-                         m_cachedEscaped);
+                        m_cachedEscaped);
                     m_cachedMaxIter = maxIter;
                 }
+                bestRefCx = m_cachedRefX;
+                bestRefCy = m_cachedRefY;
+                refPosX = centerPosX + cachedDiffX / stepX;
+                refPosY = centerPosY - cachedDiffY / stepY;
                 bestRefLen = std::min(m_cachedRefLen, maxIter);
                 bestEndZx = m_cachedEndZx;
                 bestEndZy = m_cachedEndZy;
@@ -1362,6 +1476,8 @@ namespace Mandelbrot
 
         const int refLen = bestRefLen;
         const ComplexOrbitPt* orbitPtr = m_cachedOrbit.data();
+        const double refCxDouble = m_cachedRefX.ToDouble();
+        const double refCyDouble = m_cachedRefY.ToDouble();
 
         auto evalDeepPixel = [&](int px, int py) -> float
         {
@@ -1371,6 +1487,8 @@ namespace Mandelbrot
             double dy = 0.0;
             int m = 0;
             int iter = 0;
+            double escapedZx = 0.0;
+            double escapedZy = 0.0;
             double escapedMod2 = 0.0;
 
             switch (type)
@@ -1386,6 +1504,8 @@ namespace Mandelbrot
 
                     if (mod2 > bailoutRadius2)
                     {
+                        escapedZx = zx;
+                        escapedZy = zy;
                         escapedMod2 = mod2;
                         break;
                     }
@@ -1422,6 +1542,8 @@ namespace Mandelbrot
 
                     if (mod2 > bailoutRadius2)
                     {
+                        escapedZx = zx;
+                        escapedZy = zy;
                         escapedMod2 = mod2;
                         break;
                     }
@@ -1461,6 +1583,8 @@ namespace Mandelbrot
 
                     if (mod2 > bailoutRadius2)
                     {
+                        escapedZx = zx;
+                        escapedZy = zy;
                         escapedMod2 = mod2;
                         break;
                     }
@@ -1494,8 +1618,40 @@ namespace Mandelbrot
 
             if (smooth)
             {
-                const double logZn = std::log(escapedMod2) * 0.5;
-                const double nu = iter + 1.0 - std::log(logZn) * invLn2;
+                // Perform up to 3 extra post-bailout iterations so |z| is large enough (|z| >= ~65536)
+                // that the +c term in z_{n+1} = z_n^2 + c has zero float-precision effect (< 1e-9) across
+                // integer iteration boundaries, matching standard Compute() with zero contour seams.
+                const double cxApprox = refCxDouble + dcx;
+                const double cyApprox = refCyDouble + dcy;
+                double zr = escapedZx;
+                double zi = escapedZy;
+                double zr2 = zr * zr;
+                double zi2 = zi * zi;
+                int smoothIter = iter;
+
+                for (int extra = 0; extra < 3 && (zr2 + zi2) < 1e100; ++extra)
+                {
+                    if (type == FractalType::Mandelbrot)
+                    {
+                        zi = 2.0 * zr * zi + cyApprox;
+                    }
+                    else if (type == FractalType::BurningShip)
+                    {
+                        zi = -2.0 * std::abs(zr * zi) + cyApprox;
+                    }
+                    else
+                    {
+                        zi = -2.0 * zr * zi + cyApprox;
+                    }
+                    zr = zr2 - zi2 + cxApprox;
+                    zr2 = zr * zr;
+                    zi2 = zi * zi;
+                    smoothIter++;
+                }
+
+                const double mod2 = zr2 + zi2;
+                const double logZn = std::log(mod2) * 0.5;
+                const double nu = smoothIter + 1.0 - std::log(logZn) * invLn2;
                 return static_cast<float>(nu > 0.0 ? nu : 0.0);
             }
 
