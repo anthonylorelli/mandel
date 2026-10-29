@@ -104,6 +104,7 @@
     <ClInclude Include="..\MandelbrotViewer\HighPrecision.h" />
     <ClInclude Include="..\MandelbrotViewer\MandelbrotEngine.h" />
     <ClInclude Include="..\MandelbrotViewer\ColorTheme.h" />
+    <ClInclude Include="..\MandelbrotViewer\ViewState.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp">
@@ -112,6 +113,7 @@
     <ClCompile Include="TestMain.cpp" />
     <ClCompile Include="MandelbrotEngineTests.cpp" />
     <ClCompile Include="ColorThemeTests.cpp" />
+    <ClCompile Include="ViewStateTests.cpp" />
     <ClCompile Include="..\MandelbrotViewer\MandelbrotEngine.cpp" />
     <ClCompile Include="..\MandelbrotViewer\ColorTheme.cpp" />
   </ItemGroup>

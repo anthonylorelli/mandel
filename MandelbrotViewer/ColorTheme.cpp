@@ -261,7 +261,7 @@ namespace Mandelbrot
 
         for (size_t x = 0; x < width; ++x)
         {
-            const float t = static_cast<float>(x) / static_cast<float>(width - 1);
+            const float t = (width > 1) ? static_cast<float>(x) / static_cast<float>(width - 1) : 0.0f;
             const size_t lutIdx = static_cast<size_t>(t * static_cast<float>(LUT_SIZE - 1));
             pDestPixels[x] = m_lut[std::min(lutIdx, LUT_SIZE - 1)];
         }
@@ -367,18 +367,20 @@ namespace Mandelbrot
                 float deltaU = 0.0f;
                 if (totalCount >= 64)
                 {
-                    const intptr_t nx = (idx + 1 < totalCount) ? (idx + 1) : (idx - 1);
-                    const float iterX = iterData[nx];
-                    if (iterX >= 0.0f)
+                    // Horizontal neighbors must stay in the same scanline, including partial final rows.
+                    const bool hasLeft = idx > 0 && (rowStride <= 0 || idx % rowStride != 0);
+                    const bool hasRight = idx + 1 < totalCount &&
+                        (rowStride <= 0 || (idx + 1) % rowStride != 0);
+                    if (hasRight && iterData[idx + 1] >= 0.0f)
                     {
-                        deltaU = std::max(deltaU, std::abs(MapIterationToPhase(iterX, frequency) - basePhase));
+                        deltaU = std::max(deltaU, std::abs(MapIterationToPhase(iterData[idx + 1], frequency) - basePhase));
                     }
-                    else if (idx > 0 && iterData[idx - 1] >= 0.0f)
+                    else if (hasLeft && iterData[idx - 1] >= 0.0f)
                     {
                         deltaU = std::max(deltaU, std::abs(basePhase - MapIterationToPhase(iterData[idx - 1], frequency)));
                     }
 
-                    if (rowStride > 1)
+                    if (rowStride > 0)
                     {
                         const intptr_t ny = (idx + rowStride < totalCount) ? (idx + rowStride) : (idx - rowStride);
                         if (ny >= 0 && ny < totalCount)

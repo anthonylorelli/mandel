@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "MainWindow.xaml.h"
+#include "ViewState.h"
 #if __has_include("MainWindow.g.cpp")
 #include "MainWindow.g.cpp"
 #endif
@@ -53,6 +54,14 @@ namespace winrt::MandelbrotViewer::implementation
         Title(L"Fractal Studio - Mandelbrot Set");
 
         InitializeControls();
+        Closed([this](auto&&, auto&&)
+        {
+            m_isClosed = true;
+            m_isZoomAnimating = false;
+            m_isDragging = false;
+            if (m_animateTimer) m_animateTimer.Stop();
+            if (m_zoomTimer) m_zoomTimer.Stop();
+        });
     }
 
     void MainWindow::InitializeControls()
@@ -153,23 +162,19 @@ namespace winrt::MandelbrotViewer::implementation
                 }
             }
 
-            // Apply hysteresis-stabilized adaptive motion quality level:
-            // Level 0: stride = 2, edgeRefine = true (~3.8x speedup, 1x1 exact interior/exterior boundaries, C1 smooth exterior)
-            // Level 1: stride = 3, edgeRefine = true (~7x speedup for heavy deep-zoom frames)
-            // Level 2: stride = 4, edgeRefine = false (~10x speedup for extreme iteration budgets)
+            // Adapt sampling density while preserving per-pixel detail in complex cells.
+            // Heavy frames must never disable refinement: that replaces filaments with coarse blocks.
+            m_config.edgeRefine = true;
             switch (m_animQualityLevel)
             {
             case 0:
                 m_config.renderStride = 2;
-                m_config.edgeRefine = true;
                 break;
             case 1:
                 m_config.renderStride = 3;
-                m_config.edgeRefine = true;
                 break;
             default:
                 m_config.renderStride = 4;
-                m_config.edgeRefine = false;
                 break;
             }
 
@@ -394,10 +399,12 @@ namespace winrt::MandelbrotViewer::implementation
     {
         if (!TargetXTextBox() || !TargetYTextBox()) return;
 
-        const size_t decimals = (m_config.zoom >= 1e14) ? 28 : ((m_config.zoom >= 1e6) ? 16 : 10);
+        const size_t decimals = Mandelbrot::CoordinateDecimalPlaces(m_config.zoom);
         m_suppressEvents = true;
-        TargetXTextBox().Text(winrt::hstring(m_zoomTargetX.ToWString(decimals)));
-        TargetYTextBox().Text(winrt::hstring(m_zoomTargetY.ToWString(decimals)));
+        m_targetXText = winrt::hstring(m_zoomTargetX.ToWString(decimals));
+        m_targetYText = winrt::hstring(m_zoomTargetY.ToWString(decimals));
+        TargetXTextBox().Text(m_targetXText);
+        TargetYTextBox().Text(m_targetYText);
         m_suppressEvents = false;
     }
 
@@ -439,10 +446,13 @@ namespace winrt::MandelbrotViewer::implementation
         }
         else if (TargetXTextBox() && TargetYTextBox())
         {
-            Mandelbrot::BigFloat parsedX;
-            Mandelbrot::BigFloat parsedY;
-            const bool validX = Mandelbrot::BigFloat::TryParse(TargetXTextBox().Text(), parsedX);
-            const bool validY = Mandelbrot::BigFloat::TryParse(TargetYTextBox().Text(), parsedY);
+            // Preserve the exact target when the user has not edited its formatted text.
+            Mandelbrot::BigFloat parsedX = m_zoomTargetX;
+            Mandelbrot::BigFloat parsedY = m_zoomTargetY;
+            const bool validX = TargetXTextBox().Text() == m_targetXText ||
+                Mandelbrot::BigFloat::TryParse(TargetXTextBox().Text(), parsedX);
+            const bool validY = TargetYTextBox().Text() == m_targetYText ||
+                Mandelbrot::BigFloat::TryParse(TargetYTextBox().Text(), parsedY);
 
             m_zoomTargetX = validX ? parsedX : m_config.hpCenterX;
             m_zoomTargetY = validY ? parsedY : m_config.hpCenterY;
@@ -604,16 +614,22 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::OnViewportPointerPressed(IInspectable const&, Input::PointerRoutedEventArgs const& e)
     {
+        const auto point = e.GetCurrentPoint(FractalImage());
+        if (m_isDragging || !point.Properties().IsLeftButtonPressed()) return;
+        if (m_isZoomAnimating) StopZoomAnimation();
+        if (!FractalImage().CapturePointer(e.Pointer())) return;
         m_isDragging = true;
-        m_dragStartPoint = e.GetCurrentPoint(FractalImage()).Position();
+        m_dragPointerId = e.Pointer().PointerId();
+        m_dragStartPoint = point.Position();
         m_dragStartHpCenterX = m_config.hpCenterX;
         m_dragStartHpCenterY = m_config.hpCenterY;
-        FractalImage().CapturePointer(e.Pointer());
+        e.Handled(true);
     }
 
     void MainWindow::OnViewportPointerMoved(IInspectable const&, Input::PointerRoutedEventArgs const& e)
     {
-        if (!m_isDragging || m_currentPixelWidth <= 0 || m_currentPixelHeight <= 0) return;
+        if (!m_isDragging || e.Pointer().PointerId() != m_dragPointerId ||
+            m_currentPixelWidth <= 0 || m_currentPixelHeight <= 0) return;
 
         const auto currentPoint = e.GetCurrentPoint(FractalImage()).Position();
         const double dx = currentPoint.X - m_dragStartPoint.X;
@@ -634,7 +650,7 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::OnViewportPointerReleased(IInspectable const&, Input::PointerRoutedEventArgs const& e)
     {
-        if (m_isDragging)
+        if (m_isDragging && e.Pointer().PointerId() == m_dragPointerId)
         {
             m_isDragging = false;
             FractalImage().ReleasePointerCapture(e.Pointer());
@@ -651,9 +667,11 @@ namespace winrt::MandelbrotViewer::implementation
     void MainWindow::OnViewportPointerWheelChanged(IInspectable const&, Input::PointerRoutedEventArgs const& e)
     {
         const int delta = e.GetCurrentPoint(FractalImage()).Properties().MouseWheelDelta();
+        if (delta == 0) return;
         const auto pos = e.GetCurrentPoint(FractalImage()).Position();
         const double factor = (delta > 0) ? 1.25 : 0.8;
         ApplyZoom(factor, pos.X, pos.Y);
+        e.Handled(true);
     }
 
     void MainWindow::OnViewportDoubleTapped(IInspectable const&, Input::DoubleTappedRoutedEventArgs const& e)
@@ -664,12 +682,12 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::OnZoomInClick(IInspectable const&, RoutedEventArgs const&)
     {
-        ApplyZoom(1.25, m_currentPixelWidth * 0.5, m_currentPixelHeight * 0.5);
+        ApplyZoom(1.25, (m_currentPixelWidth - 1) * 0.5, (m_currentPixelHeight - 1) * 0.5);
     }
 
     void MainWindow::OnZoomOutClick(IInspectable const&, RoutedEventArgs const&)
     {
-        ApplyZoom(0.8, m_currentPixelWidth * 0.5, m_currentPixelHeight * 0.5);
+        ApplyZoom(0.8, (m_currentPixelWidth - 1) * 0.5, (m_currentPixelHeight - 1) * 0.5);
     }
 
     void MainWindow::OnResetViewClick(IInspectable const&, RoutedEventArgs const&)
@@ -1106,9 +1124,20 @@ namespace winrt::MandelbrotViewer::implementation
     winrt::Windows::Foundation::IAsyncAction MainWindow::OnExportImageClick(IInspectable const&, RoutedEventArgs const&)
     {
         if (!m_bitmap || m_currentPixelWidth <= 0 || m_currentPixelHeight <= 0) co_return;
+        auto lifetime = get_strong();
 
         try
         {
+            // Snapshot before the first suspension: animation and resizing can replace the live bitmap.
+            const uint32_t width = static_cast<uint32_t>(m_bitmap.PixelWidth());
+            const uint32_t height = static_cast<uint32_t>(m_bitmap.PixelHeight());
+            auto buffer = m_bitmap.PixelBuffer();
+            auto byteAccess = buffer.as<::Windows::Storage::Streams::IBufferByteAccess>();
+            uint8_t* pRaw = nullptr;
+            winrt::check_hresult(byteAccess->Buffer(&pRaw));
+            if (!pRaw) throw winrt::hresult_error(E_FAIL, L"Unable to read the viewport image.");
+            const std::vector<uint8_t> pixels(pRaw, pRaw + buffer.Length());
+
             auto picker = winrt::Windows::Storage::Pickers::FileSavePicker();
             picker.SuggestedStartLocation(winrt::Windows::Storage::Pickers::PickerLocationId::PicturesLibrary);
             picker.FileTypeChoices().Insert(L"PNG Image (*.png)", winrt::single_threaded_vector<winrt::hstring>({ L".png" }));
@@ -1118,55 +1147,37 @@ namespace winrt::MandelbrotViewer::implementation
             HWND hwnd = nullptr;
             winrt::check_hresult(this->try_as<IWindowNative>()->get_WindowHandle(&hwnd));
             auto initializeWithWindow = picker.as<IInitializeWithWindow>();
-            initializeWithWindow->Initialize(hwnd);
+            winrt::check_hresult(initializeWithWindow->Initialize(hwnd));
 
             auto file = co_await picker.PickSaveFileAsync();
             if (file)
             {
                 auto stream = co_await file.OpenAsync(winrt::Windows::Storage::FileAccessMode::ReadWrite);
+                stream.Size(0);
                 auto encoder = co_await winrt::Windows::Graphics::Imaging::BitmapEncoder::CreateAsync(
                     winrt::Windows::Graphics::Imaging::BitmapEncoder::PngEncoderId(), stream);
 
-                auto buffer = m_bitmap.PixelBuffer();
-                auto byteAccess = buffer.as<::Windows::Storage::Streams::IBufferByteAccess>();
-                uint8_t* pRaw = nullptr;
-                if (SUCCEEDED(byteAccess->Buffer(&pRaw)) && pRaw)
-                {
-                    encoder.SetPixelData(
-                        winrt::Windows::Graphics::Imaging::BitmapPixelFormat::Bgra8,
-                        winrt::Windows::Graphics::Imaging::BitmapAlphaMode::Straight,
-                        static_cast<uint32_t>(m_currentPixelWidth),
-                        static_cast<uint32_t>(m_currentPixelHeight),
-                        96.0, 96.0,
-                        winrt::array_view<const uint8_t>(pRaw, pRaw + (static_cast<size_t>(m_currentPixelWidth) * m_currentPixelHeight * 4)));
+                encoder.SetPixelData(
+                    winrt::Windows::Graphics::Imaging::BitmapPixelFormat::Bgra8,
+                    winrt::Windows::Graphics::Imaging::BitmapAlphaMode::Straight,
+                    width, height, 96.0, 96.0, pixels);
 
-                    co_await encoder.FlushAsync();
-                }
+                co_await encoder.FlushAsync();
+                if (!m_isClosed) HudTimingText().Text(L"Viewport image exported.");
             }
         }
-        catch (...)
+        catch (const winrt::hresult_error& error)
         {
-            // Silently handle picker cancellation
+            // Picker cancellation returns a null file; actual export errors need visible feedback.
+            if (!m_isClosed) HudTimingText().Text(L"Image export failed: " + error.message());
         }
     }
 
     winrt::Windows::Foundation::IAsyncAction MainWindow::OnCopyCoordsClick(IInspectable const&, RoutedEventArgs const&)
     {
-        std::wostringstream ss;
-        ss << L"{\n"
-           << L"  \"fractalType\": \"" << Mandelbrot::GetFractalTypeName(m_config.fractalType) << L"\",\n"
-           << L"  \"centerX\": \"" << m_config.hpCenterX.ToWString(32) << L"\",\n"
-           << L"  \"centerY\": \"" << m_config.hpCenterY.ToWString(32) << L"\",\n"
-           << L"  \"zoom\": " << std::scientific << std::setprecision(6) << m_config.zoom << std::fixed << L",\n"
-           << L"  \"maxIterations\": " << m_config.maxIterations << L",\n"
-           << L"  \"smooth\": " << (m_config.smooth ? L"true" : L"false") << L",\n"
-           << L"  \"frequency\": " << m_frequency << L",\n"
-           << L"  \"phaseOffset\": " << m_phaseOffset << L",\n"
-           << L"  \"theme\": \"" << Mandelbrot::GetPresetName(m_theme.CurrentPreset()) << L"\"\n"
-           << L"}";
-
         auto package = winrt::Windows::ApplicationModel::DataTransfer::DataPackage();
-        package.SetText(ss.str());
+        package.SetText(Mandelbrot::SerializeViewState(
+            m_config, m_theme, m_frequency, m_phaseOffset, m_invertColors, m_interiorColor));
         winrt::Windows::ApplicationModel::DataTransfer::Clipboard::SetContent(package);
 
         // Visual confirmation by updating Hud text briefly

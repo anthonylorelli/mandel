@@ -160,6 +160,55 @@ TEST_CASE(ColorTheme, GeneratePreview_SizeAndContent)
     ASSERT_NE(preview.front(), preview.back());
 }
 
+TEST_CASE(ColorTheme, GeneratePreview_SinglePixelAndEmpty)
+{
+    ColorTheme theme(PresetTheme::SunsetGlow);
+    uint32_t pixel = 0;
+    theme.GeneratePreview(&pixel, 1);
+    ASSERT_EQ(theme.Lut().front(), pixel);
+    theme.GeneratePreview(&pixel, 0);
+    theme.GeneratePreview(nullptr, 1);
+    ASSERT_EQ(theme.Lut().front(), pixel);
+}
+
+TEST_CASE(ColorTheme, Recolor_HorizontalNeighborsStayWithinRows)
+{
+    ColorTheme theme(PresetTheme::Monochrome);
+    // Each row has a flat plateau at both ends. Only the unrelated next row's first
+    // pixel differs at the scanline seam, so it must not blur the preceding pixel.
+    for (int width : { 1, 8, 11 })
+    {
+        std::vector<float> iterations(64 * width, 10.0f);
+        for (size_t i = 0; i < iterations.size(); ++i)
+        {
+            if (i % width < width / 2) iterations[i] = 10000.0f;
+        }
+        std::vector<uint32_t> pixels(iterations.size());
+        theme.Recolor(iterations, pixels.data(), pixels.size(), 1.0f, 0.0f, false,
+            0xFF000000, FractalType::Mandelbrot, width);
+        std::vector<float> flat{ 10.0f };
+        uint32_t expected = 0;
+        theme.Recolor(flat, &expected, 1, 1.0f, 0.0f, false);
+        for (size_t i = width - 1; i < pixels.size(); i += width)
+        {
+            ASSERT_EQ(expected, pixels[i]);
+        }
+    }
+}
+
+TEST_CASE(ColorTheme, Recolor_PartialFinalRowDoesNotWrapLeft)
+{
+    ColorTheme theme(PresetTheme::Inferno);
+    std::vector<float> iterations(65, 12.0f);
+    iterations[63] = 10000.0f;
+    std::vector<uint32_t> pixels(iterations.size());
+    theme.Recolor(iterations, pixels.data(), pixels.size(), 1.0f, 0.0f, false,
+        0xFF000000, FractalType::Mandelbrot, 8);
+    uint32_t expected = 0;
+    theme.Recolor(std::vector<float>{ 12.0f }, &expected, 1, 1.0f, 0.0f, false);
+    ASSERT_EQ(expected, pixels.back());
+}
+
 TEST_CASE(ColorTheme, HighIteration_LogCompressionAndAntiAliasing)
 {
     // 1. Logarithmic compression: +50 iterations at iter=2000 must advance palette phase by a small fraction

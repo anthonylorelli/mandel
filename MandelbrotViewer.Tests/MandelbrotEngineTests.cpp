@@ -800,6 +800,70 @@ TEST_CASE(MandelbrotEngine, AdaptiveSubdivision_StrideAndEdgeRefinement)
     }
 }
 
+TEST_CASE(MandelbrotEngine, AdaptiveSubdivision_HighIterationFilamentsRefinePerPixel)
+{
+    MandelbrotEngine engine;
+    MandelbrotConfig config;
+    config.width = 96;
+    config.height = 72;
+    config.maxIterations = 2000;
+    config.SetCenter(-0.7436438870371587, 0.1318259042053119);
+    config.edgeRefine = true;
+
+    for (int stride : { 2, 3, 4 })
+    {
+        int steepCellsChecked = 0;
+        int hiddenDetailCellsChecked = 0;
+        for (double zoom : { 85000.0, 500000.0 })
+        {
+            config.zoom = zoom;
+            config.renderStride = 1;
+            std::vector<float> full;
+            engine.Compute(config, full);
+            config.renderStride = stride;
+            std::vector<float> adaptive;
+            engine.Compute(config, adaptive);
+
+            auto sample = [&](int x, int y) { return full[static_cast<size_t>(y) * config.width + x]; };
+            for (int y0 = 0; y0 < config.height - 1; y0 += stride)
+            {
+                const int y1 = std::min(y0 + stride, config.height - 1);
+                for (int x0 = 0; x0 < config.width - 1; x0 += stride)
+                {
+                    const int x1 = std::min(x0 + stride, config.width - 1);
+                    const float v00 = sample(x0, y0), v10 = sample(x1, y0);
+                    const float v01 = sample(x0, y1), v11 = sample(x1, y1);
+                    const float minV = std::min({ v00, v10, v01, v11 });
+                    const float maxV = std::max({ v00, v10, v01, v11 });
+                    if (minV < 100.0f) continue; // Focus on detailed high-iteration exterior cells.
+
+                    const int xm = (x0 + x1) / 2, ym = (y0 + y1) / 2;
+                    const float tx = static_cast<float>(xm - x0) / (x1 - x0);
+                    const float ty = static_cast<float>(ym - y0) / (y1 - y0);
+                    const float top = v00 + tx * (v10 - v00);
+                    const float bot = v01 + tx * (v11 - v01);
+                    const float midpointError = std::abs(sample(xm, ym) - (top + ty * (bot - top)));
+                    const bool steep = maxV - minV > 1.25f * stride;
+                    const bool hiddenDetail = !steep && midpointError > 0.25f;
+                    if (!steep && !hiddenDetail) continue;
+                    if (steep) ++steepCellsChecked;
+                    else ++hiddenDetailCellsChecked;
+
+                    // Animation must resolve these filaments as precisely as the stopped frame,
+                    // including cells whose similar corner values conceal a ridge at the midpoint.
+                    const int endY = (y1 == config.height - 1) ? config.height : y1;
+                    const int endX = (x1 == config.width - 1) ? config.width : x1;
+                    for (int y = y0; y < endY; ++y)
+                        for (int x = x0; x < endX; ++x)
+                            ASSERT_EQ(sample(x, y), adaptive[static_cast<size_t>(y) * config.width + x]);
+                }
+            }
+        }
+        ASSERT_GT(steepCellsChecked, 0);
+        ASSERT_GT(hiddenDetailCellsChecked, 0);
+    }
+}
+
 TEST_CASE(MandelbrotEngine, DeepZoom_ReferenceOrbitCachingAndExtension)
 {
     MandelbrotEngine engine;

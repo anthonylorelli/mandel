@@ -29,6 +29,8 @@
                    PointerPressed="OnViewportPointerPressed"
                    PointerMoved="OnViewportPointerMoved"
                    PointerReleased="OnViewportPointerReleased"
+                   PointerCanceled="OnViewportPointerReleased"
+                   PointerCaptureLost="OnViewportPointerReleased"
                    PointerWheelChanged="OnViewportPointerWheelChanged"
                    DoubleTapped="OnViewportDoubleTapped" />
 

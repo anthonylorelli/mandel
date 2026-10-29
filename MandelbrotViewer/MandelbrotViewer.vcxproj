@@ -151,6 +151,7 @@
     <ClInclude Include="ColorTheme.h" />
     <ClInclude Include="HighPrecision.h" />
     <ClInclude Include="MandelbrotEngine.h" />
+    <ClInclude Include="ViewState.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp">
