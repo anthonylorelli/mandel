@@ -116,6 +116,7 @@ namespace winrt::MandelbrotViewer::implementation
         std::chrono::steady_clock::time_point m_lastZoomFrameTime{};
 
         bool m_isDragging{ false };
+        uint32_t m_dragPointerId{ 0 };
         winrt::Windows::Foundation::Point m_dragStartPoint{ 0, 0 };
         Mandelbrot::BigFloat m_dragStartHpCenterX{ -0.75 };
         Mandelbrot::BigFloat m_dragStartHpCenterY{ 0.0 };
@@ -126,6 +127,9 @@ namespace winrt::MandelbrotViewer::implementation
         bool m_isSidebarVisible{ true };
         bool m_sidebarVisibleBeforeFullScreen{ true };
         bool m_suppressEvents{ true };
+        bool m_isClosed{ false };
+        winrt::hstring m_targetXText;
+        winrt::hstring m_targetYText;
         float m_frequency{ 1.0f };
         float m_phaseOffset{ 0.0f };
         bool m_invertColors{ false };

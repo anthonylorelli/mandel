@@ -258,7 +258,7 @@ namespace TestHarness
         double act_d = static_cast<double>(actual); \
         double tol_d = static_cast<double>(tolerance); \
         double diff = std::abs(exp_d - act_d); \
-        if (diff > tol_d) { \
+        if (!(diff <= tol_d)) { \
             std::ostringstream ss; \
             ss << "Assertion failed: ASSERT_NEAR(" #expected ", " #actual ", " #tolerance ")\n" \
                << "             Expected:  " << std::setprecision(8) << exp_d << "\n" \
