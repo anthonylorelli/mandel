@@ -922,3 +922,82 @@ TEST_CASE(MandelbrotEngine, IterationEdge_SmoothContinuityAndNoFlicker)
         ASSERT_GT(bandTransitionsChecked, 2);
     }
 }
+
+TEST_CASE(MandelbrotEngine, AutoExplore_RandomInterestingTargetAndRetargetOnSolid)
+{
+    MandelbrotEngine engine;
+
+    // 1. ShouldRetargetZoom detects solid interior (-1.0f) and flat exterior regions, while keeping rich boundaries
+    {
+        MandelbrotConfig cfg;
+        cfg.fractalType = FractalType::Mandelbrot;
+        cfg.width = 64;
+        cfg.height = 48;
+        cfg.SetCenter(-0.75, 0.0);
+        cfg.zoom = 1.0;
+        cfg.maxIterations = 300;
+        cfg.smooth = true;
+
+        std::vector<float> iters;
+        engine.Compute(cfg, iters);
+
+        // Deep inside main cardioid (-0.25, 0.0) -> solid interior -> should retarget
+        ASSERT_TRUE(MandelbrotEngine::ShouldRetargetZoom(cfg, iters, BigFloat(-0.25), BigFloat(0.0)));
+
+        // Far exterior corner (-2.1, 1.0) -> flat low-iteration exterior -> should retarget
+        ASSERT_TRUE(MandelbrotEngine::ShouldRetargetZoom(cfg, iters, BigFloat(-2.1), BigFloat(1.0)));
+
+        // Seahorse Valley boundary (-0.7436438870371587, 0.1318259042053119) -> rich boundary -> should stay on target
+        ASSERT_FALSE(MandelbrotEngine::ShouldRetargetZoom(
+            cfg, iters, BigFloat(-0.7436438870371587), BigFloat(0.1318259042053119)));
+    }
+
+    // 2. PickInterestingTarget selects valid boundary targets across all 4 fractal types and varies with seed
+    for (FractalType type : GetAllFractalTypes())
+    {
+        MandelbrotConfig cfg;
+        cfg.fractalType = type;
+        cfg.width = 64;
+        cfg.height = 48;
+        const auto& bms = GetBookmarks(type);
+        cfg.SetCenter(bms[0].centerX, bms[0].centerY);
+        cfg.zoom = bms[0].zoom;
+        cfg.maxIterations = 300;
+        cfg.smooth = true;
+
+        std::vector<float> iters;
+        engine.Compute(cfg, iters);
+
+        BigFloat tx1, ty1;
+        ASSERT_TRUE(MandelbrotEngine::PickInterestingTarget(cfg, iters, tx1, ty1, 101));
+        ASSERT_FALSE(MandelbrotEngine::ShouldRetargetZoom(cfg, iters, tx1, ty1));
+
+        // Simulate smooth zoom + pan toward (tx1, ty1) and verify it never produces a 100% solid screen
+        MandelbrotConfig animCfg = cfg;
+        for (int frame = 0; frame < 20; ++frame)
+        {
+            const double blend = std::min(1.0, (frame + 1) * 0.1);
+            ASSERT_TRUE(MandelbrotEngine::StepZoomAnimation(animCfg, tx1, ty1, 1.18, blend));
+        }
+
+        engine.Compute(animCfg, iters);
+        int interiorCount = 0;
+        float minExt = 1e30f;
+        float maxExt = -1e30f;
+        for (float v : iters)
+        {
+            if (v < 0.0f) interiorCount++;
+            else
+            {
+                minExt = std::min(minExt, v);
+                maxExt = std::max(maxExt, v);
+            }
+        }
+        // Screen must not be 100% interior or 100% flat exterior after zooming in on the refined boundary target
+        ASSERT_LT(interiorCount, static_cast<int>(iters.size() * 90 / 100));
+        if (interiorCount == 0)
+        {
+            ASSERT_GT(maxExt - minExt, 2.0f);
+        }
+    }
+}

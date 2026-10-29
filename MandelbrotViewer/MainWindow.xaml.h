@@ -27,6 +27,7 @@ namespace winrt::MandelbrotViewer::implementation
 
         // Animated Zoom controls
         void OnUseCurrentCenterClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
+        void OnRandomTargetToggleChanged(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
         void OnZoomDirectionInClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
         void OnZoomDirectionOutClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
         void OnZoomSpeedSliderChanged(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::Controls::Primitives::RangeBaseValueChangedEventArgs const& e);
@@ -80,6 +81,8 @@ namespace winrt::MandelbrotViewer::implementation
         void UpdateStopControlsFromSelected();
         void ApplyZoom(double factor, double centerPivotX, double centerPivotY);
         void SyncTargetInputsFromCenter();
+        void UpdateTargetTextBoxes();
+        void PickAndApplyRandomTarget();
         void StartZoomAnimation();
         void StopZoomAnimation();
         void SetZoomDirection(bool zoomIn);
@@ -99,7 +102,11 @@ namespace winrt::MandelbrotViewer::implementation
 
         bool m_isZoomAnimating{ false };
         bool m_zoomInDirection{ true };
+        bool m_autoPickInterestingTarget{ false };
+        bool m_hasActiveRandomTarget{ false };
         double m_zoomSpeed{ 1.0 };
+        double m_retargetPanProgress{ 1.0 };
+        int m_framesSinceRetarget{ 0 };
         int m_animQualityLevel{ 0 };
         int m_slowFrameStreak{ 0 };
         int m_fastFrameStreak{ 0 };
