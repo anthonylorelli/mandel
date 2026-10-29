@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "MainWindow.xaml.h"
 #include "ViewState.h"
+#include "FrameTiming.h"
 #if __has_include("MainWindow.g.cpp")
 #include "MainWindow.g.cpp"
 #endif
@@ -107,7 +108,7 @@ namespace winrt::MandelbrotViewer::implementation
 
         // Setup smooth continuous zoom timer
         m_zoomTimer = DispatcherTimer();
-        m_zoomTimer.Interval(std::chrono::milliseconds(16));
+        m_zoomTimer.Interval(Mandelbrot::ZoomFrameDelay(std::chrono::steady_clock::duration::zero()));
         m_zoomTimer.Tick([this](auto&&, auto&&)
         {
             if (!m_isZoomAnimating)
@@ -213,6 +214,7 @@ namespace winrt::MandelbrotViewer::implementation
             }
             else if (m_isZoomAnimating)
             {
+                m_zoomTimer.Interval(Mandelbrot::ZoomFrameDelay(std::chrono::steady_clock::now() - now));
                 m_zoomTimer.Start();
             }
         });
@@ -498,6 +500,7 @@ namespace winrt::MandelbrotViewer::implementation
 
         if (m_zoomTimer)
         {
+            m_zoomTimer.Interval(Mandelbrot::ZoomFrameDelay(std::chrono::steady_clock::duration::zero()));
             m_zoomTimer.Start();
         }
     }

@@ -301,7 +301,8 @@ namespace Mandelbrot
             const int stride = std::clamp(renderStride, 1, 8);
             if (stride <= 1 || width < 8 || height < 8)
             {
-                #pragma omp parallel for schedule(dynamic, 16)
+                // Expensive rows vary widely in cost; dispatch one at a time to avoid a long tail.
+                #pragma omp parallel for schedule(dynamic, 1)
                 for (int py = 0; py < height; ++py)
                 {
                     if (cancelToken && cancelToken->load(std::memory_order_relaxed))
@@ -321,7 +322,7 @@ namespace Mandelbrot
             // Pass 1: Evaluate coarse grid vertices (stride x stride, including right and bottom borders).
             // Only coarse vertex coordinates are written in Pass 1.
             const int numCoarseY = (height - 1 + stride - 1) / stride + 1;
-            #pragma omp parallel for schedule(dynamic, 4)
+            #pragma omp parallel for schedule(dynamic, 1)
             for (int cyIdx = 0; cyIdx < numCoarseY; ++cyIdx)
             {
                 if (cancelToken && cancelToken->load(std::memory_order_relaxed))
@@ -352,7 +353,7 @@ namespace Mandelbrot
             const int numCellsY = numCoarseY - 1;
             const float smoothThreshold = edgeRefine ? (1.25f * static_cast<float>(stride)) : 24.0f;
 
-            #pragma omp parallel for schedule(dynamic, 4)
+            #pragma omp parallel for schedule(dynamic, 1)
             for (int cyIdx = 0; cyIdx < numCellsY; ++cyIdx)
             {
                 if (cancelToken && cancelToken->load(std::memory_order_relaxed))
@@ -388,6 +389,22 @@ namespace Mandelbrot
                         return (py == y0 || py == y1) && (px == x0 || px == x1);
                     };
 
+                    const int xm = (x0 + x1) / 2;
+                    const int ym = (y0 + y1) / 2;
+                    float midpointValue = 0.0f;
+                    bool hasMidpoint = false;
+                    auto sampleMidpoint = [&]() -> float
+                    {
+                        if (!hasMidpoint)
+                        {
+                            midpointValue = isCoarseCorner(xm, ym)
+                                ? outIterations[static_cast<size_t>(ym) * width + xm]
+                                : evalPixel(xm, ym);
+                            hasMidpoint = true;
+                        }
+                        return midpointValue;
+                    };
+
                     // Case 1: All 4 corners are interior (-1.0f).
                     // When edgeRefine is enabled, also check the 1-ring of already-computed coarse vertices so cells
                     // grazing the interior/exterior boundary never overwrite a 1-pixel exterior indentation with -1.0f.
@@ -409,7 +426,7 @@ namespace Mandelbrot
                             if (interiorSafe)
                             {
                                 // Similar corner and neighbor values can still conceal a thin exterior filament.
-                                interiorSafe = evalPixel((x0 + x1) / 2, (y0 + y1) / 2) < 0.0f;
+                                interiorSafe = sampleMidpoint() < 0.0f;
                             }
                         }
 
@@ -468,9 +485,7 @@ namespace Mandelbrot
                             bool canInterpolate = true;
                             if (edgeRefine)
                             {
-                                const int xm = (x0 + x1) / 2;
-                                const int ym = (y0 + y1) / 2;
-                                const float vm = evalPixel(xm, ym);
+                                const float vm = sampleMidpoint();
                                 const float tx = static_cast<float>(xm - x0) * invDx;
                                 const float ty = static_cast<float>(ym - y0) * invDy;
                                 const float top = v00 + tx * (v10 - v00);
@@ -501,9 +516,7 @@ namespace Mandelbrot
                         {
                             // Smooth mode with stride >= 3 on a steep filament: sample the single cell midpoint
                             // to preserve filament ridges without evaluating all stride*stride pixels.
-                            const int xm = (x0 + x1) / 2;
-                            const int ym = (y0 + y1) / 2;
-                            const float vm = evalPixel(xm, ym);
+                            const float vm = sampleMidpoint();
                             if (vm >= 0.0f && SameBasin(v00, vm, type))
                             {
                                 const float invDx = 1.0f / static_cast<float>(x1 - x0);
@@ -543,19 +556,19 @@ namespace Mandelbrot
                             {
                                 if (!isCoarseCorner(px, py))
                                 {
-                                    rowPtr[px] = evalPixel(px, py);
+                                    // A failed midpoint check still produced an exact sample worth keeping.
+                                    rowPtr[px] = (hasMidpoint && py == ym && px == xm)
+                                        ? midpointValue : evalPixel(px, py);
                                 }
                             }
                         }
                     }
                     else
                     {
-                        const int xm = (x0 + x1) / 2;
-                        const int ym = (y0 + y1) / 2;
                         float vm = v00;
                         if (x1 - x0 >= 2 && y1 - y0 >= 2)
                         {
-                            vm = evalPixel(xm, ym);
+                            vm = sampleMidpoint();
                         }
 
                         const float invDx = 1.0f / static_cast<float>(x1 - x0);

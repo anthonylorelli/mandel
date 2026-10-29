@@ -152,6 +152,7 @@
     <ClInclude Include="HighPrecision.h" />
     <ClInclude Include="MandelbrotEngine.h" />
     <ClInclude Include="ViewState.h" />
+    <ClInclude Include="FrameTiming.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp">
