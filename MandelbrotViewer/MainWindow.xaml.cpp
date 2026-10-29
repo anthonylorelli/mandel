@@ -118,8 +118,22 @@ namespace winrt::MandelbrotViewer::implementation
             const double exponent = (m_zoomInDirection ? 1.0 : -1.0) * m_zoomSpeed * dt;
             const double factor = std::pow(2.0, exponent);
 
+            if (m_autoPickInterestingTarget && m_zoomInDirection)
+            {
+                m_framesSinceRetarget++;
+                if (m_framesSinceRetarget >= 15 &&
+                    Mandelbrot::MandelbrotEngine::ShouldRetargetZoom(m_config, m_iterations, m_zoomTargetX, m_zoomTargetY))
+                {
+                    PickAndApplyRandomTarget();
+                }
+            }
+
+            m_retargetPanProgress = std::min(1.0, m_retargetPanProgress + dt / 0.40);
+            const double s = m_retargetPanProgress;
+            const double panBlend = std::clamp(s * s * (3.0 - 2.0 * s), 0.08, 1.0);
+
             const bool canContinue = Mandelbrot::MandelbrotEngine::StepZoomAnimation(
-                m_config, m_zoomTargetX, m_zoomTargetY, factor);
+                m_config, m_zoomTargetX, m_zoomTargetY, factor, panBlend);
 
             if (m_autoScaleIterations)
             {
@@ -311,7 +325,14 @@ namespace winrt::MandelbrotViewer::implementation
         }
         if (m_isZoomAnimating)
         {
-            zoomLabel += m_zoomInDirection ? L" [Zooming In]" : L" [Zooming Out]";
+            if (m_zoomInDirection && m_autoPickInterestingTarget)
+            {
+                zoomLabel += L" [Auto-Exploring]";
+            }
+            else
+            {
+                zoomLabel += m_zoomInDirection ? L" [Zooming In]" : L" [Zooming Out]";
+            }
         }
         HudZoomText().Text(zoomLabel);
 
@@ -364,14 +385,34 @@ namespace winrt::MandelbrotViewer::implementation
     {
         m_zoomTargetX = m_config.hpCenterX;
         m_zoomTargetY = m_config.hpCenterY;
+        m_hasActiveRandomTarget = false;
+        UpdateTargetTextBoxes();
+    }
 
+    void MainWindow::UpdateTargetTextBoxes()
+    {
         if (!TargetXTextBox() || !TargetYTextBox()) return;
 
         const size_t decimals = (m_config.zoom >= 1e14) ? 28 : ((m_config.zoom >= 1e6) ? 16 : 10);
         m_suppressEvents = true;
-        TargetXTextBox().Text(winrt::hstring(m_config.hpCenterX.ToWString(decimals)));
-        TargetYTextBox().Text(winrt::hstring(m_config.hpCenterY.ToWString(decimals)));
+        TargetXTextBox().Text(winrt::hstring(m_zoomTargetX.ToWString(decimals)));
+        TargetYTextBox().Text(winrt::hstring(m_zoomTargetY.ToWString(decimals)));
         m_suppressEvents = false;
+    }
+
+    void MainWindow::PickAndApplyRandomTarget()
+    {
+        if (m_iterations.empty() && m_currentPixelWidth > 0 && m_currentPixelHeight > 0)
+        {
+            m_engine.Compute(m_config, m_iterations);
+        }
+
+        Mandelbrot::MandelbrotEngine::PickInterestingTarget(
+            m_config, m_iterations, m_zoomTargetX, m_zoomTargetY);
+        m_hasActiveRandomTarget = true;
+        m_retargetPanProgress = 0.0;
+        m_framesSinceRetarget = 0;
+        UpdateTargetTextBoxes();
     }
 
     void MainWindow::SetZoomDirection(bool zoomIn)
@@ -387,7 +428,15 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::StartZoomAnimation()
     {
-        if (TargetXTextBox() && TargetYTextBox())
+        if (m_autoPickInterestingTarget && m_zoomInDirection)
+        {
+            if (!m_hasActiveRandomTarget ||
+                Mandelbrot::MandelbrotEngine::ShouldRetargetZoom(m_config, m_iterations, m_zoomTargetX, m_zoomTargetY))
+            {
+                PickAndApplyRandomTarget();
+            }
+        }
+        else if (TargetXTextBox() && TargetYTextBox())
         {
             Mandelbrot::BigFloat parsedX;
             Mandelbrot::BigFloat parsedY;
@@ -396,6 +445,7 @@ namespace winrt::MandelbrotViewer::implementation
 
             m_zoomTargetX = validX ? parsedX : m_config.hpCenterX;
             m_zoomTargetY = validY ? parsedY : m_config.hpCenterY;
+            m_retargetPanProgress = 1.0;
 
             if (!validX || !validY)
             {
@@ -406,6 +456,7 @@ namespace winrt::MandelbrotViewer::implementation
         {
             m_zoomTargetX = m_config.hpCenterX;
             m_zoomTargetY = m_config.hpCenterY;
+            m_retargetPanProgress = 1.0;
         }
 
         // If already at zoom bound in the chosen direction, flip direction or return
@@ -477,7 +528,14 @@ namespace winrt::MandelbrotViewer::implementation
             m_suppressEvents = false;
         }
 
-        SyncTargetInputsFromCenter();
+        if (!m_autoPickInterestingTarget || !m_hasActiveRandomTarget)
+        {
+            SyncTargetInputsFromCenter();
+        }
+        else
+        {
+            UpdateTargetTextBoxes();
+        }
         RenderFractal();
     }
 
@@ -496,6 +554,18 @@ namespace winrt::MandelbrotViewer::implementation
     void MainWindow::OnUseCurrentCenterClick(IInspectable const&, RoutedEventArgs const&)
     {
         SyncTargetInputsFromCenter();
+    }
+
+    void MainWindow::OnRandomTargetToggleChanged(IInspectable const&, RoutedEventArgs const&)
+    {
+        if (m_suppressEvents || !RandomTargetToggle()) return;
+        m_autoPickInterestingTarget = RandomTargetToggle().IsOn();
+        m_hasActiveRandomTarget = false;
+
+        if (m_autoPickInterestingTarget && m_isZoomAnimating && m_zoomInDirection)
+        {
+            PickAndApplyRandomTarget();
+        }
     }
 
     void MainWindow::OnZoomDirectionInClick(IInspectable const&, RoutedEventArgs const&)

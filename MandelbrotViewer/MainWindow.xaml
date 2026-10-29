@@ -157,6 +157,12 @@
                                      Text="+0.00000000" PlaceholderText="Imaginary (Y) coordinate"/>
                         </Grid>
 
+                        <ToggleSwitch x:Name="RandomTargetToggle" Header="Auto-Pick Target"
+                                      OnContent="Random Interesting Spot (Auto-Retargets)"
+                                      OffContent="Manual Target Coordinate"
+                                      IsOn="False"
+                                      Toggled="OnRandomTargetToggleChanged"/>
+
                         <!-- Zoom Direction (Zoom In / Zoom Out) -->
                         <Grid ColumnSpacing="8">
                             <Grid.ColumnDefinitions>

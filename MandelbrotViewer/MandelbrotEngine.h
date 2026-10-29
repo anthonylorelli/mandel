@@ -103,12 +103,31 @@ namespace Mandelbrot
 
         // Smoothly steps an animated zoom (in or out) toward a target complex coordinate.
         // zoomFactor > 1.0 zooms in; zoomFactor < 1.0 zooms out.
+        // panBlend in [0.0, 1.0] controls lateral pan acceleration (e.g., ramping 0->1 after retargeting for smooth ease-in).
         // Returns true if the zoom step was applied, or false if zoom reached [MinZoom, MaxZoom] bounds.
         static bool StepZoomAnimation(
             MandelbrotConfig& config,
             const BigFloat& targetX,
             const BigFloat& targetY,
-            double zoomFactor);
+            double zoomFactor,
+            double panBlend = 1.0);
+
+        // Evaluates whether zooming further into (targetX, targetY) is approaching a uniform/solid-color region
+        // (such as an all-interior bulb or a flat-gradient exterior area) and a new target spot should be chosen.
+        static bool ShouldRetargetZoom(
+            const MandelbrotConfig& config,
+            const std::vector<float>& iterations,
+            const BigFloat& targetX,
+            const BigFloat& targetY);
+
+        // Randomly picks an interesting fractal boundary/filament coordinate to zoom in on,
+        // refined to sub-pixel boundary precision so it stays interesting for as long as possible.
+        static bool PickInterestingTarget(
+            const MandelbrotConfig& config,
+            const std::vector<float>& iterations,
+            BigFloat& outTargetX,
+            BigFloat& outTargetY,
+            uint64_t randomSeed = 0);
 
         // Recommends an iteration budget scaled to the current magnification depth
         static int RecommendMaxIterations(
