@@ -813,6 +813,7 @@ namespace Mandelbrot
             float minSteps{ 0.0f };
             float maxSteps{ 0.0f };
             float stepsRange{ 0.0f };
+            float logStepsRange{ 0.0f };
             float stepsStdDev{ 0.0f };
         };
 
@@ -897,6 +898,7 @@ namespace Mandelbrot
                 stats.minSteps = minSteps;
                 stats.maxSteps = maxSteps;
                 stats.stepsRange = maxSteps - minSteps;
+                stats.logStepsRange = 1.6f * std::log((10.0f + std::max(0.0f, maxSteps)) / (10.0f + std::max(0.0f, minSteps)));
                 const double mean = sumSteps / static_cast<double>(stats.exteriorCount);
                 const double var = std::max(0.0, (sumStepsSq / static_cast<double>(stats.exteriorCount)) - mean * mean);
                 stats.stepsStdDev = static_cast<float>(std::sqrt(var));
@@ -1107,12 +1109,13 @@ namespace Mandelbrot
         }
         else
         {
-            if (outer.interiorRatio < 0.02f && (outer.stepsRange < 2.2f || outer.stepsStdDev < 0.40f))
+            if (outer.interiorRatio < 0.02f &&
+                (outer.stepsRange < 2.2f || outer.logStepsRange < 0.14f || outer.stepsStdDev < 0.40f))
             {
                 return true;
             }
-            if (inner.interiorRatio < 0.01f && inner.stepsRange < 0.8f &&
-                outer.interiorRatio < 0.05f && outer.stepsRange < 3.5f)
+            if (inner.interiorRatio < 0.01f && (inner.stepsRange < 0.8f || inner.logStepsRange < 0.05f) &&
+                outer.interiorRatio < 0.05f && (outer.stepsRange < 3.5f || outer.logStepsRange < 0.22f))
             {
                 return true;
             }
@@ -1217,7 +1220,8 @@ namespace Mandelbrot
                     else
                     {
                         const bool hasBoundary = (outer.interiorRatio >= 0.03f && outer.stepsRange >= 3.0f);
-                        const bool hasStrongFilaments = (outer.stepsRange >= 5.0f && outer.stepsStdDev >= 0.90f && inner.stepsRange >= 2.0f);
+                        const bool hasStrongFilaments = (outer.stepsRange >= 5.0f && outer.logStepsRange >= 0.28f &&
+                            outer.stepsStdDev >= 0.90f && inner.stepsRange >= 2.0f && inner.logStepsRange >= 0.10f);
                         if (!hasBoundary && !hasStrongFilaments)
                         {
                             continue;

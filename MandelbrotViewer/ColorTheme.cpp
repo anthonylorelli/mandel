@@ -178,6 +178,9 @@ namespace Mandelbrot
         if (m_stops.empty())
         {
             std::fill(m_lut.begin(), m_lut.end(), 0xFF000000);
+            m_avgR = 0;
+            m_avgG = 0;
+            m_avgB = 0;
             return;
         }
 
@@ -202,6 +205,9 @@ namespace Mandelbrot
         }
 
         const size_t numStops = sortedStops.size();
+        uint64_t sumR = 0;
+        uint64_t sumG = 0;
+        uint64_t sumB = 0;
 
         for (size_t i = 0; i < LUT_SIZE; ++i)
         {
@@ -217,6 +223,9 @@ namespace Mandelbrot
             if (seg + 1 >= numStops)
             {
                 const auto& s = sortedStops.back();
+                sumR += s.r;
+                sumG += s.g;
+                sumB += s.b;
                 m_lut[i] = 0xFF000000 | (static_cast<uint32_t>(s.r) << 16) | (static_cast<uint32_t>(s.g) << 8) | static_cast<uint32_t>(s.b);
                 continue;
             }
@@ -233,9 +242,17 @@ namespace Mandelbrot
             const uint8_t g = static_cast<uint8_t>(std::clamp(s0.g * (1.0f - mu) + s1.g * mu, 0.0f, 255.0f));
             const uint8_t b = static_cast<uint8_t>(std::clamp(s0.b * (1.0f - mu) + s1.b * mu, 0.0f, 255.0f));
 
+            sumR += r;
+            sumG += g;
+            sumB += b;
+
             // BGRA layout in little-endian uint32_t
             m_lut[i] = 0xFF000000 | (static_cast<uint32_t>(r) << 16) | (static_cast<uint32_t>(g) << 8) | static_cast<uint32_t>(b);
         }
+
+        m_avgR = static_cast<uint8_t>(sumR / LUT_SIZE);
+        m_avgG = static_cast<uint8_t>(sumG / LUT_SIZE);
+        m_avgB = static_cast<uint8_t>(sumB / LUT_SIZE);
     }
 
     void ColorTheme::GeneratePreview(uint32_t* pDestPixels, size_t width) const
@@ -250,6 +267,17 @@ namespace Mandelbrot
         }
     }
 
+    float ColorTheme::MapIterationToPhase(float iter, float frequency) noexcept
+    {
+        if (iter <= 0.0f) return 0.0f;
+        // Logarithmic iteration compression: equal multiplicative steps in iteration count
+        // produce equal palette phase intervals across all iteration depths (10 to 50,000+),
+        // preventing high-iteration areas from bunching up into dense visual noise.
+        constexpr float kLogScale = 1.6f;
+        constexpr float kInvKnee = 0.1f; // Soft knee at iter = 10
+        return kLogScale * std::log(1.0f + iter * kInvKnee) * frequency;
+    }
+
     void ColorTheme::Recolor(
         const std::vector<float>& iterationBuffer,
         uint32_t* pDestPixels,
@@ -258,18 +286,23 @@ namespace Mandelbrot
         float phaseOffset,
         bool invert,
         uint32_t interiorColor,
-        FractalType fractalType) const
+        FractalType fractalType,
+        int width) const
     {
         if (!pDestPixels || iterationBuffer.size() < count || m_lut.empty()) return;
 
         const float lutMax = static_cast<float>(LUT_SIZE - 1);
         const uint32_t* lutData = m_lut.data();
         const float* iterData = iterationBuffer.data();
+        const intptr_t totalCount = static_cast<intptr_t>(count);
+        const intptr_t rowStride = (width > 0)
+            ? static_cast<intptr_t>(width)
+            : ((totalCount >= 64) ? static_cast<intptr_t>(std::sqrt(static_cast<double>(totalCount))) : 0);
 
         if (fractalType == FractalType::Newton)
         {
             #pragma omp parallel for schedule(static, 4096)
-            for (intptr_t idx = 0; idx < static_cast<intptr_t>(count); ++idx)
+            for (intptr_t idx = 0; idx < totalCount; ++idx)
             {
                 const float val = iterData[idx];
                 if (val < 0.0f)
@@ -284,8 +317,9 @@ namespace Mandelbrot
                 // Map root index (0, 1, 2) to base partition of the palette [0, 1)
                 const float rootBase = static_cast<float>(root % 3) / 3.0f;
 
-                // Modulate with iteration count for fine concentric bands / ripple contours
-                float ring = std::fmod((iter * 0.06f * frequency + phaseOffset), 1.0f);
+                // Logarithmically compress Newton convergence iterations to prevent high-iteration noise at basin boundaries
+                const float compressedIter = 12.0f * std::log(1.0f + iter * (1.0f / 12.0f));
+                float ring = std::fmod((compressedIter * 0.06f * frequency + phaseOffset), 1.0f);
                 if (ring < 0.0f) ring += 1.0f;
 
                 float u = rootBase + ring * (1.0f / 3.0f);
@@ -296,7 +330,7 @@ namespace Mandelbrot
                 uint32_t color = lutData[lutIdx & (LUT_SIZE - 1)];
 
                 // Subtle smooth shading: points taking more iterations darken slightly
-                const float shading = std::max(0.35f, 1.0f / (1.0f + 0.015f * iter));
+                const float shading = std::max(0.35f, 1.0f / (1.0f + 0.025f * compressedIter));
                 if (shading < 0.99f)
                 {
                     const uint32_t a = (color >> 24) & 0xFF;
@@ -311,25 +345,95 @@ namespace Mandelbrot
         }
         else
         {
+            const float avgRf = static_cast<float>(m_avgR);
+            const float avgGf = static_cast<float>(m_avgG);
+            const float avgBf = static_cast<float>(m_avgB);
+
             #pragma omp parallel for schedule(static, 4096)
-            for (intptr_t idx = 0; idx < static_cast<intptr_t>(count); ++idx)
+            for (intptr_t idx = 0; idx < totalCount; ++idx)
             {
                 const float iter = iterData[idx];
 
                 if (iter < 0.0f)
                 {
-                    // Point is inside Mandelbrot set
                     pDestPixels[idx] = interiorColor;
                     continue;
                 }
 
-                // Map iteration count into continuous [0, 1) cyclic space
-                float u = std::fmod((iter * frequency + phaseOffset), 1.0f);
-                if (u < 0.0f) u += 1.0f;
-                if (invert) u = 1.0f - u;
+                const float basePhase = MapIterationToPhase(iter, frequency);
+                const float uCenter = basePhase + phaseOffset;
 
-                const size_t lutIdx = static_cast<size_t>(u * lutMax);
-                pDestPixels[idx] = lutData[lutIdx & (LUT_SIZE - 1)];
+                // Estimate 2D screen-space phase gradient max(|dU/dx|, |dU/dy|) for band-limited anti-aliasing
+                float deltaU = 0.0f;
+                if (totalCount >= 64)
+                {
+                    const intptr_t nx = (idx + 1 < totalCount) ? (idx + 1) : (idx - 1);
+                    const float iterX = iterData[nx];
+                    if (iterX >= 0.0f)
+                    {
+                        deltaU = std::max(deltaU, std::abs(MapIterationToPhase(iterX, frequency) - basePhase));
+                    }
+                    else if (idx > 0 && iterData[idx - 1] >= 0.0f)
+                    {
+                        deltaU = std::max(deltaU, std::abs(basePhase - MapIterationToPhase(iterData[idx - 1], frequency)));
+                    }
+
+                    if (rowStride > 1)
+                    {
+                        const intptr_t ny = (idx + rowStride < totalCount) ? (idx + rowStride) : (idx - rowStride);
+                        if (ny >= 0 && ny < totalCount)
+                        {
+                            const float iterY = iterData[ny];
+                            if (iterY >= 0.0f)
+                            {
+                                deltaU = std::max(deltaU, std::abs(MapIterationToPhase(iterY, frequency) - basePhase));
+                            }
+                        }
+                    }
+                }
+
+                auto sampleLutAtPhase = [&](float phase) noexcept -> uint32_t
+                {
+                    float u = std::fmod(phase, 1.0f);
+                    if (u < 0.0f) u += 1.0f;
+                    if (invert) u = 1.0f - u;
+                    const size_t lutIdx = static_cast<size_t>(u * lutMax);
+                    return lutData[lutIdx & (LUT_SIZE - 1)];
+                };
+
+                if (deltaU <= 0.04f)
+                {
+                    pDestPixels[idx] = sampleLutAtPhase(uCenter);
+                }
+                else
+                {
+                    // 4-tap stratified box filter across the pixel's phase interval to eliminate Moire noise
+                    const float span = std::min(deltaU, 1.0f);
+                    const uint32_t c0 = sampleLutAtPhase(uCenter - 0.375f * span);
+                    const uint32_t c1 = sampleLutAtPhase(uCenter - 0.125f * span);
+                    const uint32_t c2 = sampleLutAtPhase(uCenter + 0.125f * span);
+                    const uint32_t c3 = sampleLutAtPhase(uCenter + 0.375f * span);
+
+                    float r = static_cast<float>(((c0 >> 16) & 0xFF) + ((c1 >> 16) & 0xFF) + ((c2 >> 16) & 0xFF) + ((c3 >> 16) & 0xFF)) * 0.25f;
+                    float g = static_cast<float>(((c0 >> 8) & 0xFF) + ((c1 >> 8) & 0xFF) + ((c2 >> 8) & 0xFF) + ((c3 >> 8) & 0xFF)) * 0.25f;
+                    float b = static_cast<float>((c0 & 0xFF) + (c1 & 0xFF) + (c2 & 0xFF) + (c3 & 0xFF)) * 0.25f;
+
+                    // When local phase change approaches or exceeds the Nyquist limit (0.20..1.20 cycles/pixel),
+                    // smoothly damp toward the palette's integral mean color so sub-pixel filaments glow smoothly
+                    // instead of shimmering with random aliasing static during animated zooms.
+                    if (deltaU > 0.20f)
+                    {
+                        const float damp = std::clamp((deltaU - 0.20f) / 1.0f, 0.0f, 0.72f);
+                        r = r * (1.0f - damp) + avgRf * damp;
+                        g = g * (1.0f - damp) + avgGf * damp;
+                        b = b * (1.0f - damp) + avgBf * damp;
+                    }
+
+                    const uint32_t outR = static_cast<uint32_t>(std::clamp(r + 0.5f, 0.0f, 255.0f));
+                    const uint32_t outG = static_cast<uint32_t>(std::clamp(g + 0.5f, 0.0f, 255.0f));
+                    const uint32_t outB = static_cast<uint32_t>(std::clamp(b + 0.5f, 0.0f, 255.0f));
+                    pDestPixels[idx] = 0xFF000000u | (outR << 16) | (outG << 8) | outB;
+                }
             }
         }
     }

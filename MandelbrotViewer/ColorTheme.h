@@ -60,7 +60,11 @@ namespace Mandelbrot
             float phaseOffset,
             bool invert,
             uint32_t interiorColor = 0xFF000000,
-            FractalType fractalType = static_cast<FractalType>(0)) const;
+            FractalType fractalType = static_cast<FractalType>(0),
+            int width = 0) const;
+
+        // Maps raw iteration count to logarithmic palette phase (before phaseOffset and modulo)
+        static float MapIterationToPhase(float iter, float frequency) noexcept;
 
         // Generates preview pixel line of size width
         void GeneratePreview(uint32_t* pDestPixels, size_t width) const;
@@ -69,5 +73,8 @@ namespace Mandelbrot
         PresetTheme m_currentPreset{ PresetTheme::ElectricBlue };
         std::vector<GradientStop> m_stops;
         std::vector<uint32_t> m_lut; // BGRA format
+        uint8_t m_avgR{ 0 };
+        uint8_t m_avgG{ 0 };
+        uint8_t m_avgB{ 0 };
     };
 }

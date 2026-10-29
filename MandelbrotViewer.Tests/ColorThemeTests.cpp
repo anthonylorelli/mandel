@@ -159,3 +159,36 @@ TEST_CASE(ColorTheme, GeneratePreview_SizeAndContent)
     // Start of preview should differ from end of preview
     ASSERT_NE(preview.front(), preview.back());
 }
+
+TEST_CASE(ColorTheme, HighIteration_LogCompressionAndAntiAliasing)
+{
+    // 1. Logarithmic compression: +50 iterations at iter=2000 must advance palette phase by a small fraction
+    // of a cycle (< 0.05) instead of 50 full cycles, and doubling at high iterations must be scale-invariant.
+    const float phase2000 = ColorTheme::MapIterationToPhase(2000.0f, 1.0f);
+    const float phase2050 = ColorTheme::MapIterationToPhase(2050.0f, 1.0f);
+    ASSERT_LT(phase2050 - phase2000, 0.05f);
+
+    const float span1000To2000 = ColorTheme::MapIterationToPhase(2000.0f, 1.0f) - ColorTheme::MapIterationToPhase(1000.0f, 1.0f);
+    const float span5000To10000 = ColorTheme::MapIterationToPhase(10000.0f, 1.0f) - ColorTheme::MapIterationToPhase(5000.0f, 1.0f);
+    ASSERT_NEAR(span1000To2000, span5000To10000, 0.015f);
+
+    // 2. Band-limited anti-aliasing: when adjacent pixels have extreme iteration jumps (above Nyquist),
+    // Recolor damps the high-frequency oscillation toward the palette mean rather than producing raw static.
+    ColorTheme theme(PresetTheme::Monochrome); // Black (0) at 0.0/1.0, White (240) at 0.5, mean ~ 120
+    std::vector<float> noisyIters(64, 100.0f);
+    for (size_t i = 0; i < noisyIters.size(); ++i)
+    {
+        noisyIters[i] = (i % 2 == 0) ? 100.0f : 5000.0f;
+    }
+
+    std::vector<uint32_t> pixels(64, 0);
+    theme.Recolor(noisyIters, pixels.data(), pixels.size(), 1.0f, 0.0f, false, 0xFF000000, FractalType::Mandelbrot, 8);
+
+    const int r0 = static_cast<int>((pixels[0] >> 16) & 0xFF);
+    const int r1 = static_cast<int>((pixels[1] >> 16) & 0xFF);
+    // Both high-gradient pixels should be damped into the mid-tone range (neither pure 0 nor pure 240)
+    ASSERT_GT(r0, 40);
+    ASSERT_LT(r0, 200);
+    ASSERT_GT(r1, 40);
+    ASSERT_LT(r1, 200);
+}
