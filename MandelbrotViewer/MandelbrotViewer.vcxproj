@@ -153,6 +153,8 @@
     <ClInclude Include="MandelbrotEngine.h" />
     <ClInclude Include="ViewState.h" />
     <ClInclude Include="FrameTiming.h" />
+    <ClInclude Include="BackgroundRenderer.h" />
+    <ClInclude Include="FramePresentation.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp">
@@ -166,6 +168,7 @@
     </ClCompile>
     <ClCompile Include="ColorTheme.cpp" />
     <ClCompile Include="MandelbrotEngine.cpp" />
+    <ClCompile Include="BackgroundRenderer.cpp" />
     <ClCompile Include="$(IntermediateOutputPath)XamlTypeInfo.g.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>

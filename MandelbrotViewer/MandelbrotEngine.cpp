@@ -1496,6 +1496,7 @@ namespace Mandelbrot
 
         auto evalStandardPixel = [&](int px, int py) -> float
         {
+            if (cancelToken && cancelToken->load(std::memory_order_relaxed)) return -1.0f;
             const double cy = config.centerY + (halfH - (static_cast<double>(py) + 0.5)) * dy;
             const double cx = config.centerX + ((static_cast<double>(px) + 0.5) - halfW) * dx;
             return EvalStandardPoint(type, cx, cy, maxIter, smooth);
@@ -1615,6 +1616,7 @@ namespace Mandelbrot
 
             auto evalNewtonPixel = [&](int px, int py) -> float
             {
+                if (cancelToken && cancelToken->load(std::memory_order_relaxed)) return -1.0f;
                 const double dcy = static_cast<double>(refPy - py) * stepY;
                 const double dcx = static_cast<double>(px - refPx) * stepX;
 
@@ -1998,6 +2000,7 @@ namespace Mandelbrot
 
                     for (int gy = 0; gy < gridN; ++gy)
                     {
+                        if (cancelToken && cancelToken->load(std::memory_order_relaxed)) return 0.0;
                         const int spy = ((2 * gy + 1) * height) / (2 * gridN);
                         const double dcy = (refPosY - static_cast<double>(spy)) * stepY;
 
@@ -2144,6 +2147,7 @@ namespace Mandelbrot
 
         auto evalDeepPixel = [&](int px, int py) -> float
         {
+            if (cancelToken && cancelToken->load(std::memory_order_relaxed)) return -1.0f;
             const double dcy = (refPosY - static_cast<double>(py)) * stepY;
             const double dcx = (static_cast<double>(px) - refPosX) * stepX;
             double dx = 0.0;

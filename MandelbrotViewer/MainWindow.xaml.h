@@ -3,7 +3,10 @@
 #include "MainWindow.g.h"
 #include "MandelbrotEngine.h"
 #include "ColorTheme.h"
+#include "BackgroundRenderer.h"
+#include <winrt/Microsoft.UI.Composition.h>
 #include <chrono>
+#include <memory>
 
 namespace winrt::MandelbrotViewer::implementation
 {
@@ -73,7 +76,14 @@ namespace winrt::MandelbrotViewer::implementation
     private:
         void InitializeControls();
         void PopulateBookmarks();
-        void RenderFractal();
+        void RenderFractal(bool continueAnimation = false);
+        void OnRenderCompleted();
+        void UpdateAnimationQuality(double elapsedMs);
+        Mandelbrot::MandelbrotConfig PresentationCamera() const;
+        void AnimateCamera(const Mandelbrot::MandelbrotConfig& view, std::chrono::milliseconds duration);
+        void SetPresentationFrame(bool preserveMotion);
+        void BindPresentationExpressions();
+        void FreezePresentation();
         void RecolorBuffer();
         void UpdateHud(double fractalTimeMs, double colorTimeMs);
         void UpdateGradientPreview();
@@ -84,16 +94,29 @@ namespace winrt::MandelbrotViewer::implementation
         void UpdateTargetTextBoxes();
         void PickAndApplyRandomTarget();
         void StartZoomAnimation();
-        void StopZoomAnimation();
+        void StopZoomAnimation(bool renderFinalFrame = true);
         void SetZoomDirection(bool zoomIn);
         void SetSidebarVisible(bool visible);
         void SetFullScreen(bool fullScreen);
         bool IsFullScreen();
 
-        Mandelbrot::MandelbrotEngine m_engine;
+        std::unique_ptr<Mandelbrot::BackgroundRenderer> m_renderer;
         Mandelbrot::ColorTheme m_theme;
         Mandelbrot::MandelbrotConfig m_config;
         std::vector<float> m_iterations;
+        Mandelbrot::MandelbrotConfig m_displayedConfig;
+        bool m_hasCurrentFrame{ false };
+        bool m_hasPresentation{ false };
+        Mandelbrot::MandelbrotConfig m_cameraAnchor;
+        Mandelbrot::MandelbrotConfig m_motionFrom;
+        Mandelbrot::MandelbrotConfig m_motionTo;
+        std::chrono::steady_clock::time_point m_motionStart{};
+        std::chrono::milliseconds m_motionDuration{ 32 };
+        winrt::Microsoft::UI::Composition::Compositor m_compositor{ nullptr };
+        winrt::Microsoft::UI::Composition::CompositionPropertySet m_cameraProperties{ nullptr };
+        winrt::Microsoft::UI::Composition::CompositionPropertySet m_frameProperties{ nullptr };
+        winrt::Microsoft::UI::Composition::ExpressionAnimation m_scaleExpression{ nullptr };
+        winrt::Microsoft::UI::Composition::ExpressionAnimation m_offsetExpression{ nullptr };
 
         winrt::Microsoft::UI::Xaml::Media::Imaging::WriteableBitmap m_bitmap{ nullptr };
         winrt::Microsoft::UI::Xaml::Media::Imaging::WriteableBitmap m_previewBitmap{ nullptr };
