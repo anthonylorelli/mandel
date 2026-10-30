@@ -2,6 +2,7 @@
 #include "MainWindow.xaml.h"
 #include "ViewState.h"
 #include "FrameTiming.h"
+#include "FramePresentation.h"
 #if __has_include("MainWindow.g.cpp")
 #include "MainWindow.g.cpp"
 #endif
@@ -12,12 +13,15 @@
 #include <iomanip>
 #include <sstream>
 #include <winrt/Windows.ApplicationModel.DataTransfer.h>
+#include <winrt/Microsoft.UI.Dispatching.h>
 
 using namespace winrt;
 using namespace Microsoft::UI::Xaml;
 using namespace Microsoft::UI::Xaml::Controls;
 using namespace Microsoft::UI::Xaml::Media::Imaging;
 using namespace winrt::Windows::Storage::Streams;
+using namespace winrt::Windows::Foundation::Numerics;
+using namespace winrt::Microsoft::UI::Composition;
 
 namespace winrt::MandelbrotViewer::implementation
 {
@@ -54,14 +58,25 @@ namespace winrt::MandelbrotViewer::implementation
         InitializeComponent();
         Title(L"Fractal Studio - Mandelbrot Set");
 
+        auto weak = get_weak();
+        auto dispatcher = DispatcherQueue();
+        m_renderer = std::make_unique<Mandelbrot::BackgroundRenderer>([weak, dispatcher]
+        {
+            dispatcher.TryEnqueue([weak]
+            {
+                if (auto window = weak.get()) window->OnRenderCompleted();
+            });
+        });
         InitializeControls();
         Closed([this](auto&&, auto&&)
         {
             m_isClosed = true;
             m_isZoomAnimating = false;
             m_isDragging = false;
+            FreezePresentation();
             if (m_animateTimer) m_animateTimer.Stop();
             if (m_zoomTimer) m_zoomTimer.Stop();
+            if (m_renderer) m_renderer->Stop();
         });
     }
 
@@ -117,7 +132,7 @@ namespace winrt::MandelbrotViewer::implementation
                 return;
             }
 
-            // Pause timer while computing the frame so timer events never pile up behind a deep-zoom render
+            // Calculation runs on the worker; this callback only advances the requested camera.
             m_zoomTimer.Stop();
 
             const auto now = std::chrono::steady_clock::now();
@@ -125,14 +140,22 @@ namespace winrt::MandelbrotViewer::implementation
             m_lastZoomFrameTime = now;
             dt = std::clamp(dt, 0.008, 0.10);
 
-            const double exponent = (m_zoomInDirection ? 1.0 : -1.0) * m_zoomSpeed * dt;
+            // A resize or manual jump needs its first valid frame before motion can resume.
+            if (!m_hasCurrentFrame || !m_hasPresentation)
+            {
+                m_zoomTimer.Interval(std::chrono::milliseconds(16));
+                m_zoomTimer.Start();
+                return;
+            }
+
+            const double speed = Mandelbrot::PresentationZoomSpeed(m_zoomSpeed, m_lastFractalTimeMs);
+            const double exponent = (m_zoomInDirection ? 1.0 : -1.0) * speed * dt;
             const double factor = std::pow(2.0, exponent);
 
-            if (m_autoPickInterestingTarget && m_zoomInDirection)
+            if (m_autoPickInterestingTarget && m_zoomInDirection && m_hasCurrentFrame)
             {
-                m_framesSinceRetarget++;
                 if (m_framesSinceRetarget >= 15 &&
-                    Mandelbrot::MandelbrotEngine::ShouldRetargetZoom(m_config, m_iterations, m_zoomTargetX, m_zoomTargetY))
+                    Mandelbrot::MandelbrotEngine::ShouldRetargetZoom(m_displayedConfig, m_iterations, m_zoomTargetX, m_zoomTargetY))
                 {
                     PickAndApplyRandomTarget();
                 }
@@ -142,8 +165,16 @@ namespace winrt::MandelbrotViewer::implementation
             const double s = m_retargetPanProgress;
             const double panBlend = std::clamp(s * s * (3.0 - 2.0 * s), 0.08, 1.0);
 
-            const bool canContinue = Mandelbrot::MandelbrotEngine::StepZoomAnimation(
-                m_config, m_zoomTargetX, m_zoomTargetY, factor, panBlend);
+            auto nextCamera = m_config;
+            Mandelbrot::MandelbrotEngine::StepZoomAnimation(
+                nextCamera, m_zoomTargetX, m_zoomTargetY, factor, panBlend);
+            const double span = 3.0 / m_config.zoom;
+            const bool jump = std::abs((nextCamera.hpCenterX - m_config.hpCenterX).ToDouble()) > span * 2.0 ||
+                std::abs((nextCamera.hpCenterY - m_config.hpCenterY).ToDouble()) > span * 2.0;
+            m_config = jump ? nextCamera : Mandelbrot::LimitCameraToFrame(m_displayedConfig, m_config, nextCamera);
+            const bool canContinue = m_zoomInDirection
+                ? m_config.zoom < Mandelbrot::MandelbrotEngine::MaxZoom
+                : m_config.zoom > Mandelbrot::MandelbrotEngine::MinZoom;
 
             if (m_autoScaleIterations)
             {
@@ -179,33 +210,11 @@ namespace winrt::MandelbrotViewer::implementation
                 break;
             }
 
-            RenderFractal();
-
-            // Hysteresis-stabilized adaptive governor: require sustained slow/fast streaks before changing stride
-            if (m_lastFractalTimeMs > 22.0)
-            {
-                m_slowFrameStreak++;
-                m_fastFrameStreak = 0;
-                if (m_slowFrameStreak >= 2 && m_animQualityLevel < 2)
-                {
-                    m_animQualityLevel++;
-                    m_slowFrameStreak = 0;
-                }
-            }
-            else if (m_lastFractalTimeMs < 6.0)
-            {
-                m_fastFrameStreak++;
-                m_slowFrameStreak = 0;
-                if (m_fastFrameStreak >= 8 && m_animQualityLevel > 0)
-                {
-                    m_animQualityLevel--;
-                    m_fastFrameStreak = 0;
-                }
-            }
+            if (jump) RenderFractal();
             else
             {
-                m_slowFrameStreak = 0;
-                m_fastFrameStreak = 0;
+                AnimateCamera(m_config, std::chrono::milliseconds(32));
+                RenderFractal(true);
             }
 
             if (!canContinue)
@@ -246,45 +255,278 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::OnViewportSizeChanged(IInspectable const&, SizeChangedEventArgs const& e)
     {
-        const int w = std::max(64, static_cast<int>(e.NewSize().Width));
-        const int h = std::max(64, static_cast<int>(e.NewSize().Height));
+        const int w = std::max(64, static_cast<int>(std::ceil(e.NewSize().Width)));
+        const int h = std::max(64, static_cast<int>(std::ceil(e.NewSize().Height)));
+        auto clip = Media::RectangleGeometry();
+        clip.Rect(winrt::Windows::Foundation::Rect{ 0.0f, 0.0f, e.NewSize().Width, e.NewSize().Height });
+        FractalSurface().Clip(clip);
 
         if (w == m_currentPixelWidth && h == m_currentPixelHeight && m_bitmap)
         {
             return;
         }
 
+        FreezePresentation();
+        m_hasPresentation = false;
+        if (m_scaleExpression) FractalImage().StopAnimation(m_scaleExpression);
+        if (m_offsetExpression) FractalImage().StopAnimation(m_offsetExpression);
+        FractalImage().Scale(float3{ 1.0f, 1.0f, 1.0f });
+        FractalImage().Translation(float3{ 0.0f, 0.0f, 0.0f });
+        FractalImage().Width(w);
+        FractalImage().Height(h);
         m_currentPixelWidth = w;
         m_currentPixelHeight = h;
         m_config.width = w;
         m_config.height = h;
 
-        m_bitmap = WriteableBitmap(w, h);
-        FractalImage().Source(m_bitmap);
-
         RenderFractal();
     }
 
-    void MainWindow::RenderFractal()
+    void MainWindow::RenderFractal(bool continueAnimation)
     {
-        if (!m_bitmap || m_currentPixelWidth <= 0 || m_currentPixelHeight <= 0) return;
+        if (m_isClosed || !m_renderer || m_currentPixelWidth <= 0 || m_currentPixelHeight <= 0) return;
+        if (!continueAnimation)
+        {
+            FreezePresentation();
+            m_hasCurrentFrame = false;
+            HudTimingText().Text(L"Rendering...");
+        }
+        const auto renderConfig = m_isZoomAnimating ? Mandelbrot::AnimationRenderConfig(m_config) : m_config;
+        m_renderer->Submit(renderConfig, !continueAnimation);
+    }
 
-        const double fractalTime = m_engine.Compute(m_config, m_iterations);
-        m_lastFractalTimeMs = fractalTime;
+    void MainWindow::OnRenderCompleted()
+    {
+        if (m_isClosed || !m_renderer) return;
+        const bool preserveMotion = m_isZoomAnimating && m_hasCurrentFrame && m_hasPresentation;
+        bool rejected = false;
+        auto result = m_renderer->TakeCompleted(m_iterations, [&](const Mandelbrot::RenderResult& ready)
+        {
+            // Check the entire in-flight motion segment before swapping images, so even a
+            // delayed compositor frame remains covered by the new guard-band bitmap.
+            rejected = preserveMotion && (!Mandelbrot::FrameCoversViewport(ready.config, m_motionFrom) ||
+                !Mandelbrot::FrameCoversViewport(ready.config, m_motionTo) ||
+                !Mandelbrot::FrameCoversViewport(ready.config, m_config));
+            return !rejected;
+        });
+        if (rejected)
+        {
+            RenderFractal(true);
+            return;
+        }
+        if (!result) return;
+        if (result->error)
+        {
+            if (m_isZoomAnimating) StopZoomAnimation(false);
+            m_renderer->Cancel();
+            HudTimingText().Text(L"Fractal rendering failed. Try another view or a lower iteration count.");
+            return;
+        }
+
+        m_displayedConfig = result->config;
+        m_hasCurrentFrame = true;
+        m_lastFractalTimeMs = result->elapsedMs;
+        if (!m_bitmap || m_bitmap.PixelWidth() != result->config.width || m_bitmap.PixelHeight() != result->config.height)
+        {
+            m_bitmap = WriteableBitmap(result->config.width, result->config.height);
+            FractalImage().Source(m_bitmap);
+        }
 
         const auto colorStart = std::chrono::high_resolution_clock::now();
         RecolorBuffer();
+        SetPresentationFrame(preserveMotion);
         const auto colorEnd = std::chrono::high_resolution_clock::now();
         const std::chrono::duration<double, std::milli> colorElapsed = colorEnd - colorStart;
 
-        UpdateHud(fractalTime, colorElapsed.count());
+        UpdateHud(result->elapsedMs, colorElapsed.count());
+        if (m_isZoomAnimating)
+        {
+            // Quality and retarget hysteresis count completed frames, not timer ticks.
+            UpdateAnimationQuality(result->elapsedMs);
+            ++m_framesSinceRetarget;
+            if (m_autoPickInterestingTarget && m_zoomInDirection && !m_hasActiveRandomTarget)
+                PickAndApplyRandomTarget();
+        }
+    }
+
+    void MainWindow::UpdateAnimationQuality(double elapsedMs)
+    {
+        if (elapsedMs > 22.0)
+        {
+            ++m_slowFrameStreak;
+            m_fastFrameStreak = 0;
+            if (m_slowFrameStreak >= 2 && m_animQualityLevel < 2)
+            {
+                ++m_animQualityLevel;
+                m_slowFrameStreak = 0;
+            }
+        }
+        else if (elapsedMs < 6.0)
+        {
+            ++m_fastFrameStreak;
+            m_slowFrameStreak = 0;
+            if (m_fastFrameStreak >= 8 && m_animQualityLevel > 0)
+            {
+                --m_animQualityLevel;
+                m_fastFrameStreak = 0;
+            }
+        }
+        else
+        {
+            m_slowFrameStreak = 0;
+            m_fastFrameStreak = 0;
+        }
+    }
+
+    Mandelbrot::MandelbrotConfig MainWindow::PresentationCamera() const
+    {
+        if (!m_hasPresentation) return m_config;
+        const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - m_motionStart).count();
+        const double duration = std::chrono::duration<double>(m_motionDuration).count();
+        return Mandelbrot::InterpolateCamera(m_motionFrom, m_motionTo, duration > 0.0 ? elapsed / duration : 1.0);
+    }
+
+    void MainWindow::FreezePresentation()
+    {
+        if (!m_hasPresentation) return;
+        const auto current = PresentationCamera();
+        m_cameraProperties.StopAnimation(L"Scale");
+        m_cameraProperties.StopAnimation(L"Offset");
+        m_motionFrom = m_motionTo = current;
+        m_motionStart = std::chrono::steady_clock::now();
+    }
+
+    void MainWindow::AnimateCamera(const Mandelbrot::MandelbrotConfig& view, std::chrono::milliseconds duration)
+    {
+        if (!m_hasPresentation) return;
+        m_motionFrom = PresentationCamera();
+        m_motionTo = view;
+        m_motionStart = std::chrono::steady_clock::now();
+        m_motionDuration = duration;
+        const auto transform = Mandelbrot::FrameToViewport(m_cameraAnchor, view);
+        auto scale = m_compositor.CreateScalarKeyFrameAnimation();
+        scale.Target(L"Scale");
+        scale.Duration(duration);
+        scale.StopBehavior(AnimationStopBehavior::LeaveCurrentValue);
+        scale.InsertExpressionKeyFrame(0.0f, L"this.StartingValue");
+        scale.InsertKeyFrame(1.0f, static_cast<float>(transform.scale), m_compositor.CreateLinearEasingFunction());
+        auto offset = m_compositor.CreateVector3KeyFrameAnimation();
+        offset.Target(L"Offset");
+        offset.Duration(duration);
+        offset.StopBehavior(AnimationStopBehavior::LeaveCurrentValue);
+        offset.InsertExpressionKeyFrame(0.0f, L"this.StartingValue");
+        offset.InsertKeyFrame(1.0f, float3{ static_cast<float>(transform.x), static_cast<float>(transform.y), 0.0f },
+            m_compositor.CreateLinearEasingFunction());
+        auto group = m_compositor.CreateAnimationGroup();
+        group.Add(scale);
+        group.Add(offset);
+        m_cameraProperties.StartAnimationGroup(group);
+    }
+
+    void MainWindow::BindPresentationExpressions()
+    {
+        // A single compositor camera survives bitmap swaps. Fresh images change only their
+        // source-to-anchor mapping, so frame delivery never restarts the visible motion.
+        m_scaleExpression = m_compositor.CreateExpressionAnimation(
+            L"Vector3(frame.Scale * camera.Scale, frame.Scale * camera.Scale, 1.0)");
+        m_scaleExpression.Target(L"Scale");
+        m_scaleExpression.SetReferenceParameter(L"frame", m_frameProperties);
+        m_scaleExpression.SetReferenceParameter(L"camera", m_cameraProperties);
+        m_offsetExpression = m_compositor.CreateExpressionAnimation(L"frame.Offset * camera.Scale + camera.Offset");
+        m_offsetExpression.Target(L"Translation");
+        m_offsetExpression.SetReferenceParameter(L"frame", m_frameProperties);
+        m_offsetExpression.SetReferenceParameter(L"camera", m_cameraProperties);
+        FractalImage().StartAnimation(m_scaleExpression);
+        FractalImage().StartAnimation(m_offsetExpression);
+    }
+
+    void MainWindow::SetPresentationFrame(bool preserveMotion)
+    {
+        if (!m_compositor)
+        {
+            // GetElementVisual opts this image out of the UIElement transform APIs used below.
+            m_compositor = Media::CompositionTarget::GetCompositorForCurrentThread();
+            m_frameProperties = m_compositor.CreatePropertySet();
+            m_frameProperties.InsertScalar(L"Scale", 1.0f);
+            m_frameProperties.InsertVector3(L"Offset", float3{ 0.0f, 0.0f, 0.0f });
+            FractalImage().CenterPoint(float3{ 0.0f, 0.0f, 0.0f });
+        }
+        const auto view = Mandelbrot::FrameViewport(m_displayedConfig, m_currentPixelWidth, m_currentPixelHeight);
+        bool bind = !preserveMotion;
+        if (!preserveMotion)
+        {
+            if (m_cameraProperties)
+            {
+                m_cameraProperties.StopAnimation(L"Scale");
+                m_cameraProperties.StopAnimation(L"Offset");
+            }
+            m_cameraAnchor = view;
+            m_cameraProperties = m_compositor.CreatePropertySet();
+            m_cameraProperties.InsertScalar(L"Scale", 1.0f);
+            m_cameraProperties.InsertVector3(L"Offset", float3{ 0.0f, 0.0f, 0.0f });
+            m_motionFrom = m_motionTo = view;
+            m_motionStart = std::chrono::steady_clock::now();
+        }
+        else
+        {
+            const auto bridge = Mandelbrot::FrameToViewport(m_cameraAnchor, view);
+            if (bridge.scale > 1.5 || bridge.scale < 1.0 / 1.5 ||
+                std::abs(bridge.x) > view.width || std::abs(bridge.y) > view.height)
+            {
+                // Rebase before float compositor coordinates grow large. Sample the old
+                // camera on the compositor itself to keep the handoff continuous at deep zoom.
+                const auto current = PresentationCamera();
+                auto previous = m_cameraProperties;
+                previous.StopAnimation(L"Scale");
+                previous.StopAnimation(L"Offset");
+                m_cameraAnchor = view;
+                m_cameraProperties = m_compositor.CreatePropertySet();
+                const auto initial = Mandelbrot::FrameToViewport(view, current);
+                const auto target = Mandelbrot::FrameToViewport(view, m_motionTo);
+                m_cameraProperties.InsertScalar(L"Scale", static_cast<float>(initial.scale));
+                m_cameraProperties.InsertVector3(L"Offset", float3{ static_cast<float>(initial.x), static_cast<float>(initial.y), 0.0f });
+                auto scale = m_compositor.CreateScalarKeyFrameAnimation();
+                scale.Target(L"Scale");
+                scale.Duration(std::chrono::milliseconds(32));
+                scale.StopBehavior(AnimationStopBehavior::LeaveCurrentValue);
+                scale.SetReferenceParameter(L"previous", previous);
+                scale.SetScalarParameter(L"basisScale", static_cast<float>(bridge.scale));
+                scale.InsertExpressionKeyFrame(0.0f, L"previous.Scale / basisScale");
+                scale.InsertKeyFrame(1.0f, static_cast<float>(target.scale), m_compositor.CreateLinearEasingFunction());
+                auto offset = m_compositor.CreateVector3KeyFrameAnimation();
+                offset.Target(L"Offset");
+                offset.Duration(std::chrono::milliseconds(32));
+                offset.StopBehavior(AnimationStopBehavior::LeaveCurrentValue);
+                offset.SetReferenceParameter(L"previous", previous);
+                offset.SetScalarParameter(L"basisScale", static_cast<float>(bridge.scale));
+                offset.SetVector3Parameter(L"basisOffset", float3{ static_cast<float>(bridge.x), static_cast<float>(bridge.y), 0.0f });
+                offset.InsertExpressionKeyFrame(0.0f, L"previous.Offset - basisOffset * (previous.Scale / basisScale)");
+                offset.InsertKeyFrame(1.0f, float3{ static_cast<float>(target.x), static_cast<float>(target.y), 0.0f },
+                    m_compositor.CreateLinearEasingFunction());
+                auto group = m_compositor.CreateAnimationGroup();
+                group.Add(scale);
+                group.Add(offset);
+                m_cameraProperties.StartAnimationGroup(group);
+                m_motionFrom = current;
+                m_motionStart = std::chrono::steady_clock::now();
+                m_motionDuration = std::chrono::milliseconds(32);
+                bind = true;
+            }
+        }
+        FractalImage().Width(m_displayedConfig.width);
+        FractalImage().Height(m_displayedConfig.height);
+        const auto source = Mandelbrot::FrameToViewport(m_displayedConfig, m_cameraAnchor);
+        m_frameProperties.InsertScalar(L"Scale", static_cast<float>(source.scale));
+        m_frameProperties.InsertVector3(L"Offset", float3{ static_cast<float>(source.x), static_cast<float>(source.y), 0.0f });
+        if (bind) BindPresentationExpressions();
+        m_hasPresentation = true;
     }
 
     void MainWindow::RecolorBuffer()
     {
         if (!m_bitmap || m_iterations.empty()) return;
 
-        const size_t totalPixels = static_cast<size_t>(m_currentPixelWidth) * static_cast<size_t>(m_currentPixelHeight);
+        const size_t totalPixels = static_cast<size_t>(m_bitmap.PixelWidth()) * static_cast<size_t>(m_bitmap.PixelHeight());
         if (m_iterations.size() < totalPixels) return;
 
         auto buffer = m_bitmap.PixelBuffer();
@@ -303,31 +545,31 @@ namespace winrt::MandelbrotViewer::implementation
             m_phaseOffset,
             m_invertColors,
             m_interiorColor,
-            m_config.fractalType,
-            m_currentPixelWidth);
+            m_displayedConfig.fractalType,
+            m_displayedConfig.width);
 
         m_bitmap.Invalidate();
     }
 
     void MainWindow::UpdateHud(double fractalTimeMs, double colorTimeMs)
     {
+        const auto config = PresentationCamera();
         std::wostringstream coords;
-        if (m_config.zoom >= 1e6)
+        if (config.zoom >= 1e6)
         {
-            const std::wstring xStr = m_config.hpCenterX.ToWString(16);
-            const std::wstring yStr = m_config.hpCenterY.ToWString(16);
-            coords << L"Center: (" << (xStr[0] == L'-' ? L"" : L"+") << xStr
-                   << L", " << (yStr[0] == L'-' ? L"" : L"+") << yStr << L")";
+            const std::wstring xStr = config.hpCenterX.ToWString(16);
+            const std::wstring yStr = config.hpCenterY.ToWString(16);
+            coords << L"Center: (" << xStr << L", " << yStr << L")";
         }
         else
         {
-            coords << L"Center: (" << FormatCoordinate(m_config.centerX).c_str()
-                   << L", " << FormatCoordinate(m_config.centerY).c_str() << L")";
+            coords << L"Center: (" << FormatCoordinate(config.centerX).c_str()
+                   << L", " << FormatCoordinate(config.centerY).c_str() << L")";
         }
         HudCoordsText().Text(coords.str());
 
-        std::wstring zoomLabel = L"Zoom: " + std::wstring(FormatZoom(m_config.zoom).c_str());
-        if (m_config.zoom >= Mandelbrot::MandelbrotEngine::DeepZoomThreshold)
+        std::wstring zoomLabel = L"Zoom: " + std::wstring(FormatZoom(config.zoom).c_str());
+        if (config.zoom >= Mandelbrot::MandelbrotEngine::DeepZoomThreshold)
         {
             zoomLabel += L" [1024-bit Perturbation]";
         }
@@ -347,7 +589,7 @@ namespace winrt::MandelbrotViewer::implementation
         std::wostringstream timing;
         timing << L"Fractal: " << std::fixed << std::setprecision(1) << fractalTimeMs
                << L" ms | Color: " << std::fixed << std::setprecision(1) << colorTimeMs
-               << L" ms | Iter: " << m_config.maxIterations;
+               << L" ms | Iter: " << m_displayedConfig.maxIterations;
         HudTimingText().Text(timing.str());
     }
 
@@ -370,6 +612,7 @@ namespace winrt::MandelbrotViewer::implementation
     void MainWindow::ApplyZoom(double factor, double pivotX, double pivotY)
     {
         if (m_currentPixelWidth <= 0 || m_currentPixelHeight <= 0) return;
+        if (m_isZoomAnimating) StopZoomAnimation(false);
 
         Mandelbrot::MandelbrotEngine::ZoomViewport(m_config, factor, pivotX, pivotY);
         SyncTargetInputsFromCenter();
@@ -412,14 +655,16 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::PickAndApplyRandomTarget()
     {
-        if (m_iterations.empty() && m_currentPixelWidth > 0 && m_currentPixelHeight > 0)
+        if (!m_hasCurrentFrame || m_iterations.empty())
         {
-            m_engine.Compute(m_config, m_iterations);
+            m_zoomTargetX = m_config.hpCenterX;
+            m_zoomTargetY = m_config.hpCenterY;
+            m_hasActiveRandomTarget = false;
+            return;
         }
 
-        Mandelbrot::MandelbrotEngine::PickInterestingTarget(
-            m_config, m_iterations, m_zoomTargetX, m_zoomTargetY);
-        m_hasActiveRandomTarget = true;
+        m_hasActiveRandomTarget = Mandelbrot::MandelbrotEngine::PickInterestingTarget(
+            m_displayedConfig, m_iterations, m_zoomTargetX, m_zoomTargetY);
         m_retargetPanProgress = 0.0;
         m_framesSinceRetarget = 0;
         UpdateTargetTextBoxes();
@@ -440,8 +685,8 @@ namespace winrt::MandelbrotViewer::implementation
     {
         if (m_autoPickInterestingTarget && m_zoomInDirection)
         {
-            if (!m_hasActiveRandomTarget ||
-                Mandelbrot::MandelbrotEngine::ShouldRetargetZoom(m_config, m_iterations, m_zoomTargetX, m_zoomTargetY))
+            if (!m_hasCurrentFrame || !m_hasActiveRandomTarget ||
+                Mandelbrot::MandelbrotEngine::ShouldRetargetZoom(m_displayedConfig, m_iterations, m_zoomTargetX, m_zoomTargetY))
             {
                 PickAndApplyRandomTarget();
             }
@@ -484,6 +729,7 @@ namespace winrt::MandelbrotViewer::implementation
         m_slowFrameStreak = 0;
         m_fastFrameStreak = 0;
         m_lastZoomFrameTime = std::chrono::steady_clock::now();
+        RenderFractal(true);
 
         if (StartZoomButton()) StartZoomButton().IsEnabled(false);
         if (StopZoomButton()) StopZoomButton().IsEnabled(true);
@@ -505,8 +751,15 @@ namespace winrt::MandelbrotViewer::implementation
         }
     }
 
-    void MainWindow::StopZoomAnimation()
+    void MainWindow::StopZoomAnimation(bool renderFinalFrame)
     {
+        if (m_isZoomAnimating && m_hasPresentation)
+        {
+            const auto view = PresentationCamera();
+            m_config.SetCenter(view.hpCenterX, view.hpCenterY);
+            m_config.zoom = view.zoom;
+        }
+        FreezePresentation();
         m_isZoomAnimating = false;
         m_animQualityLevel = 0;
         m_slowFrameStreak = 0;
@@ -550,7 +803,7 @@ namespace winrt::MandelbrotViewer::implementation
         {
             UpdateTargetTextBoxes();
         }
-        RenderFractal();
+        if (renderFinalFrame) RenderFractal();
     }
 
     void MainWindow::OnOverlayZoomToggleClick(IInspectable const&, RoutedEventArgs const&)
@@ -617,10 +870,10 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::OnViewportPointerPressed(IInspectable const&, Input::PointerRoutedEventArgs const& e)
     {
-        const auto point = e.GetCurrentPoint(FractalImage());
+        const auto point = e.GetCurrentPoint(FractalSurface());
         if (m_isDragging || !point.Properties().IsLeftButtonPressed()) return;
         if (m_isZoomAnimating) StopZoomAnimation();
-        if (!FractalImage().CapturePointer(e.Pointer())) return;
+        if (!FractalSurface().CapturePointer(e.Pointer())) return;
         m_isDragging = true;
         m_dragPointerId = e.Pointer().PointerId();
         m_dragStartPoint = point.Position();
@@ -634,7 +887,7 @@ namespace winrt::MandelbrotViewer::implementation
         if (!m_isDragging || e.Pointer().PointerId() != m_dragPointerId ||
             m_currentPixelWidth <= 0 || m_currentPixelHeight <= 0) return;
 
-        const auto currentPoint = e.GetCurrentPoint(FractalImage()).Position();
+        const auto currentPoint = e.GetCurrentPoint(FractalSurface()).Position();
         const double dx = currentPoint.X - m_dragStartPoint.X;
         const double dy = currentPoint.Y - m_dragStartPoint.Y;
 
@@ -656,7 +909,7 @@ namespace winrt::MandelbrotViewer::implementation
         if (m_isDragging && e.Pointer().PointerId() == m_dragPointerId)
         {
             m_isDragging = false;
-            FractalImage().ReleasePointerCapture(e.Pointer());
+            FractalSurface().ReleasePointerCapture(e.Pointer());
 
             if (!m_isZoomAnimating && m_config.renderStride > 1)
             {
@@ -669,9 +922,9 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::OnViewportPointerWheelChanged(IInspectable const&, Input::PointerRoutedEventArgs const& e)
     {
-        const int delta = e.GetCurrentPoint(FractalImage()).Properties().MouseWheelDelta();
+        const int delta = e.GetCurrentPoint(FractalSurface()).Properties().MouseWheelDelta();
         if (delta == 0) return;
-        const auto pos = e.GetCurrentPoint(FractalImage()).Position();
+        const auto pos = e.GetCurrentPoint(FractalSurface()).Position();
         const double factor = (delta > 0) ? 1.25 : 0.8;
         ApplyZoom(factor, pos.X, pos.Y);
         e.Handled(true);
@@ -679,7 +932,7 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::OnViewportDoubleTapped(IInspectable const&, Input::DoubleTappedRoutedEventArgs const& e)
     {
-        const auto pos = e.GetPosition(FractalImage());
+        const auto pos = e.GetPosition(FractalSurface());
         ApplyZoom(2.0, pos.X, pos.Y);
     }
 
@@ -1126,25 +1379,26 @@ namespace winrt::MandelbrotViewer::implementation
 
     winrt::Windows::Foundation::IAsyncAction MainWindow::OnExportImageClick(IInspectable const&, RoutedEventArgs const&)
     {
-        if (!m_bitmap || m_currentPixelWidth <= 0 || m_currentPixelHeight <= 0) co_return;
+        if (!m_bitmap || !m_hasPresentation || m_currentPixelWidth <= 0 || m_currentPixelHeight <= 0) co_return;
         auto lifetime = get_strong();
 
         try
         {
             // Snapshot before the first suspension: animation and resizing can replace the live bitmap.
-            const uint32_t width = static_cast<uint32_t>(m_bitmap.PixelWidth());
-            const uint32_t height = static_cast<uint32_t>(m_bitmap.PixelHeight());
+            const auto view = PresentationCamera();
+            const uint32_t width = static_cast<uint32_t>(view.width);
+            const uint32_t height = static_cast<uint32_t>(view.height);
             auto buffer = m_bitmap.PixelBuffer();
             auto byteAccess = buffer.as<::Windows::Storage::Streams::IBufferByteAccess>();
             uint8_t* pRaw = nullptr;
             winrt::check_hresult(byteAccess->Buffer(&pRaw));
             if (!pRaw) throw winrt::hresult_error(E_FAIL, L"Unable to read the viewport image.");
-            const std::vector<uint8_t> pixels(pRaw, pRaw + buffer.Length());
+            const auto pixels = Mandelbrot::SnapshotViewport(pRaw, m_displayedConfig, view);
 
             auto picker = winrt::Windows::Storage::Pickers::FileSavePicker();
             picker.SuggestedStartLocation(winrt::Windows::Storage::Pickers::PickerLocationId::PicturesLibrary);
             picker.FileTypeChoices().Insert(L"PNG Image (*.png)", winrt::single_threaded_vector<winrt::hstring>({ L".png" }));
-            picker.SuggestedFileName(winrt::hstring(Mandelbrot::GetFractalTypeName(m_config.fractalType) + L"_Capture.png"));
+            picker.SuggestedFileName(winrt::hstring(Mandelbrot::GetFractalTypeName(m_displayedConfig.fractalType) + L"_Capture.png"));
 
             // WinUI 3 Desktop requires HWND initialization for FileSavePicker
             HWND hwnd = nullptr;
@@ -1180,7 +1434,7 @@ namespace winrt::MandelbrotViewer::implementation
     {
         auto package = winrt::Windows::ApplicationModel::DataTransfer::DataPackage();
         package.SetText(Mandelbrot::SerializeViewState(
-            m_config, m_theme, m_frequency, m_phaseOffset, m_invertColors, m_interiorColor));
+            PresentationCamera(), m_theme, m_frequency, m_phaseOffset, m_invertColors, m_interiorColor));
         winrt::Windows::ApplicationModel::DataTransfer::Clipboard::SetContent(package);
 
         // Visual confirmation by updating Hud text briefly

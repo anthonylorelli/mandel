@@ -22,17 +22,16 @@
 
         <!-- Viewport Area -->
         <Grid x:Name="ViewportGrid" Grid.Column="0" Background="#0A0A0F" SizeChanged="OnViewportSizeChanged">
-            <Image x:Name="FractalImage"
-                   Stretch="Fill"
-                   HorizontalAlignment="Stretch"
-                   VerticalAlignment="Stretch"
+            <Canvas x:Name="FractalSurface" Background="Transparent"
                    PointerPressed="OnViewportPointerPressed"
                    PointerMoved="OnViewportPointerMoved"
                    PointerReleased="OnViewportPointerReleased"
                    PointerCanceled="OnViewportPointerReleased"
                    PointerCaptureLost="OnViewportPointerReleased"
                    PointerWheelChanged="OnViewportPointerWheelChanged"
-                   DoubleTapped="OnViewportDoubleTapped" />
+                   DoubleTapped="OnViewportDoubleTapped">
+                <Image x:Name="FractalImage" Stretch="Fill" IsHitTestVisible="False" />
+            </Canvas>
 
             <!-- Floating Telemetry HUD -->
             <Border HorizontalAlignment="Left" VerticalAlignment="Top"

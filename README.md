@@ -16,6 +16,13 @@ A high-performance Windows desktop application built with native **C++/WinRT** a
 - **Continuous (Smooth) Potential Coloring**: Eliminates discrete step color banding across all fractals.
 - **Double-Precision Coordinate Space**: Supports deep zooming up to $10^{12}\times$.
 
+### Animation Rendering
+- A single background worker calculates fresh detail while Windows Composition animates the displayed image between completed frames.
+- Animation requests replace the pending view; resizing, formula changes, and manual navigation cancel obsolete work.
+- Animated renders include an 8% margin on each edge at the viewport's pixel spacing, allowing panning and zooming out without exposing blank borders.
+- Image enlargement is limited to 12%. Zoom progression slows for expensive frames, preserving refinement instead of falling back to coarse blocks.
+- Stopping zoom requests a full-resolution, per-pixel frame. PNG exports crop and sample the visible viewport, excluding the rendering margin.
+
 ### 2. Live Modifiable Color Theme Engine
 - **Decoupled Iteration & Coloring Pipeline**:
   - The escape computation caches fractional iteration values in a dedicated 2D buffer.
@@ -110,3 +117,5 @@ Or with options:
 - **Fractal Formulas**: Mandelbrot, Burning Ship upright masts, Tricorn conjugate symmetry, and Newton root convergence.
 - **Landmark Integrity**: Validates all landmark bookmarks across all 4 fractals to guarantee non-blank, non-flat rendering.
 - **Color Theme & LUT**: LUT 4096-entry generation, gradient stop manipulation, interior point coloring, cyclic palette mapping, and multi-basin Newton coloring.
+- **Background Rendering**: Pending-request coalescing, cancellation, stale-frame rejection, buffer reuse, error recovery, and equality with synchronous calculation.
+- **Animated Presentation**: High-precision viewport transforms, compositor anchor rebasing, guard-band coverage, delayed-frame and direction-change behavior, and viewport image export.
