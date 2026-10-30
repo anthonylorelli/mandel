@@ -155,6 +155,7 @@
     <ClInclude Include="FrameTiming.h" />
     <ClInclude Include="BackgroundRenderer.h" />
     <ClInclude Include="FramePresentation.h" />
+    <ClInclude Include="PixelSampling.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp">

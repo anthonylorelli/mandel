@@ -4,6 +4,8 @@
 #include <chrono>
 #include <algorithm>
 #include <random>
+#include <limits>
+#include <stdexcept>
 
 namespace Mandelbrot
 {
@@ -605,6 +607,79 @@ namespace Mandelbrot
                     }
                 }
             }
+        }
+    }
+
+    namespace
+    {
+        template <typename EvalPixelFn>
+        void RefineSubpixels(int width, int height, bool smooth, FractalType type,
+            const std::vector<float>& centers, std::vector<float>& weights,
+            std::vector<SubpixelSamples>* samples, const std::atomic<bool>* cancelToken,
+            EvalPixelFn&& evalPixel)
+        {
+            if (!samples) return;
+            samples->clear();
+            auto canceled = [&] { return cancelToken && cancelToken->load(std::memory_order_relaxed); };
+            if (canceled()) return;
+            if (centers.size() > std::numeric_limits<uint32_t>::max())
+                throw std::length_error("Supersampling image is too large.");
+
+            weights.resize(centers.size());
+            std::vector<size_t> rowOffsets(static_cast<size_t>(height) + 1, 0);
+            #pragma omp parallel for schedule(static)
+            for (int y = 0; y < height; ++y)
+            {
+                if (canceled()) continue;
+                size_t selected = 0;
+                for (int x = 0; x < width; ++x)
+                {
+                    const size_t index = static_cast<size_t>(y) * width + x;
+                    const float center = centers[index];
+                    float variation = 0.0f;
+                    bool boundary = false;
+                    for (int ny = std::max(0, y - 1); ny <= std::min(height - 1, y + 1); ++ny)
+                        for (int nx = std::max(0, x - 1); nx <= std::min(width - 1, x + 1); ++nx)
+                        {
+                            const float neighbor = centers[static_cast<size_t>(ny) * width + nx];
+                            if ((center < 0.0f) != (neighbor < 0.0f)) boundary = true;
+                            if (center < 0.0f || neighbor < 0.0f) continue;
+                            if (!SameBasin(center, neighbor, type) || (!smooth && center != neighbor))
+                                boundary = true;
+                            const float a = type == FractalType::Newton ? std::fmod(center, 1000000.0f) : center;
+                            const float b = type == FractalType::Newton ? std::fmod(neighbor, 1000000.0f) : neighbor;
+                            variation = std::max(variation, std::abs(a - b) / (10.0f + std::min(a, b)));
+                        }
+                    // A smooth transition avoids a second source of popping at the refinement
+                    // threshold. The mask depends on local detail, never on render timings.
+                    const float t = std::clamp((variation - 0.015f) / 0.065f, 0.0f, 1.0f);
+                    const float weight = boundary ? 1.0f : t * t * (3.0f - 2.0f * t);
+                    weights[index] = weight;
+                    if (weight > 0.0f) ++selected;
+                }
+                rowOffsets[static_cast<size_t>(y) + 1] = selected;
+            }
+            if (canceled()) return;
+            for (int y = 0; y < height; ++y) rowOffsets[y + 1] += rowOffsets[y];
+            samples->resize(rowOffsets.back());
+
+            #pragma omp parallel for schedule(dynamic, 1)
+            for (int y = 0; y < height; ++y)
+            {
+                size_t output = rowOffsets[y];
+                for (int x = 0; x < width; ++x)
+                {
+                    if (canceled()) break;
+                    const size_t index = static_cast<size_t>(y) * width + x;
+                    if (weights[index] <= 0.0f) continue;
+                    auto& sample = (*samples)[output++];
+                    sample.pixelIndex = static_cast<uint32_t>(index);
+                    sample.weight = weights[index];
+                    sample.iterations = { evalPixel(x - 0.25, y - 0.25), evalPixel(x + 0.25, y - 0.25),
+                        evalPixel(x - 0.25, y + 0.25), evalPixel(x + 0.25, y + 0.25) };
+                }
+            }
+            if (canceled()) samples->clear();
         }
     }
 
@@ -1453,8 +1528,10 @@ namespace Mandelbrot
     double MandelbrotEngine::Compute(
         const MandelbrotConfig& config,
         std::vector<float>& outIterations,
-        const std::atomic<bool>* cancelToken)
+        const std::atomic<bool>* cancelToken,
+        std::vector<SubpixelSamples>* subpixelSamples)
     {
+        if (subpixelSamples) subpixelSamples->clear();
         if (config.width <= 0 || config.height <= 0) return 0.0;
 
         if (config.zoom >= DeepZoomThreshold)
@@ -1468,7 +1545,7 @@ namespace Mandelbrot
                 hpX = BigFloat(config.centerX);
                 hpY = BigFloat(config.centerY);
             }
-            return ComputeDeepZoom(config, hpX, hpY, outIterations, cancelToken);
+            return ComputeDeepZoom(config, hpX, hpY, outIterations, cancelToken, subpixelSamples);
         }
 
         const auto startTime = std::chrono::high_resolution_clock::now();
@@ -1494,7 +1571,7 @@ namespace Mandelbrot
         const double halfW = static_cast<double>(width) * 0.5;
         const double halfH = static_cast<double>(height) * 0.5;
 
-        auto evalStandardPixel = [&](int px, int py) -> float
+        auto evalStandardPixel = [&](double px, double py) -> float
         {
             if (cancelToken && cancelToken->load(std::memory_order_relaxed)) return -1.0f;
             const double cy = config.centerY + (halfH - (static_cast<double>(py) + 0.5)) * dy;
@@ -1513,6 +1590,9 @@ namespace Mandelbrot
             cancelToken,
             evalStandardPixel);
 
+        RefineSubpixels(width, height, smooth, type, outIterations, m_sampleWeights,
+            subpixelSamples, cancelToken, evalStandardPixel);
+
         const auto endTime = std::chrono::high_resolution_clock::now();
         const std::chrono::duration<double, std::milli> elapsed = endTime - startTime;
         return elapsed.count();
@@ -1523,8 +1603,10 @@ namespace Mandelbrot
         const BigFloat& centerX,
         const BigFloat& centerY,
         std::vector<float>& outIterations,
-        const std::atomic<bool>* cancelToken)
+        const std::atomic<bool>* cancelToken,
+        std::vector<SubpixelSamples>* subpixelSamples)
     {
+        if (subpixelSamples) subpixelSamples->clear();
         const auto startTime = std::chrono::high_resolution_clock::now();
 
         const int width = config.width;
@@ -1614,7 +1696,7 @@ namespace Mandelbrot
             constexpr double ROOT1_Y = 0.86602540378443864676;
             constexpr double TOLERANCE_SQ = 1e-8;
 
-            auto evalNewtonPixel = [&](int px, int py) -> float
+            auto evalNewtonPixel = [&](double px, double py) -> float
             {
                 if (cancelToken && cancelToken->load(std::memory_order_relaxed)) return -1.0f;
                 const double dcy = static_cast<double>(refPy - py) * stepY;
@@ -1787,6 +1869,9 @@ namespace Mandelbrot
                 outIterations,
                 cancelToken,
                 evalNewtonPixel);
+
+            RefineSubpixels(width, height, smooth, type, outIterations, m_sampleWeights,
+                subpixelSamples, cancelToken, evalNewtonPixel);
 
             const auto endTime = std::chrono::high_resolution_clock::now();
             const std::chrono::duration<double, std::milli> elapsed = endTime - startTime;
@@ -2145,7 +2230,7 @@ namespace Mandelbrot
         const double refCxDouble = m_cachedRefX.ToDouble();
         const double refCyDouble = m_cachedRefY.ToDouble();
 
-        auto evalDeepPixel = [&](int px, int py) -> float
+        auto evalDeepPixel = [&](double px, double py) -> float
         {
             if (cancelToken && cancelToken->load(std::memory_order_relaxed)) return -1.0f;
             const double dcy = (refPosY - static_cast<double>(py)) * stepY;
@@ -2335,6 +2420,9 @@ namespace Mandelbrot
             outIterations,
             cancelToken,
             evalDeepPixel);
+
+        RefineSubpixels(width, height, smooth, type, outIterations, m_sampleWeights,
+            subpixelSamples, cancelToken, evalDeepPixel);
 
         const auto endTime = std::chrono::high_resolution_clock::now();
         const std::chrono::duration<double, std::milli> elapsed = endTime - startTime;

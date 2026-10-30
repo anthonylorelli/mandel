@@ -78,7 +78,6 @@ namespace winrt::MandelbrotViewer::implementation
         void PopulateBookmarks();
         void RenderFractal(bool continueAnimation = false);
         void OnRenderCompleted();
-        void UpdateAnimationQuality(double elapsedMs);
         Mandelbrot::MandelbrotConfig PresentationCamera() const;
         void AnimateCamera(const Mandelbrot::MandelbrotConfig& view, std::chrono::milliseconds duration);
         void SetPresentationFrame(bool preserveMotion);
@@ -104,6 +103,7 @@ namespace winrt::MandelbrotViewer::implementation
         Mandelbrot::ColorTheme m_theme;
         Mandelbrot::MandelbrotConfig m_config;
         std::vector<float> m_iterations;
+        std::vector<Mandelbrot::SubpixelSamples> m_subpixelSamples;
         Mandelbrot::MandelbrotConfig m_displayedConfig;
         bool m_hasCurrentFrame{ false };
         bool m_hasPresentation{ false };
@@ -130,9 +130,6 @@ namespace winrt::MandelbrotViewer::implementation
         double m_zoomSpeed{ 1.0 };
         double m_retargetPanProgress{ 1.0 };
         int m_framesSinceRetarget{ 0 };
-        int m_animQualityLevel{ 0 };
-        int m_slowFrameStreak{ 0 };
-        int m_fastFrameStreak{ 0 };
         double m_lastFractalTimeMs{ 0.0 };
         Mandelbrot::BigFloat m_zoomTargetX{ -0.75 };
         Mandelbrot::BigFloat m_zoomTargetY{ 0.0 };

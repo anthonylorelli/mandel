@@ -26,6 +26,7 @@ namespace Mandelbrot
             {
                 // A completed frame means the worker is idle and the back buffer is available.
                 m_workBuffer = std::move(m_completed->iterations);
+                m_workSamples = std::move(m_completed->samples);
                 m_completed.reset();
             }
         }
@@ -36,19 +37,26 @@ namespace Mandelbrot
     }
 
     std::optional<RenderResult> BackgroundRenderer::TakeCompleted(std::vector<float>& displayedIterations,
-        const std::function<bool(const RenderResult&)>& accept)
+        const std::function<bool(const RenderResult&)>& accept,
+        std::vector<SubpixelSamples>* displayedSamples)
     {
         std::lock_guard lock(m_mutex);
         if (!m_completed) return std::nullopt;
         if (!m_completed->result.error && accept && !accept(m_completed->result))
         {
             m_workBuffer.swap(m_completed->iterations);
+            m_workSamples.swap(m_completed->samples);
             m_completed.reset();
             m_wake.notify_one();
             return std::nullopt;
         }
-        if (!m_completed->result.error) displayedIterations.swap(m_completed->iterations);
+        if (!m_completed->result.error)
+        {
+            displayedIterations.swap(m_completed->iterations);
+            if (displayedSamples) displayedSamples->swap(m_completed->samples);
+        }
         m_workBuffer.swap(m_completed->iterations);
+        m_workSamples.swap(m_completed->samples);
         auto result = std::move(m_completed->result);
         m_completed.reset();
         m_wake.notify_one();
@@ -77,6 +85,7 @@ namespace Mandelbrot
         if (m_completed)
         {
             m_workBuffer = std::move(m_completed->iterations);
+            m_workSamples = std::move(m_completed->samples);
             m_completed.reset();
         }
     }
@@ -96,11 +105,12 @@ namespace Mandelbrot
             lock.unlock();
 
             RenderResult result{ request.config, request.id };
+            m_workSamples.clear();
             try
             {
                 result.elapsedMs = m_compute
                     ? m_compute(request.config, m_workBuffer, &m_cancel)
-                    : m_engine.Compute(request.config, m_workBuffer, &m_cancel);
+                    : m_engine.Compute(request.config, m_workBuffer, &m_cancel, &m_workSamples);
             }
             catch (...)
             {
@@ -115,7 +125,7 @@ namespace Mandelbrot
                 m_engine = MandelbrotEngine{};
                 if (!result.error || request.generation != m_generation) continue;
             }
-            m_completed = Completed{ std::move(result), std::move(m_workBuffer) };
+            m_completed = Completed{ std::move(result), std::move(m_workBuffer), std::move(m_workSamples) };
             lock.unlock();
             try
             {

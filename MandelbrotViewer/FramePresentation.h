@@ -19,6 +19,10 @@ namespace Mandelbrot
     inline MandelbrotConfig AnimationRenderConfig(const MandelbrotConfig& viewport)
     {
         auto frame = viewport;
+        // Keep the coarse grid stable throughout motion. Camera speed absorbs rendering
+        // pressure instead of changing which fine features are reconstructed each frame.
+        frame.renderStride = 2;
+        frame.edgeRefine = true;
         // Preserve complex-plane pixel spacing while adding an 8% guard band on each edge.
         frame.width += 2 * static_cast<int>(std::ceil(viewport.width * 0.08));
         frame.height += 2 * static_cast<int>(std::ceil(viewport.height * 0.08));

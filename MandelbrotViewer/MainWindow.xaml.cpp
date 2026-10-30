@@ -194,21 +194,9 @@ namespace winrt::MandelbrotViewer::implementation
                 }
             }
 
-            // Adapt sampling density while preserving per-pixel detail in complex cells.
-            // Heavy frames must never disable refinement: that replaces filaments with coarse blocks.
+            // Keep spatial sampling stable; PresentationZoomSpeed adapts the camera pace.
             m_config.edgeRefine = true;
-            switch (m_animQualityLevel)
-            {
-            case 0:
-                m_config.renderStride = 2;
-                break;
-            case 1:
-                m_config.renderStride = 3;
-                break;
-            default:
-                m_config.renderStride = 4;
-                break;
-            }
+            m_config.renderStride = 2;
 
             if (jump) RenderFractal();
             else
@@ -308,7 +296,7 @@ namespace winrt::MandelbrotViewer::implementation
                 !Mandelbrot::FrameCoversViewport(ready.config, m_motionTo) ||
                 !Mandelbrot::FrameCoversViewport(ready.config, m_config));
             return !rejected;
-        });
+        }, &m_subpixelSamples);
         if (rejected)
         {
             RenderFractal(true);
@@ -341,40 +329,10 @@ namespace winrt::MandelbrotViewer::implementation
         UpdateHud(result->elapsedMs, colorElapsed.count());
         if (m_isZoomAnimating)
         {
-            // Quality and retarget hysteresis count completed frames, not timer ticks.
-            UpdateAnimationQuality(result->elapsedMs);
+            // Retarget hysteresis counts completed frames, not timer ticks.
             ++m_framesSinceRetarget;
             if (m_autoPickInterestingTarget && m_zoomInDirection && !m_hasActiveRandomTarget)
                 PickAndApplyRandomTarget();
-        }
-    }
-
-    void MainWindow::UpdateAnimationQuality(double elapsedMs)
-    {
-        if (elapsedMs > 22.0)
-        {
-            ++m_slowFrameStreak;
-            m_fastFrameStreak = 0;
-            if (m_slowFrameStreak >= 2 && m_animQualityLevel < 2)
-            {
-                ++m_animQualityLevel;
-                m_slowFrameStreak = 0;
-            }
-        }
-        else if (elapsedMs < 6.0)
-        {
-            ++m_fastFrameStreak;
-            m_slowFrameStreak = 0;
-            if (m_fastFrameStreak >= 8 && m_animQualityLevel > 0)
-            {
-                --m_animQualityLevel;
-                m_fastFrameStreak = 0;
-            }
-        }
-        else
-        {
-            m_slowFrameStreak = 0;
-            m_fastFrameStreak = 0;
         }
     }
 
@@ -546,7 +504,8 @@ namespace winrt::MandelbrotViewer::implementation
             m_invertColors,
             m_interiorColor,
             m_displayedConfig.fractalType,
-            m_displayedConfig.width);
+            m_displayedConfig.width,
+            &m_subpixelSamples);
 
         m_bitmap.Invalidate();
     }
@@ -725,9 +684,6 @@ namespace winrt::MandelbrotViewer::implementation
         }
 
         m_isZoomAnimating = true;
-        m_animQualityLevel = 0;
-        m_slowFrameStreak = 0;
-        m_fastFrameStreak = 0;
         m_lastZoomFrameTime = std::chrono::steady_clock::now();
         RenderFractal(true);
 
@@ -761,9 +717,6 @@ namespace winrt::MandelbrotViewer::implementation
         }
         FreezePresentation();
         m_isZoomAnimating = false;
-        m_animQualityLevel = 0;
-        m_slowFrameStreak = 0;
-        m_fastFrameStreak = 0;
         m_config.renderStride = 1;
         m_config.edgeRefine = true;
         if (m_zoomTimer)

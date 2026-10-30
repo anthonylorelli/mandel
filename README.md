@@ -21,6 +21,8 @@ A high-performance Windows desktop application built with native **C++/WinRT** a
 - Animation requests replace the pending view; resizing, formula changes, and manual navigation cancel obsolete work.
 - Animated renders include an 8% margin on each edge at the viewport's pixel spacing, allowing panning and zooming out without exposing blank borders.
 - Image enlargement is limited to 12%. Zoom progression slows for expensive frames, preserving refinement instead of falling back to coarse blocks.
+- Spatial sampling stays fixed during animation. Boundaries and detailed regions receive four exact quarter-pixel samples, colored separately and averaged in linear light to reduce fine-detail shimmer. Flat regions skip the extra evaluations, and refinement fades in smoothly with local variation.
+- Subpixel samples are retained for live palette edits and final still frames. Extra detail work can slow zoom progression in expensive views; camera speed adapts while the compositor continues animating.
 - Stopping zoom requests a full-resolution, per-pixel frame. PNG exports crop and sample the visible viewport, excluding the rendering margin.
 
 ### 2. Live Modifiable Color Theme Engine
@@ -119,3 +121,4 @@ Or with options:
 - **Color Theme & LUT**: LUT 4096-entry generation, gradient stop manipulation, interior point coloring, cyclic palette mapping, and multi-basin Newton coloring.
 - **Background Rendering**: Pending-request coalescing, cancellation, stale-frame rejection, buffer reuse, error recovery, and equality with synchronous calculation.
 - **Animated Presentation**: High-precision viewport transforms, compositor anchor rebasing, guard-band coverage, delayed-frame and direction-change behavior, and viewport image export.
+- **Subpixel Sampling**: Exact sample positions across all formulas and deep zooms, deterministic refinement, flat-region skipping, interior coverage and Newton basin colors, and reduced camera-aligned color variation.
