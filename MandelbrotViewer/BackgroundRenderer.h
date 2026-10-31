@@ -36,7 +36,8 @@ namespace Mandelbrot
         // An optional presentation predicate can discard frames that no longer cover the
         // visible camera. It runs under the worker lock and must not call back into this object.
         std::optional<RenderResult> TakeCompleted(std::vector<float>& displayedIterations,
-            const std::function<bool(const RenderResult&)>& accept = {});
+            const std::function<bool(const RenderResult&)>& accept = {},
+            std::vector<SubpixelSamples>* displayedSamples = nullptr);
         void Cancel();
         void Stop();
 
@@ -51,6 +52,7 @@ namespace Mandelbrot
         {
             RenderResult result;
             std::vector<float> iterations;
+            std::vector<SubpixelSamples> samples;
         };
         void Run();
 
@@ -62,6 +64,7 @@ namespace Mandelbrot
         std::optional<Request> m_pending;
         std::optional<Completed> m_completed;
         std::vector<float> m_workBuffer;
+        std::vector<SubpixelSamples> m_workSamples;
         std::atomic<bool> m_cancel{ false };
         uint64_t m_generation{};
         uint64_t m_nextId{};

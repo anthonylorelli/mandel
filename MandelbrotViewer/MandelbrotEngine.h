@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdint>
 #include "HighPrecision.h"
+#include "PixelSampling.h"
 
 namespace Mandelbrot
 {
@@ -32,6 +33,9 @@ namespace Mandelbrot
         bool smooth{ true };
         int renderStride{ 1 };   // 1 = full per-pixel; 2..4 = adaptive coarse grid + smooth/edge reconstruction
         bool edgeRefine{ true }; // When renderStride > 1, refine high-contrast boundary cells per-pixel
+        bool juliaSet{ false }; // Quadratic dynamical plane, available as a Mandelbrot companion.
+        BigFloat juliaX{ -0.75 };
+        BigFloat juliaY{ 0.0 };
 
         void SetCenter(double x, double y)
         {
@@ -72,11 +76,13 @@ namespace Mandelbrot
         MandelbrotEngine() = default;
 
         // Computes fractional iteration values into outIterations (size: width * height)
-        // Returns elapsed time in milliseconds
+        // Optional sparse subpixel samples refine boundaries and detailed regions. Center
+        // samples stay unchanged for navigation; elapsed time includes the additional work.
         double Compute(
             const MandelbrotConfig& config,
             std::vector<float>& outIterations,
-            const std::atomic<bool>* cancelToken = nullptr);
+            const std::atomic<bool>* cancelToken = nullptr,
+            std::vector<SubpixelSamples>* subpixelSamples = nullptr);
 
         // High-precision Perturbation Theory & Dynamic Rebasing solver for deep zooms
         double ComputeDeepZoom(
@@ -84,7 +90,8 @@ namespace Mandelbrot
             const BigFloat& centerX,
             const BigFloat& centerY,
             std::vector<float>& outIterations,
-            const std::atomic<bool>* cancelToken = nullptr);
+            const std::atomic<bool>* cancelToken = nullptr,
+            std::vector<SubpixelSamples>* subpixelSamples = nullptr);
 
         // High-precision cursor-centered zoom without double cancellation
         static void ZoomViewport(
@@ -154,6 +161,9 @@ namespace Mandelbrot
         };
 
     private:
+        double ComputeJulia(const MandelbrotConfig& config, std::vector<float>& outIterations,
+            const std::atomic<bool>* cancelToken, std::vector<SubpixelSamples>* subpixelSamples);
+        std::vector<float> m_sampleWeights;
         // Cached high-precision reference orbit across consecutive deep-zoom frames
         bool m_hasCachedOrbit{ false };
         FractalType m_cachedType{ FractalType::Mandelbrot };

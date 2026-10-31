@@ -209,19 +209,23 @@ TEST_CASE(BackgroundRenderer, ErrorsPreserveDisplayedPixelsAndWorkerCanRecover)
     std::vector<float> pixels{ 42.0f };
     renderer.Submit(config);
     ASSERT_TRUE(notifications.Wait(1));
-    auto failed = renderer.TakeCompleted(pixels);
+    std::vector<SubpixelSamples> samples{ {0, 1.0f, {42.0f,42.0f,42.0f,42.0f}} };
+    auto failed = renderer.TakeCompleted(pixels, {}, &samples);
     ASSERT_TRUE(failed.has_value());
     ASSERT_TRUE(failed->error != nullptr);
     ASSERT_EQ(static_cast<size_t>(1), pixels.size());
     ASSERT_EQ(42.0f, pixels.front());
+    ASSERT_EQ(static_cast<size_t>(1), samples.size());
+    ASSERT_EQ(42.0f, samples.front().iterations[0]);
     config.zoom = 2.0;
     renderer.Submit(config);
     ASSERT_TRUE(notifications.Wait(2));
-    auto recovered = renderer.TakeCompleted(pixels);
+    auto recovered = renderer.TakeCompleted(pixels, {}, &samples);
     ASSERT_TRUE(recovered.has_value());
     ASSERT_FALSE(recovered->error != nullptr);
     ASSERT_EQ(3.0, recovered->elapsedMs);
     ASSERT_EQ(2.0f, pixels.front());
+    ASSERT_TRUE(samples.empty());
 }
 
 TEST_CASE(BackgroundRenderer, ExchangesTwoReusableBuffers)
@@ -259,16 +263,20 @@ TEST_CASE(BackgroundRenderer, RejectedPresentationKeepsTheDisplayedBuffer)
         [](const auto& config, auto& out, auto) { out.assign(4, static_cast<float>(config.zoom)); return 1.0; });
     MandelbrotConfig config;
     std::vector<float> pixels{ 42.0f };
+    std::vector<SubpixelSamples> samples{ {0, 1.0f, {42.0f,42.0f,42.0f,42.0f}} };
     renderer.Submit(config);
     ASSERT_TRUE(notifications.Wait(1));
-    ASSERT_FALSE(renderer.TakeCompleted(pixels, [](const RenderResult&) { return false; }).has_value());
+    ASSERT_FALSE(renderer.TakeCompleted(pixels, [](const RenderResult&) { return false; }, &samples).has_value());
     ASSERT_EQ(static_cast<size_t>(1), pixels.size());
     ASSERT_EQ(42.0f, pixels.front());
+    ASSERT_EQ(static_cast<size_t>(1), samples.size());
+    ASSERT_EQ(42.0f, samples.front().iterations[0]);
     config.zoom = 2.0;
     renderer.Submit(config, false);
     ASSERT_TRUE(notifications.Wait(2));
-    ASSERT_TRUE(renderer.TakeCompleted(pixels).has_value());
+    ASSERT_TRUE(renderer.TakeCompleted(pixels, {}, &samples).has_value());
     ASSERT_EQ(2.0f, pixels.front());
+    ASSERT_TRUE(samples.empty());
 }
 
 TEST_CASE(BackgroundRenderer, PixelValuesMatchSynchronousEngineForEveryFractal)
@@ -278,6 +286,7 @@ TEST_CASE(BackgroundRenderer, PixelValuesMatchSynchronousEngineForEveryFractal)
     MandelbrotEngine synchronous;
     size_t requestCount = 0;
     std::vector<float> displayed;
+    std::vector<SubpixelSamples> displayedSamples;
     for (auto type : GetAllFractalTypes())
         for (bool deep : { false, true })
         {
@@ -296,12 +305,20 @@ TEST_CASE(BackgroundRenderer, PixelValuesMatchSynchronousEngineForEveryFractal)
                 config.renderStride = stride;
                 renderer.Submit(config);
                 ASSERT_TRUE(notifications.Wait(++requestCount));
-                auto result = renderer.TakeCompleted(displayed);
+                auto result = renderer.TakeCompleted(displayed, {}, &displayedSamples);
                 ASSERT_TRUE(result.has_value());
                 ASSERT_FALSE(result->error != nullptr);
                 std::vector<float> expected;
-                synchronous.Compute(config, expected);
+                std::vector<SubpixelSamples> expectedSamples;
+                synchronous.Compute(config, expected, nullptr, &expectedSamples);
                 ASSERT_TRUE(expected == displayed);
+                ASSERT_EQ(expectedSamples.size(), displayedSamples.size());
+                for (size_t i = 0; i < expectedSamples.size(); ++i)
+                {
+                    ASSERT_EQ(expectedSamples[i].pixelIndex, displayedSamples[i].pixelIndex);
+                    ASSERT_EQ(expectedSamples[i].weight, displayedSamples[i].weight);
+                    ASSERT_TRUE(expectedSamples[i].iterations == displayedSamples[i].iterations);
+                }
             }
         }
 }

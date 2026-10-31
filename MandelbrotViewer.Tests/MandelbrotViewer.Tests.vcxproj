@@ -108,6 +108,8 @@
     <ClInclude Include="..\MandelbrotViewer\FrameTiming.h" />
     <ClInclude Include="..\MandelbrotViewer\BackgroundRenderer.h" />
     <ClInclude Include="..\MandelbrotViewer\FramePresentation.h" />
+    <ClInclude Include="..\MandelbrotViewer\PixelSampling.h" />
+    <ClInclude Include="..\MandelbrotViewer\JuliaView.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp">
@@ -120,6 +122,8 @@
     <ClCompile Include="FrameTimingTests.cpp" />
     <ClCompile Include="BackgroundRendererTests.cpp" />
     <ClCompile Include="FramePresentationTests.cpp" />
+    <ClCompile Include="SubpixelSamplingTests.cpp" />
+    <ClCompile Include="JuliaTests.cpp" />
     <ClCompile Include="..\MandelbrotViewer\BackgroundRenderer.cpp" />
     <ClCompile Include="..\MandelbrotViewer\MandelbrotEngine.cpp" />
     <ClCompile Include="..\MandelbrotViewer\ColorTheme.cpp" />

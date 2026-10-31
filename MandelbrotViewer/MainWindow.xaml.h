@@ -14,6 +14,22 @@ namespace winrt::MandelbrotViewer::implementation
     {
         MainWindow();
 
+        // Optional Mandelbrot Julia companion.
+        void OnJuliaViewToggled(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::RoutedEventArgs const&);
+        void OnJuliaUseCenterClick(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::RoutedEventArgs const&);
+        void OnJuliaCloseClick(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::RoutedEventArgs const&);
+        void OnJuliaViewportSizeChanged(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::SizeChangedEventArgs const&);
+        void OnJuliaPointerPressed(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const&);
+        void OnJuliaPointerMoved(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const&);
+        void OnJuliaPointerReleased(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const&);
+        void OnJuliaPointerWheelChanged(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const&);
+        void OnJuliaDoubleTapped(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::Input::DoubleTappedRoutedEventArgs const&);
+        void OnJuliaZoomInClick(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::RoutedEventArgs const&);
+        void OnJuliaZoomOutClick(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::RoutedEventArgs const&);
+        void OnJuliaResetClick(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::RoutedEventArgs const&);
+        winrt::Windows::Foundation::IAsyncAction OnJuliaExportClick(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::RoutedEventArgs const&);
+        winrt::Windows::Foundation::IAsyncAction OnJuliaCopyCoordsClick(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::RoutedEventArgs const&);
+
         // Viewport interaction
         void OnViewportSizeChanged(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::SizeChangedEventArgs const& e);
         void OnViewportPointerPressed(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& e);
@@ -78,13 +94,22 @@ namespace winrt::MandelbrotViewer::implementation
         void PopulateBookmarks();
         void RenderFractal(bool continueAnimation = false);
         void OnRenderCompleted();
-        void UpdateAnimationQuality(double elapsedMs);
         Mandelbrot::MandelbrotConfig PresentationCamera() const;
         void AnimateCamera(const Mandelbrot::MandelbrotConfig& view, std::chrono::milliseconds duration);
         void SetPresentationFrame(bool preserveMotion);
         void BindPresentationExpressions();
         void FreezePresentation();
-        void RecolorBuffer();
+        void RecolorBuffer(bool includeJulia = true);
+        void RecolorBitmap(winrt::Microsoft::UI::Xaml::Media::Imaging::WriteableBitmap const& bitmap,
+            const Mandelbrot::MandelbrotConfig& config, const std::vector<float>& iterations,
+            const std::vector<Mandelbrot::SubpixelSamples>& samples);
+        void SelectJuliaParameter(const Mandelbrot::BigFloat& x, const Mandelbrot::BigFloat& y);
+        void RenderJulia();
+        void RefreshJuliaSettings();
+        void OnJuliaRenderCompleted();
+        void UpdateJuliaMarker();
+        void ApplyJuliaZoom(double factor, double x, double y);
+        winrt::Windows::Foundation::IAsyncAction ExportViewport(bool julia);
         void UpdateHud(double fractalTimeMs, double colorTimeMs);
         void UpdateGradientPreview();
         void PopulateStopSelector();
@@ -101,9 +126,27 @@ namespace winrt::MandelbrotViewer::implementation
         bool IsFullScreen();
 
         std::unique_ptr<Mandelbrot::BackgroundRenderer> m_renderer;
+        std::unique_ptr<Mandelbrot::BackgroundRenderer> m_juliaRenderer;
+        Mandelbrot::MandelbrotConfig m_juliaConfig;
+        Mandelbrot::MandelbrotConfig m_juliaDisplayedConfig;
+        std::vector<float> m_juliaIterations;
+        std::vector<Mandelbrot::SubpixelSamples> m_juliaSamples;
+        winrt::Microsoft::UI::Xaml::Media::Imaging::WriteableBitmap m_juliaBitmap{ nullptr };
+        winrt::Microsoft::UI::Composition::CompositionPropertySet m_juliaMarkerProperties{ nullptr };
+        winrt::Microsoft::UI::Composition::ExpressionAnimation m_juliaMarkerAnimation{ nullptr };
+        bool m_juliaVisible{ false };
+        bool m_juliaInitialized{ false };
+        bool m_juliaSized{ false };
+        bool m_juliaHasFrame{ false };
+        bool m_juliaDragging{ false };
+        uint32_t m_juliaDragPointerId{};
+        winrt::Windows::Foundation::Point m_juliaDragStart{};
+        Mandelbrot::BigFloat m_juliaDragCenterX;
+        Mandelbrot::BigFloat m_juliaDragCenterY;
         Mandelbrot::ColorTheme m_theme;
         Mandelbrot::MandelbrotConfig m_config;
         std::vector<float> m_iterations;
+        std::vector<Mandelbrot::SubpixelSamples> m_subpixelSamples;
         Mandelbrot::MandelbrotConfig m_displayedConfig;
         bool m_hasCurrentFrame{ false };
         bool m_hasPresentation{ false };
@@ -130,15 +173,13 @@ namespace winrt::MandelbrotViewer::implementation
         double m_zoomSpeed{ 1.0 };
         double m_retargetPanProgress{ 1.0 };
         int m_framesSinceRetarget{ 0 };
-        int m_animQualityLevel{ 0 };
-        int m_slowFrameStreak{ 0 };
-        int m_fastFrameStreak{ 0 };
         double m_lastFractalTimeMs{ 0.0 };
         Mandelbrot::BigFloat m_zoomTargetX{ -0.75 };
         Mandelbrot::BigFloat m_zoomTargetY{ 0.0 };
         std::chrono::steady_clock::time_point m_lastZoomFrameTime{};
 
         bool m_isDragging{ false };
+        bool m_dragHasMoved{ false };
         uint32_t m_dragPointerId{ 0 };
         winrt::Windows::Foundation::Point m_dragStartPoint{ 0, 0 };
         Mandelbrot::BigFloat m_dragStartHpCenterX{ -0.75 };

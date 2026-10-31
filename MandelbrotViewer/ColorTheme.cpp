@@ -278,6 +278,97 @@ namespace Mandelbrot
         return kLogScale * std::log(1.0f + iter * kInvKnee) * frequency;
     }
 
+    uint32_t ColorTheme::ColorIteration(float value, float frequency, float phaseOffset, bool invert,
+        uint32_t interiorColor, FractalType fractalType, float deltaU) const
+    {
+        if (value < 0.0f) return interiorColor;
+        const float lutMax = static_cast<float>(LUT_SIZE - 1);
+        if (fractalType == FractalType::Newton)
+        {
+            const int root = static_cast<int>(value / 1000000.0f);
+            const float iter = value - root * 1000000.0f;
+            const float rootBase = static_cast<float>(root % 3) / 3.0f;
+            const float compressedIter = 12.0f * std::log(1.0f + iter * (1.0f / 12.0f));
+            float ring = std::fmod(compressedIter * 0.06f * frequency + phaseOffset, 1.0f);
+            if (ring < 0.0f) ring += 1.0f;
+            float u = rootBase + ring * (1.0f / 3.0f);
+            if (u >= 1.0f) u -= 1.0f;
+            if (invert) u = 1.0f - u;
+            const size_t index = static_cast<size_t>(u * lutMax);
+            uint32_t color = m_lut[index & (LUT_SIZE - 1)];
+            const float shading = std::max(0.35f, 1.0f / (1.0f + 0.025f * compressedIter));
+            if (shading < 0.99f)
+            {
+                const uint32_t a = (color >> 24) & 0xFF;
+                const uint32_t r = static_cast<uint32_t>(((color >> 16) & 0xFF) * shading);
+                const uint32_t g = static_cast<uint32_t>(((color >> 8) & 0xFF) * shading);
+                const uint32_t b = static_cast<uint32_t>((color & 0xFF) * shading);
+                color = (a << 24) | (r << 16) | (g << 8) | b;
+            }
+            return color;
+        }
+
+        return ColorAtPhase(MapIterationToPhase(value, frequency), phaseOffset, invert, deltaU);
+    }
+
+    uint32_t ColorTheme::ColorAtPhase(float basePhase, float phaseOffset, bool invert, float deltaU) const
+    {
+        const float lutMax = static_cast<float>(LUT_SIZE - 1);
+        const float uCenter = basePhase + phaseOffset;
+        auto sampleLut = [&](float phase) noexcept -> uint32_t
+        {
+            float u = std::fmod(phase, 1.0f);
+            if (u < 0.0f) u += 1.0f;
+            if (invert) u = 1.0f - u;
+            return m_lut[static_cast<size_t>(u * lutMax) & (LUT_SIZE - 1)];
+        };
+        if (deltaU <= 0.04f) return sampleLut(uCenter);
+        const float span = std::min(deltaU, 1.0f);
+        const uint32_t colors[] = { sampleLut(uCenter - 0.375f * span), sampleLut(uCenter - 0.125f * span),
+            sampleLut(uCenter + 0.125f * span), sampleLut(uCenter + 0.375f * span) };
+        float r = 0.0f, g = 0.0f, b = 0.0f;
+        for (auto color : colors)
+        {
+            r += static_cast<float>((color >> 16) & 0xFF);
+            g += static_cast<float>((color >> 8) & 0xFF);
+            b += static_cast<float>(color & 0xFF);
+        }
+        r *= 0.25f; g *= 0.25f; b *= 0.25f;
+        if (deltaU > 0.20f)
+        {
+            const float damp = std::clamp((deltaU - 0.20f) / 1.0f, 0.0f, 0.72f);
+            r = r * (1.0f - damp) + m_avgR * damp;
+            g = g * (1.0f - damp) + m_avgG * damp;
+            b = b * (1.0f - damp) + m_avgB * damp;
+        }
+        return 0xFF000000u | (static_cast<uint32_t>(std::clamp(r + 0.5f, 0.0f, 255.0f)) << 16) |
+            (static_cast<uint32_t>(std::clamp(g + 0.5f, 0.0f, 255.0f)) << 8) |
+            static_cast<uint32_t>(std::clamp(b + 0.5f, 0.0f, 255.0f));
+    }
+
+    namespace
+    {
+        struct LinearColorTables
+        {
+            std::array<float, 256> decode{};
+            std::array<uint8_t, 4097> encode{};
+            LinearColorTables()
+            {
+                for (size_t i = 0; i < decode.size(); ++i)
+                {
+                    const float s = static_cast<float>(i) / 255.0f;
+                    decode[i] = s <= 0.04045f ? s / 12.92f : std::pow((s + 0.055f) / 1.055f, 2.4f);
+                }
+                for (size_t i = 0; i < encode.size(); ++i)
+                {
+                    const float linear = static_cast<float>(i) / (encode.size() - 1);
+                    const float s = linear <= 0.0031308f ? 12.92f * linear : 1.055f * std::pow(linear, 1.0f / 2.4f) - 0.055f;
+                    encode[i] = static_cast<uint8_t>(std::clamp(s * 255.0f + 0.5f, 0.0f, 255.0f));
+                }
+            }
+        };
+    }
+
     void ColorTheme::Recolor(
         const std::vector<float>& iterationBuffer,
         uint32_t* pDestPixels,
@@ -287,12 +378,11 @@ namespace Mandelbrot
         bool invert,
         uint32_t interiorColor,
         FractalType fractalType,
-        int width) const
+        int width,
+        const std::vector<SubpixelSamples>* subpixelSamples) const
     {
         if (!pDestPixels || iterationBuffer.size() < count || m_lut.empty()) return;
 
-        const float lutMax = static_cast<float>(LUT_SIZE - 1);
-        const uint32_t* lutData = m_lut.data();
         const float* iterData = iterationBuffer.data();
         const intptr_t totalCount = static_cast<intptr_t>(count);
         const intptr_t rowStride = (width > 0)
@@ -304,51 +394,12 @@ namespace Mandelbrot
             #pragma omp parallel for schedule(static, 4096)
             for (intptr_t idx = 0; idx < totalCount; ++idx)
             {
-                const float val = iterData[idx];
-                if (val < 0.0f)
-                {
-                    pDestPixels[idx] = interiorColor;
-                    continue;
-                }
-
-                const int root = static_cast<int>(val / 1000000.0f);
-                const float iter = val - (root * 1000000.0f);
-
-                // Map root index (0, 1, 2) to base partition of the palette [0, 1)
-                const float rootBase = static_cast<float>(root % 3) / 3.0f;
-
-                // Logarithmically compress Newton convergence iterations to prevent high-iteration noise at basin boundaries
-                const float compressedIter = 12.0f * std::log(1.0f + iter * (1.0f / 12.0f));
-                float ring = std::fmod((compressedIter * 0.06f * frequency + phaseOffset), 1.0f);
-                if (ring < 0.0f) ring += 1.0f;
-
-                float u = rootBase + ring * (1.0f / 3.0f);
-                if (u >= 1.0f) u -= 1.0f;
-                if (invert) u = 1.0f - u;
-
-                const size_t lutIdx = static_cast<size_t>(u * lutMax);
-                uint32_t color = lutData[lutIdx & (LUT_SIZE - 1)];
-
-                // Subtle smooth shading: points taking more iterations darken slightly
-                const float shading = std::max(0.35f, 1.0f / (1.0f + 0.025f * compressedIter));
-                if (shading < 0.99f)
-                {
-                    const uint32_t a = (color >> 24) & 0xFF;
-                    const uint32_t r = static_cast<uint32_t>(((color >> 16) & 0xFF) * shading);
-                    const uint32_t g = static_cast<uint32_t>(((color >> 8) & 0xFF) * shading);
-                    const uint32_t b = static_cast<uint32_t>((color & 0xFF) * shading);
-                    color = (a << 24) | (r << 16) | (g << 8) | b;
-                }
-
-                pDestPixels[idx] = color;
+                pDestPixels[idx] = ColorIteration(iterData[idx], frequency, phaseOffset, invert,
+                    interiorColor, fractalType);
             }
         }
         else
         {
-            const float avgRf = static_cast<float>(m_avgR);
-            const float avgGf = static_cast<float>(m_avgG);
-            const float avgBf = static_cast<float>(m_avgB);
-
             #pragma omp parallel for schedule(static, 4096)
             for (intptr_t idx = 0; idx < totalCount; ++idx)
             {
@@ -361,7 +412,6 @@ namespace Mandelbrot
                 }
 
                 const float basePhase = MapIterationToPhase(iter, frequency);
-                const float uCenter = basePhase + phaseOffset;
 
                 // Estimate 2D screen-space phase gradient max(|dU/dx|, |dU/dy|) for band-limited anti-aliasing
                 float deltaU = 0.0f;
@@ -394,49 +444,53 @@ namespace Mandelbrot
                     }
                 }
 
-                auto sampleLutAtPhase = [&](float phase) noexcept -> uint32_t
-                {
-                    float u = std::fmod(phase, 1.0f);
-                    if (u < 0.0f) u += 1.0f;
-                    if (invert) u = 1.0f - u;
-                    const size_t lutIdx = static_cast<size_t>(u * lutMax);
-                    return lutData[lutIdx & (LUT_SIZE - 1)];
-                };
-
-                if (deltaU <= 0.04f)
-                {
-                    pDestPixels[idx] = sampleLutAtPhase(uCenter);
-                }
-                else
-                {
-                    // 4-tap stratified box filter across the pixel's phase interval to eliminate Moire noise
-                    const float span = std::min(deltaU, 1.0f);
-                    const uint32_t c0 = sampleLutAtPhase(uCenter - 0.375f * span);
-                    const uint32_t c1 = sampleLutAtPhase(uCenter - 0.125f * span);
-                    const uint32_t c2 = sampleLutAtPhase(uCenter + 0.125f * span);
-                    const uint32_t c3 = sampleLutAtPhase(uCenter + 0.375f * span);
-
-                    float r = static_cast<float>(((c0 >> 16) & 0xFF) + ((c1 >> 16) & 0xFF) + ((c2 >> 16) & 0xFF) + ((c3 >> 16) & 0xFF)) * 0.25f;
-                    float g = static_cast<float>(((c0 >> 8) & 0xFF) + ((c1 >> 8) & 0xFF) + ((c2 >> 8) & 0xFF) + ((c3 >> 8) & 0xFF)) * 0.25f;
-                    float b = static_cast<float>((c0 & 0xFF) + (c1 & 0xFF) + (c2 & 0xFF) + (c3 & 0xFF)) * 0.25f;
-
-                    // When local phase change approaches or exceeds the Nyquist limit (0.20..1.20 cycles/pixel),
-                    // smoothly damp toward the palette's integral mean color so sub-pixel filaments glow smoothly
-                    // instead of shimmering with random aliasing static during animated zooms.
-                    if (deltaU > 0.20f)
-                    {
-                        const float damp = std::clamp((deltaU - 0.20f) / 1.0f, 0.0f, 0.72f);
-                        r = r * (1.0f - damp) + avgRf * damp;
-                        g = g * (1.0f - damp) + avgGf * damp;
-                        b = b * (1.0f - damp) + avgBf * damp;
-                    }
-
-                    const uint32_t outR = static_cast<uint32_t>(std::clamp(r + 0.5f, 0.0f, 255.0f));
-                    const uint32_t outG = static_cast<uint32_t>(std::clamp(g + 0.5f, 0.0f, 255.0f));
-                    const uint32_t outB = static_cast<uint32_t>(std::clamp(b + 0.5f, 0.0f, 255.0f));
-                    pDestPixels[idx] = 0xFF000000u | (outR << 16) | (outG << 8) | outB;
-                }
+                pDestPixels[idx] = ColorAtPhase(basePhase, phaseOffset, invert, deltaU);
             }
+        }
+
+        if (!subpixelSamples || subpixelSamples->empty()) return;
+        static const LinearColorTables colorSpace;
+        const intptr_t sampleCount = static_cast<intptr_t>(subpixelSamples->size());
+        #pragma omp parallel for schedule(static, 1024)
+        for (intptr_t i = 0; i < sampleCount; ++i)
+        {
+            const auto& sample = (*subpixelSamples)[i];
+            if (sample.pixelIndex >= count || !(sample.weight > 0.0f)) continue;
+            const float weight = std::min(sample.weight, 1.0f);
+            uint32_t colors[4];
+            float phases[4]{};
+            if (fractalType != FractalType::Newton)
+                for (int s = 0; s < 4; ++s)
+                    if (sample.iterations[s] >= 0.0f)
+                        phases[s] = MapIterationToPhase(sample.iterations[s], frequency);
+            for (int s = 0; s < 4; ++s)
+            {
+                // Each quarter-pixel sample has a half-pixel footprint. Estimate its
+                // palette filter from adjacent subpixels, excluding interior/basin boundaries.
+                float deltaU = 0.0f;
+                if (fractalType != FractalType::Newton && sample.iterations[s] >= 0.0f)
+                    for (int neighbor : { s ^ 1, s ^ 2 })
+                        if (sample.iterations[neighbor] >= 0.0f)
+                            deltaU = std::max(deltaU, std::abs(phases[s] - phases[neighbor]));
+                colors[s] = fractalType != FractalType::Newton && sample.iterations[s] >= 0.0f
+                    ? ColorAtPhase(phases[s], phaseOffset, invert, deltaU)
+                    : ColorIteration(sample.iterations[s], frequency, phaseOffset, invert, interiorColor, fractalType);
+            }
+            const uint32_t center = pDestPixels[sample.pixelIndex];
+            uint32_t output = 0;
+            for (int channel = 0; channel < 3; ++channel)
+            {
+                const int shift = channel * 8;
+                float average = 0.0f;
+                for (auto color : colors) average += colorSpace.decode[(color >> shift) & 0xFF] * 0.25f;
+                const float linear = average * weight + colorSpace.decode[(center >> shift) & 0xFF] * (1.0f - weight);
+                const size_t index = static_cast<size_t>(std::clamp(linear * 4096.0f + 0.5f, 0.0f, 4096.0f));
+                output |= static_cast<uint32_t>(colorSpace.encode[index]) << shift;
+            }
+            float alpha = 0.0f;
+            for (auto color : colors) alpha += static_cast<float>(color >> 24) * 0.25f;
+            alpha = alpha * weight + static_cast<float>(center >> 24) * (1.0f - weight);
+            pDestPixels[sample.pixelIndex] = output | (static_cast<uint32_t>(alpha + 0.5f) << 24);
         }
     }
 }

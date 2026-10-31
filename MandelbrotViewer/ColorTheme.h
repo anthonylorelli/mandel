@@ -2,6 +2,7 @@
 #include <vector>
 #include <string>
 #include <cstdint>
+#include "PixelSampling.h"
 
 namespace Mandelbrot
 {
@@ -61,7 +62,8 @@ namespace Mandelbrot
             bool invert,
             uint32_t interiorColor = 0xFF000000,
             FractalType fractalType = static_cast<FractalType>(0),
-            int width = 0) const;
+            int width = 0,
+            const std::vector<SubpixelSamples>* subpixelSamples = nullptr) const;
 
         // Maps raw iteration count to logarithmic palette phase (before phaseOffset and modulo)
         static float MapIterationToPhase(float iter, float frequency) noexcept;
@@ -70,6 +72,9 @@ namespace Mandelbrot
         void GeneratePreview(uint32_t* pDestPixels, size_t width) const;
 
     private:
+        uint32_t ColorIteration(float iter, float frequency, float phaseOffset, bool invert,
+            uint32_t interiorColor, FractalType fractalType, float deltaU = 0.0f) const;
+        uint32_t ColorAtPhase(float basePhase, float phaseOffset, bool invert, float deltaU) const;
         PresetTheme m_currentPreset{ PresetTheme::ElectricBlue };
         std::vector<GradientStop> m_stops;
         std::vector<uint32_t> m_lut; // BGRA format

@@ -21,6 +21,11 @@
         </Grid.ColumnDefinitions>
 
         <!-- Viewport Area -->
+        <Grid Grid.Column="0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition x:Name="JuliaColumn" Width="0"/>
+            </Grid.ColumnDefinitions>
         <Grid x:Name="ViewportGrid" Grid.Column="0" Background="#0A0A0F" SizeChanged="OnViewportSizeChanged">
             <Canvas x:Name="FractalSurface" Background="Transparent"
                    PointerPressed="OnViewportPointerPressed"
@@ -31,6 +36,8 @@
                    PointerWheelChanged="OnViewportPointerWheelChanged"
                    DoubleTapped="OnViewportDoubleTapped">
                 <Image x:Name="FractalImage" Stretch="Fill" IsHitTestVisible="False" />
+                <Ellipse x:Name="JuliaPointMarker" Width="14" Height="14" Stroke="White" StrokeThickness="2"
+                         Fill="#7048B5E0" IsHitTestVisible="False" Visibility="Collapsed"/>
             </Canvas>
 
             <!-- Floating Telemetry HUD -->
@@ -87,6 +94,45 @@
             </StackPanel>
         </Grid>
 
+            <Border x:Name="JuliaPane" Grid.Column="1" Visibility="Collapsed" BorderBrush="#44FFFFFF" BorderThickness="1,0,0,0">
+                <Grid x:Name="JuliaViewportGrid" Background="#0A0A0F" SizeChanged="OnJuliaViewportSizeChanged">
+                    <Canvas x:Name="JuliaSurface" Background="Transparent"
+                            PointerPressed="OnJuliaPointerPressed" PointerMoved="OnJuliaPointerMoved"
+                            PointerReleased="OnJuliaPointerReleased" PointerCanceled="OnJuliaPointerReleased"
+                            PointerCaptureLost="OnJuliaPointerReleased" PointerWheelChanged="OnJuliaPointerWheelChanged"
+                            DoubleTapped="OnJuliaDoubleTapped">
+                        <Image x:Name="JuliaImage" Stretch="Fill" IsHitTestVisible="False"/>
+                    </Canvas>
+                    <Border VerticalAlignment="Top" Margin="12" Padding="12,8" CornerRadius="8"
+                            Background="#D012121A" BorderBrush="#33FFFFFF" BorderThickness="1">
+                        <StackPanel Spacing="4">
+                            <Grid>
+                                <TextBlock Text="JULIA SET" FontSize="11" FontWeight="SemiBold" CharacterSpacing="100" Foreground="#99FFFFFF" VerticalAlignment="Center"/>
+                                <Button HorizontalAlignment="Right" Click="OnJuliaCloseClick" AutomationProperties.Name="Close Julia view"
+                                        ToolTipService.ToolTip="Hide Julia View" Background="Transparent" BorderThickness="0" Padding="4">
+                                    <FontIcon Glyph="&#xE711;" FontSize="11"/>
+                                </Button>
+                            </Grid>
+                            <TextBlock x:Name="JuliaParameterText" FontFamily="Consolas" FontSize="11" Foreground="#EEFFFFFF"
+                                       TextWrapping="Wrap" Text="c = -0.75 + 0i"/>
+                            <TextBlock x:Name="JuliaZoomText" FontFamily="Consolas" FontSize="12" Foreground="#80D8FF"/>
+                            <TextBlock x:Name="JuliaTimingText" FontFamily="Consolas" FontSize="11" Foreground="#80E8A0" TextWrapping="Wrap"/>
+                        </StackPanel>
+                    </Border>
+                    <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="12">
+                        <Button Click="OnJuliaZoomInClick" AutomationProperties.Name="Zoom Julia in" ToolTipService.ToolTip="Zoom Julia In"
+                                Background="#CC1E1E28" Padding="10,6" CornerRadius="6"><FontIcon Glyph="&#xE710;" FontSize="14"/></Button>
+                        <Button Click="OnJuliaZoomOutClick" AutomationProperties.Name="Zoom Julia out" ToolTipService.ToolTip="Zoom Julia Out"
+                                Background="#CC1E1E28" Padding="10,6" CornerRadius="6"><FontIcon Glyph="&#xE738;" FontSize="14"/></Button>
+                        <Button Click="OnJuliaResetClick" AutomationProperties.Name="Reset Julia view" ToolTipService.ToolTip="Reset Julia View"
+                                Background="#CC1E1E28" Padding="10,6" CornerRadius="6"><FontIcon Glyph="&#xE777;" FontSize="14"/></Button>
+                        <Button Click="OnJuliaExportClick" AutomationProperties.Name="Export Julia image" ToolTipService.ToolTip="Export Julia PNG"
+                                Background="#CC1E1E28" Padding="10,6" CornerRadius="6"><FontIcon Glyph="&#xE74E;" FontSize="14"/></Button>
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </Grid>
+
         <!-- Sidebar Control Panel -->
         <Border x:Name="SidebarBorder" Grid.Column="1" Background="{ThemeResource LayerFillColorDefaultBrush}"
                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1,0,0,0">
@@ -117,6 +163,17 @@
                         <TextBlock Text="Fractal Formula" FontWeight="SemiBold" FontSize="13"/>
                         <ComboBox x:Name="FractalTypeComboBox" HorizontalAlignment="Stretch"
                                   SelectionChanged="OnFractalTypeSelectionChanged"/>
+                    </StackPanel>
+
+                    <StackPanel x:Name="JuliaOptionsPanel" Spacing="8">
+                        <ToggleSwitch x:Name="ShowJuliaToggle" Header="Julia Companion" IsOn="False"
+                                      OnContent="Side-by-side view" OffContent="Hidden" Toggled="OnJuliaViewToggled"/>
+                        <StackPanel x:Name="JuliaSettingsPanel" Visibility="Collapsed" Spacing="8">
+                            <TextBlock Text="Click a point in Mandelbrot to choose c. Drag either image to pan; scroll to zoom."
+                                       TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                            <Button Content="Use Mandelbrot Center" HorizontalAlignment="Stretch" Click="OnJuliaUseCenterClick"/>
+                            <Button Content="Copy Julia Coordinates &amp; Config" HorizontalAlignment="Stretch" Click="OnJuliaCopyCoordsClick"/>
+                        </StackPanel>
                     </StackPanel>
 
                     <!-- Presets & Bookmarks -->

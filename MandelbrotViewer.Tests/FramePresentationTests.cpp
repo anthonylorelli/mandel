@@ -12,8 +12,12 @@ TEST_CASE(FramePresentation, GuardBandPreservesPixelSpacingAndViewportCenter)
         view.width = width;
         view.height = 537;
         view.zoom = 85000.0;
+        view.renderStride = 4;
+        view.edgeRefine = false;
         view.SetCenter(-0.7436438870371587, 0.1318259042053119);
         const auto frame = AnimationRenderConfig(view);
+        ASSERT_EQ(2, frame.renderStride);
+        ASSERT_TRUE(frame.edgeRefine);
         ASSERT_GT(frame.width, view.width);
         ASSERT_GT(frame.height, view.height);
         ASSERT_NEAR(3.0 / view.zoom / view.width, 3.0 / frame.zoom / frame.width, 1e-20);
