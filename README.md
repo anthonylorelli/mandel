@@ -61,6 +61,12 @@ A high-performance Windows desktop application built with native **C++/WinRT** a
   - **Double-Click**: Re-center and 2x zoom on cursor location.
 - **Curated Landmark Bookmarks**:
   - Over 25 curated, validated landmarks across Mandelbrot, Burning Ship, Tricorn, and Newton sets.
+- **Optional Julia Companion**:
+  - With Mandelbrot selected, enable **Julia Companion** for a side-by-side quadratic Julia view.
+  - Click the Mandelbrot image to select its fixed parameter `c`, or choose **Use Mandelbrot Center**. A marker follows that point as the Mandelbrot camera moves.
+  - Pan, scroll, double-click, or use the Julia pane's zoom/reset buttons to explore independently. Its parameter stays pinned during Mandelbrot animation.
+  - Both views share palette, smooth coloring, iteration settings, and adaptive subpixel sampling. Julia scales its automatic iteration budget to its own zoom.
+  - Export Julia PNGs with its save button; **Copy Julia Coordinates & Config** includes the exact parameter. Switching to another formula hides the companion.
 - **Telemetry HUD**:
   - Displays active formula, center coordinates $(Re, Im)$, zoom factor, and separate calculation vs. recoloring timings in milliseconds.
 - **Export & Share**:
@@ -122,3 +128,4 @@ Or with options:
 - **Background Rendering**: Pending-request coalescing, cancellation, stale-frame rejection, buffer reuse, error recovery, and equality with synchronous calculation.
 - **Animated Presentation**: High-precision viewport transforms, compositor anchor rebasing, guard-band coverage, delayed-frame and direction-change behavior, and viewport image export.
 - **Subpixel Sampling**: Exact sample positions across all formulas and deep zooms, deterministic refinement, flat-region skipping, interior coverage and Newton basin colors, and reduced camera-aligned color variation.
+- **Julia Views**: Quadratic orbits, the unit disk, deep parameter and critical-point precision, subpixel sampling, point selection and projection, viewport fitting, stale-parameter rejection, and complete shared state.

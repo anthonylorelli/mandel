@@ -33,6 +33,9 @@ namespace Mandelbrot
         bool smooth{ true };
         int renderStride{ 1 };   // 1 = full per-pixel; 2..4 = adaptive coarse grid + smooth/edge reconstruction
         bool edgeRefine{ true }; // When renderStride > 1, refine high-contrast boundary cells per-pixel
+        bool juliaSet{ false }; // Quadratic dynamical plane, available as a Mandelbrot companion.
+        BigFloat juliaX{ -0.75 };
+        BigFloat juliaY{ 0.0 };
 
         void SetCenter(double x, double y)
         {
@@ -158,6 +161,8 @@ namespace Mandelbrot
         };
 
     private:
+        double ComputeJulia(const MandelbrotConfig& config, std::vector<float>& outIterations,
+            const std::atomic<bool>* cancelToken, std::vector<SubpixelSamples>* subpixelSamples);
         std::vector<float> m_sampleWeights;
         // Cached high-precision reference orbit across consecutive deep-zoom frames
         bool m_hasCachedOrbit{ false };

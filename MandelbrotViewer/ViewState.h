@@ -26,10 +26,14 @@ namespace Mandelbrot
         ss << std::setprecision(std::numeric_limits<double>::max_digits10);
         const size_t decimals = CoordinateDecimalPlaces(config.zoom);
         ss << L"{\n"
-           << L"  \"fractalType\": \"" << GetFractalTypeName(config.fractalType) << L"\",\n"
+           << L"  \"fractalType\": \"" << (config.juliaSet ? L"Julia Set" : GetFractalTypeName(config.fractalType)) << L"\",\n"
            << L"  \"centerX\": \"" << config.hpCenterX.ToWString(decimals) << L"\",\n"
            << L"  \"centerY\": \"" << config.hpCenterY.ToWString(decimals) << L"\",\n"
-           << L"  \"zoom\": " << config.zoom << L",\n"
+           << L"  \"zoom\": " << config.zoom << L",\n";
+        if (config.juliaSet)
+            ss << L"  \"juliaParameterX\": \"" << config.juliaX.ToWString(308) << L"\",\n"
+               << L"  \"juliaParameterY\": \"" << config.juliaY.ToWString(308) << L"\",\n";
+        ss
            << L"  \"width\": " << config.width << L",\n"
            << L"  \"height\": " << config.height << L",\n"
            << L"  \"maxIterations\": " << config.maxIterations << L",\n"
