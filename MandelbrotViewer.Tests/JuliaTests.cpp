@@ -71,6 +71,29 @@ TEST_CASE(Julia, FixedParameterAndVaryingInitialPointMatchQuadraticOrbits)
     }
 }
 
+TEST_CASE(Julia, RepeatingOrbitShortcutPreservesHighIterationResults)
+{
+    MandelbrotEngine engine;
+    for (auto c : { std::pair{0.0, 0.0}, std::pair{-1.0, 0.0},
+        std::pair{-0.12, 0.65}, std::pair{-0.75, 0.0} })
+    {
+        auto config = JuliaConfig(c.first, c.second);
+        config.width = 24; config.height = 16;
+        config.maxIterations = 10000;
+        config.smooth = false;
+        std::vector<float> pixels;
+        engine.Compute(config, pixels);
+        for (int y = 0; y < config.height; ++y)
+            for (int x = 0; x < config.width; ++x)
+            {
+                double zr, zi;
+                MandelbrotEngine::ScreenToComplex(x, y, config.width, config.height, 0, 0, config.zoom, zr, zi);
+                ASSERT_EQ(QuadraticOrbit(zr, zi, c.first, c.second, config.maxIterations),
+                    pixels[static_cast<size_t>(y) * config.width + x]);
+            }
+    }
+}
+
 TEST_CASE(Julia, DeepZoomResolvesPointsOnOppositeSidesOfTheUnitCircle)
 {
     auto config = JuliaConfig(0.0, 0.0);

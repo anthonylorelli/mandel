@@ -1712,12 +1712,24 @@ namespace Mandelbrot
             if (!deep)
             {
                 double zr = config.centerX + ox, zi = config.centerY + oy;
+                double checkZr = zr, checkZi = zi;
+                int checkPeriod = 8, stepsSinceCheck = 0;
                 for (int iter = 0; iter < config.maxIterations; ++iter)
                 {
+                    if ((iter & 63) == 0 && canceled()) return -1.0f;
                     if (zr * zr + zi * zi > bailout2) return finish(zr, zi, iter);
                     const double nextR = zr * zr - zi * zi + cx;
                     zi = 2.0 * zr * zi + cy;
                     zr = nextR;
+                    // Exact repetition proves this floating-point orbit cannot escape.
+                    // No tolerance is used, so slowly escaping detail is retained.
+                    if (zr == checkZr && zi == checkZi) return -1.0f;
+                    if (++stepsSinceCheck == checkPeriod)
+                    {
+                        checkZr = zr; checkZi = zi;
+                        stepsSinceCheck = 0;
+                        if (checkPeriod < 1024) checkPeriod <<= 1;
+                    }
                 }
                 return -1.0f;
             }
