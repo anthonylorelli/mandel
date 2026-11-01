@@ -110,6 +110,11 @@
     <ClInclude Include="..\MandelbrotViewer\FramePresentation.h" />
     <ClInclude Include="..\MandelbrotViewer\PixelSampling.h" />
     <ClInclude Include="..\MandelbrotViewer\JuliaView.h" />
+    <ClInclude Include="..\MandelbrotViewer\JuliaTour.h" />
+    <ClInclude Include="..\MandelbrotViewer\MoviePlan.h" />
+    <ClInclude Include="..\MandelbrotViewer\MovieWriter.h" />
+    <ClInclude Include="MoviePlayback.h" />
+    <ClInclude Include="..\MandelbrotViewer\MovieExport.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp">
@@ -124,6 +129,10 @@
     <ClCompile Include="FramePresentationTests.cpp" />
     <ClCompile Include="SubpixelSamplingTests.cpp" />
     <ClCompile Include="JuliaTests.cpp" />
+    <ClCompile Include="JuliaTourTests.cpp" />
+    <ClCompile Include="MovieTests.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="..\MandelbrotViewer\MovieWriter.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="..\MandelbrotViewer\MovieExport.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\MandelbrotViewer\BackgroundRenderer.cpp" />
     <ClCompile Include="..\MandelbrotViewer\MandelbrotEngine.cpp" />
     <ClCompile Include="..\MandelbrotViewer\ColorTheme.cpp" />

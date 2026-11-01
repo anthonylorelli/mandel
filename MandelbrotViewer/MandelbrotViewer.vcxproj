@@ -157,6 +157,10 @@
     <ClInclude Include="FramePresentation.h" />
     <ClInclude Include="PixelSampling.h" />
     <ClInclude Include="JuliaView.h" />
+    <ClInclude Include="JuliaTour.h" />
+    <ClInclude Include="MoviePlan.h" />
+    <ClInclude Include="MovieWriter.h" />
+    <ClInclude Include="MovieExport.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp">
@@ -172,6 +176,9 @@
     <ClCompile Include="MandelbrotEngine.cpp" />
     <ClCompile Include="BackgroundRenderer.cpp" />
     <ClCompile Include="MainWindow.Julia.cpp" />
+    <ClCompile Include="MainWindow.Movie.cpp" />
+    <ClCompile Include="MovieWriter.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="MovieExport.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="$(IntermediateOutputPath)XamlTypeInfo.g.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>

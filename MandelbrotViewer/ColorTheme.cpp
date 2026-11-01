@@ -379,7 +379,7 @@ namespace Mandelbrot
         uint32_t interiorColor,
         FractalType fractalType,
         int width,
-        const std::vector<SubpixelSamples>* subpixelSamples) const
+        const std::vector<SubpixelSamples>* subpixelSamples, bool filterPalette) const
     {
         if (!pDestPixels || iterationBuffer.size() < count || m_lut.empty()) return;
 
@@ -415,7 +415,7 @@ namespace Mandelbrot
 
                 // Estimate 2D screen-space phase gradient max(|dU/dx|, |dU/dy|) for band-limited anti-aliasing
                 float deltaU = 0.0f;
-                if (totalCount >= 64)
+                if (filterPalette && totalCount >= 64)
                 {
                     // Horizontal neighbors must stay in the same scanline, including partial final rows.
                     const bool hasLeft = idx > 0 && (rowStride <= 0 || idx % rowStride != 0);

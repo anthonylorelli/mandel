@@ -8,7 +8,7 @@
     mc:Ignorable="d"
     Title="Mandelbrot Explorer">
 
-    <Grid Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" KeyboardAcceleratorPlacementMode="Hidden">
+    <Grid x:Name="WindowRoot" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" KeyboardAcceleratorPlacementMode="Hidden">
         <!-- Window-wide shortcuts (work regardless of which control has focus) -->
         <Grid.KeyboardAccelerators>
             <KeyboardAccelerator Key="F11" Invoked="OnFullScreenAcceleratorInvoked"/>
@@ -120,6 +120,10 @@
                         </StackPanel>
                     </Border>
                     <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="12">
+                        <Button x:Name="JuliaTravelOverlayButton" Click="OnJuliaTravelClick" AutomationProperties.Name="Start random Julia tour"
+                                ToolTipService.ToolTip="Start Random Julia Tour" Background="#CC1E1E28" Padding="10,6" CornerRadius="6">
+                            <FontIcon x:Name="JuliaTravelIcon" Glyph="&#xE768;" Foreground="#51CF66" FontSize="14"/>
+                        </Button>
                         <Button Click="OnJuliaZoomInClick" AutomationProperties.Name="Zoom Julia in" ToolTipService.ToolTip="Zoom Julia In"
                                 Background="#CC1E1E28" Padding="10,6" CornerRadius="6"><FontIcon Glyph="&#xE710;" FontSize="14"/></Button>
                         <Button Click="OnJuliaZoomOutClick" AutomationProperties.Name="Zoom Julia out" ToolTipService.ToolTip="Zoom Julia Out"
@@ -173,6 +177,15 @@
                                        TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
                             <Button Content="Use Mandelbrot Center" HorizontalAlignment="Stretch" Click="OnJuliaUseCenterClick"/>
                             <Button Content="Copy Julia Coordinates &amp; Config" HorizontalAlignment="Stretch" Click="OnJuliaCopyCoordsClick"/>
+                            <ToggleButton x:Name="JuliaTravelButton" Content="Start Random Tour" HorizontalAlignment="Stretch" Click="OnJuliaTravelClick"/>
+                            <TextBlock Text="Favors detailed edges, with inward trips and occasional excursions beyond the boundary."
+                                       TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                            <Grid>
+                                <TextBlock Text="Tour Speed"/>
+                                <TextBlock x:Name="JuliaTravelSpeedText" Text="1.0x" HorizontalAlignment="Right" FontFamily="Consolas"/>
+                            </Grid>
+                            <Slider x:Name="JuliaTravelSpeedSlider" Minimum="0.2" Maximum="2.0" StepFrequency="0.1" Value="1.0"
+                                    ValueChanged="OnJuliaTravelSpeedChanged" AutomationProperties.Name="Julia tour speed"/>
                         </StackPanel>
                     </StackPanel>
 
@@ -458,6 +471,7 @@
                     <!-- Actions & Export -->
                     <StackPanel Spacing="8">
                         <TextBlock Text="Export &amp; Share" FontWeight="SemiBold" FontSize="13"/>
+                        <Button x:Name="ExportMovieButton" Content="Export Zoom Movie…" HorizontalAlignment="Stretch" Click="OnExportMovieClick"/>
                         <Button x:Name="ExportImageButton" HorizontalAlignment="Stretch" Click="OnExportImageClick">
                             <StackPanel Orientation="Horizontal" Spacing="8">
                                 <FontIcon Glyph="&#xEB9F;" FontSize="14"/>
@@ -475,5 +489,20 @@
                 </StackPanel>
             </ScrollViewer>
         </Border>
+        <Grid x:Name="MovieProgressOverlay" Grid.ColumnSpan="2" Background="#DD101018" Visibility="Collapsed">
+            <Border MaxWidth="640" Margin="24" Padding="24" CornerRadius="12" HorizontalAlignment="Stretch" VerticalAlignment="Center"
+                    Background="{ThemeResource LayerFillColorDefaultBrush}">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="Exporting Zoom Movie" FontSize="22" FontWeight="SemiBold"/>
+                    <Image x:Name="MoviePreviewImage" Height="270" Stretch="Uniform" AutomationProperties.Name="Recent movie frame"/>
+                    <TextBlock x:Name="MoviePreviewText" Text="The first rendered frame will appear here. Preview refreshes about every 15 seconds."
+                               TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                    <ProgressBar x:Name="MovieProgressBar" Minimum="0" Maximum="100" Value="0" AutomationProperties.Name="Movie export progress"/>
+                    <TextBlock x:Name="MovieRenderedText" FontFamily="Consolas" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite"/>
+                    <TextBlock x:Name="MovieStatusText" Text="Rendering…" TextWrapping="Wrap"/>
+                    <Button x:Name="MovieCancelButton" Content="Cancel Export" Click="OnMovieCancelClick" HorizontalAlignment="Right"/>
+                </StackPanel>
+            </Border>
+        </Grid>
     </Grid>
 </Window>

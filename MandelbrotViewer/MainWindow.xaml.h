@@ -4,6 +4,8 @@
 #include "MandelbrotEngine.h"
 #include "ColorTheme.h"
 #include "BackgroundRenderer.h"
+#include "JuliaTour.h"
+#include "MovieExport.h"
 #include <winrt/Microsoft.UI.Composition.h>
 #include <chrono>
 #include <memory>
@@ -18,6 +20,8 @@ namespace winrt::MandelbrotViewer::implementation
         void OnJuliaViewToggled(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::RoutedEventArgs const&);
         void OnJuliaUseCenterClick(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::RoutedEventArgs const&);
         void OnJuliaCloseClick(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::RoutedEventArgs const&);
+        void OnJuliaTravelClick(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::RoutedEventArgs const&);
+        void OnJuliaTravelSpeedChanged(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::Controls::Primitives::RangeBaseValueChangedEventArgs const&);
         void OnJuliaViewportSizeChanged(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::SizeChangedEventArgs const&);
         void OnJuliaPointerPressed(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const&);
         void OnJuliaPointerMoved(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const&);
@@ -86,10 +90,17 @@ namespace winrt::MandelbrotViewer::implementation
         void OnStopColorChanged(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::Controls::Primitives::RangeBaseValueChangedEventArgs const& e);
 
         // Export & Share
+        winrt::Windows::Foundation::IAsyncAction OnExportMovieClick(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::RoutedEventArgs const&);
+        void OnMovieCancelClick(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::RoutedEventArgs const&);
         winrt::Windows::Foundation::IAsyncAction OnExportImageClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
         winrt::Windows::Foundation::IAsyncAction OnCopyCoordsClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
 
     private:
+        void UpdateMovieProgress();
+        std::unique_ptr<Mandelbrot::MovieExporter> m_movieExporter;
+        winrt::Microsoft::UI::Xaml::DispatcherTimer m_movieProgressTimer{nullptr};
+        bool m_movieExporting{}, m_movieSetup{};
+        int m_movieFps{30};
         void InitializeControls();
         void PopulateBookmarks();
         void RenderFractal(bool continueAnimation = false);
@@ -104,7 +115,12 @@ namespace winrt::MandelbrotViewer::implementation
             const Mandelbrot::MandelbrotConfig& config, const std::vector<float>& iterations,
             const std::vector<Mandelbrot::SubpixelSamples>& samples);
         void SelectJuliaParameter(const Mandelbrot::BigFloat& x, const Mandelbrot::BigFloat& y);
-        void RenderJulia();
+        void RenderJulia(bool continueTravel = false);
+        void StartJuliaTravel();
+        void StopJuliaTravel(bool renderFinalFrame = true);
+        void AdvanceJuliaTravel();
+        void UpdateJuliaTravelControls();
+        void UpdateJuliaParameterReadout(const Mandelbrot::MandelbrotConfig& config);
         void RefreshJuliaSettings();
         void OnJuliaRenderCompleted();
         void UpdateJuliaMarker();
@@ -139,6 +155,12 @@ namespace winrt::MandelbrotViewer::implementation
         bool m_juliaSized{ false };
         bool m_juliaHasFrame{ false };
         bool m_juliaDragging{ false };
+        Mandelbrot::JuliaTour m_juliaTour;
+        winrt::Microsoft::UI::Xaml::DispatcherTimer m_juliaTravelTimer{ nullptr };
+        bool m_juliaTraveling{ false };
+        bool m_juliaTravelWaiting{ false };
+        double m_juliaTravelSpeed{ 1.0 };
+        std::chrono::steady_clock::time_point m_juliaTravelLastAdvance{};
         uint32_t m_juliaDragPointerId{};
         winrt::Windows::Foundation::Point m_juliaDragStart{};
         Mandelbrot::BigFloat m_juliaDragCenterX;

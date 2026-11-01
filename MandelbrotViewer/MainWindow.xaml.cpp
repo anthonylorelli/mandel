@@ -72,6 +72,9 @@ namespace winrt::MandelbrotViewer::implementation
         Closed([this](auto&&, auto&&)
         {
             m_isClosed = true;
+            if (m_movieProgressTimer) m_movieProgressTimer.Stop();
+            if (m_movieExporter) m_movieExporter->Stop();
+            StopJuliaTravel(false);
             m_isZoomAnimating = false;
             m_isDragging = false;
             FreezePresentation();
@@ -275,7 +278,7 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::RenderFractal(bool continueAnimation)
     {
-        if (m_isClosed || !m_renderer || m_currentPixelWidth <= 0 || m_currentPixelHeight <= 0) return;
+        if (m_isClosed || m_movieExporting || !m_renderer || m_currentPixelWidth <= 0 || m_currentPixelHeight <= 0) return;
         if (!continueAnimation)
         {
             FreezePresentation();
@@ -656,6 +659,7 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::StartZoomAnimation()
     {
+        if (m_movieExporting) return;
         if (m_autoPickInterestingTarget && m_zoomInDirection)
         {
             if (!m_hasCurrentFrame || !m_hasActiveRandomTarget ||
@@ -1039,6 +1043,8 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::OnEscapeAcceleratorInvoked(winrt::Microsoft::UI::Xaml::Input::KeyboardAccelerator const&, winrt::Microsoft::UI::Xaml::Input::KeyboardAcceleratorInvokedEventArgs const& e)
     {
+        if (m_movieSetup) return;
+        if (m_movieExporter) { OnMovieCancelClick(nullptr, nullptr); e.Handled(true); return; }
         // Esc leaves full screen first; otherwise it toggles the controls panel
         if (IsFullScreen())
         {

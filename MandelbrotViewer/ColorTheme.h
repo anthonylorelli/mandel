@@ -63,7 +63,8 @@ namespace Mandelbrot
             uint32_t interiorColor = 0xFF000000,
             FractalType fractalType = static_cast<FractalType>(0),
             int width = 0,
-            const std::vector<SubpixelSamples>* subpixelSamples = nullptr) const;
+            const std::vector<SubpixelSamples>* subpixelSamples = nullptr,
+            bool filterPalette = true) const;
 
         // Maps raw iteration count to logarithmic palette phase (before phaseOffset and modulo)
         static float MapIterationToPhase(float iter, float frequency) noexcept;
