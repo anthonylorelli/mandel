@@ -75,8 +75,10 @@ A high-performance Windows desktop application built with native **C++/WinRT** a
   - Displays active formula, center coordinates $(Re, Im)$, zoom factor, and separate calculation vs. recoloring timings in milliseconds.
 - **Export & Share**:
   - **Export Zoom Movie** renders an offline zoom from the current view to a chosen target center and end magnification. Choose 720p, 1080p, 1440p, 4K UHD, or 8K UHD (7680 × 4320), at 24, 25, 30, 48, 50, or 60 frames per second, with a duration from 1 to 3600 seconds.
+  - Enable **Auto-Pick Target (zoom in)** to use the live animation's detail detection and target selection during export. The dialog inherits the live Auto-Pick setting; fixed target coordinates become available when it is off. Automatic paths are planned on the export worker, smoothly change direction, and follow visible detail without jumping to distant bookmarks. Each export gets a fresh route that stays fixed across its frames and motion-blur samples, independently of resolution, frame rate, and render speed.
   - Progress reports the duration of completed footage and encoded frames. A recent footage frame appears after the first frame, approximately every 15 seconds while rendering, and at completion. The UI stays responsive and export can be canceled.
   - Movie frames use a fixed full-resolution sampling grid, linear-light supersampling, an optional short motion-blur shutter, a fixed iteration budget and palette, and camera coordinates evaluated directly from footage time. Band rendering keeps working memory bounded at 8K. These settings minimize sampling changes and accumulated camera error between frames.
+  - On ARM64, full-resolution Mandelbrot calculations below the deep-zoom threshold (1e11) automatically use double-precision NEON SIMD alongside row parallelism. The optimized path preserves scalar iteration values exactly; deep zooms, Julia sets, other formulas, and other architectures retain their existing solvers.
   - Movies use high-quality 4:2:2 Photo-JPEG in an MP4 container, with explicit full-range color information, the HD color matrix, and 64-bit sample offsets for large files. Playback geometry and colors are checked through the Windows Media playback engine at resolutions through 8K. Movies can be substantially larger than interframe-compressed files. Output is staged and replaces the chosen destination only when the complete movie has been finalized; cancellation removes the staging file. AVI movies exported by earlier builds must be exported again to correct playback corruption.
   - **Export Viewport Image**: Saves current view directly to a PNG file using Windows Imaging Component (`BitmapEncoder`).
   - **Copy Coordinates & Config**: Copies current fractal view parameters and theme as JSON to the clipboard.
@@ -130,6 +132,7 @@ Or with options:
 ### Test Coverage
 - **Coordinate Transforms**: Center mapping, zoom scaling, aspect ratios, and round-trip coordinate accuracy.
 - **Calculation Engines**: Escape-time calculation, fast cardioid checks, smooth vs discrete modes, and cancellation tokens.
+- **SIMD Accuracy**: Bit-for-bit scalar agreement across bookmarks, randomized views, odd and tiny images, iteration limits, periodic interiors, subpixel refinement, and Julia/deep-zoom fallbacks.
 - **Fractal Formulas**: Mandelbrot, Burning Ship upright masts, Tricorn conjugate symmetry, and Newton root convergence.
 - **Landmark Integrity**: Validates all landmark bookmarks across all 4 fractals to guarantee non-blank, non-flat rendering.
 - **Color Theme & LUT**: LUT 4096-entry generation, gradient stop manipulation, interior point coloring, cyclic palette mapping, and multi-basin Newton coloring.

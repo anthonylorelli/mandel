@@ -128,6 +128,7 @@
     <ClCompile Include="BackgroundRendererTests.cpp" />
     <ClCompile Include="FramePresentationTests.cpp" />
     <ClCompile Include="SubpixelSamplingTests.cpp" />
+    <ClCompile Include="SimdTests.cpp" />
     <ClCompile Include="JuliaTests.cpp" />
     <ClCompile Include="JuliaTourTests.cpp" />
     <ClCompile Include="MovieTests.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>

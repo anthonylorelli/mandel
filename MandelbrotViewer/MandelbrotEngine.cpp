@@ -6,6 +6,9 @@
 #include <random>
 #include <limits>
 #include <stdexcept>
+#if defined(_M_ARM64)
+#include <arm64_neon.h>
+#endif
 
 namespace Mandelbrot
 {
@@ -913,6 +916,100 @@ namespace Mandelbrot
             return static_cast<float>(iter);
         }
 
+#if defined(_M_ARM64)
+        // Resume a diverging SIMD lane without repeating iterations or losing the
+        // scalar renderer's periodicity checkpoints. Keep the arithmetic order exact.
+        inline float FinishMandelbrotLane(double cx, double cy, int maxIter, bool smooth,
+            double zr, double zi, double zr2, double zi2, int iter,
+            double checkZr, double checkZi, int checkPeriod, int stepsSinceCheck) noexcept
+        {
+            while (iter < maxIter && zr2 + zi2 <= 16.0)
+            {
+                zi = 2.0 * zr * zi + cy;
+                zr = zr2 - zi2 + cx;
+                zr2 = zr * zr;
+                zi2 = zi * zi;
+                ++iter;
+                if (zr == checkZr && zi == checkZi) { iter = maxIter; break; }
+                if (++stepsSinceCheck == checkPeriod)
+                {
+                    checkZr = zr;
+                    checkZi = zi;
+                    stepsSinceCheck = 0;
+                    if (checkPeriod < 1024) checkPeriod <<= 1;
+                }
+            }
+            if (iter >= maxIter) return -1.0f;
+            if (!smooth) return static_cast<float>(iter);
+
+            int smoothIter = iter;
+            for (int extra = 0; extra < 3 && zr2 + zi2 < 1e100; ++extra)
+            {
+                zi = 2.0 * zr * zi + cy;
+                zr = zr2 - zi2 + cx;
+                zr2 = zr * zr;
+                zi2 = zi * zi;
+                ++smoothIter;
+            }
+            constexpr double invLn2 = 1.44269504088896340736;
+            const double logZn = std::log(zr2 + zi2) * 0.5;
+            const double nu = smoothIter + 1.0 - std::log(logZn) * invLn2;
+            return static_cast<float>(nu > 0.0 ? nu : 0.0);
+        }
+
+        inline void EvalMandelbrotPair(double cx0, double cx1, double cy,
+            int maxIter, bool smooth, float* out) noexcept
+        {
+            if (IsInMainCardioidOrBulb(cx0, cy) || IsInMainCardioidOrBulb(cx1, cy) || maxIter < 1)
+            {
+                out[0] = EvalStandardPoint(FractalType::Mandelbrot, cx0, cy, maxIter, smooth);
+                out[1] = EvalStandardPoint(FractalType::Mandelbrot, cx1, cy, maxIter, smooth);
+                return;
+            }
+
+            const double coordinates[]{ cx0, cx1 };
+            const float64x2_t cx = vld1q_f64(coordinates);
+            const float64x2_t y = vdupq_n_f64(cy), two = vdupq_n_f64(2.0), limit = vdupq_n_f64(16.0);
+            float64x2_t zr = vdupq_n_f64(0.0), zi = zr, zr2 = zr, zi2 = zr, checkR = zr, checkI = zr;
+            uint64x2_t periodic = vdupq_n_u64(0);
+            int iter = 0, checkPeriod = 8, steps = 0;
+            while (iter < maxIter)
+            {
+                // Separate multiply/add operations match /fp:precise scalar results;
+                // fused arithmetic changes fine boundary detail between render paths.
+                zi = vaddq_f64(vmulq_f64(vmulq_f64(two, zr), zi), y);
+                zr = vaddq_f64(vsubq_f64(zr2, zi2), cx);
+                zr2 = vmulq_f64(zr, zr);
+                zi2 = vmulq_f64(zi, zi);
+                ++iter;
+                periodic = vandq_u64(vceqq_f64(zr, checkR), vceqq_f64(zi, checkI));
+                if (++steps == checkPeriod)
+                {
+                    checkR = zr;
+                    checkI = zi;
+                    steps = 0;
+                    if (checkPeriod < 1024) checkPeriod <<= 1;
+                }
+                const uint64x2_t bounded = vcleq_f64(vaddq_f64(zr2, zi2), limit);
+                const uint64x2_t stopped = vorrq_u64(periodic, veorq_u64(bounded, vdupq_n_u64(~uint64_t(0))));
+                // Stop as soon as either lane completes; finish the other in scalar
+                // rather than iterating an escaped lane into infinities or NaNs.
+                if (vmaxvq_u32(vreinterpretq_u32_u64(stopped))) break;
+            }
+
+            double r[2], i[2], r2[2], i2[2], cr[2], ci[2];
+            uint64_t cycle[2];
+            vst1q_f64(r, zr); vst1q_f64(i, zi);
+            vst1q_f64(r2, zr2); vst1q_f64(i2, zi2);
+            vst1q_f64(cr, checkR); vst1q_f64(ci, checkI);
+            vst1q_u64(cycle, periodic);
+            for (int lane = 0; lane < 2; ++lane)
+                out[lane] = cycle[lane] || iter >= maxIter ? -1.0f :
+                    FinishMandelbrotLane(coordinates[lane], cy, maxIter, smooth,
+                        r[lane], i[lane], r2[lane], i2[lane], iter, cr[lane], ci[lane], checkPeriod, steps);
+        }
+#endif
+
         struct PatchStats
         {
             int totalCount{ 0 };
@@ -1580,16 +1677,41 @@ namespace Mandelbrot
             return EvalStandardPoint(type, cx, cy, maxIter, smooth);
         };
 
-        ExecuteRenderPass(
-            width,
-            height,
-            config.renderStride,
-            config.edgeRefine,
-            smooth,
-            type,
-            outIterations,
-            cancelToken,
-            evalStandardPixel);
+#if defined(_M_ARM64)
+        if (m_executionMode == ExecutionMode::Automatic &&
+            type == FractalType::Mandelbrot && config.renderStride <= 1)
+        {
+            #pragma omp parallel for schedule(dynamic, 1)
+            for (int py = 0; py < height; ++py)
+            {
+                if (cancelToken && cancelToken->load(std::memory_order_relaxed)) continue;
+                float* row = outIterations.data() + static_cast<size_t>(py) * width;
+                const double cy = config.centerY + (halfH - (static_cast<double>(py) + 0.5)) * dy;
+                int px = 0;
+                for (; px + 1 < width; px += 2)
+                {
+                    if (cancelToken && cancelToken->load(std::memory_order_relaxed)) break;
+                    const double x0 = config.centerX + ((static_cast<double>(px) + 0.5) - halfW) * dx;
+                    const double x1 = config.centerX + ((static_cast<double>(px + 1) + 0.5) - halfW) * dx;
+                    EvalMandelbrotPair(x0, x1, cy, maxIter, smooth, row + px);
+                }
+                if (px < width) row[px] = evalStandardPixel(px, py);
+            }
+        }
+        else
+#endif
+        {
+            ExecuteRenderPass(
+                width,
+                height,
+                config.renderStride,
+                config.edgeRefine,
+                smooth,
+                type,
+                outIterations,
+                cancelToken,
+                evalStandardPixel);
+        }
 
         RefineSubpixels(width, height, smooth, type, outIterations, m_sampleWeights,
             subpixelSamples, cancelToken, evalStandardPixel);

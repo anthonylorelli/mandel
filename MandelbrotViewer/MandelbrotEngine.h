@@ -73,7 +73,11 @@ namespace Mandelbrot
         static constexpr double MaxZoom = 1e300;
         static constexpr double MinZoom = 0.15;
 
+        // Automatic selects supported CPU optimizations. Scalar retains the reference
+        // implementation for accuracy checks and platforms without a SIMD backend.
+        enum class ExecutionMode { Automatic, Scalar };
         MandelbrotEngine() = default;
+        explicit MandelbrotEngine(ExecutionMode mode) noexcept : m_executionMode(mode) {}
 
         // Computes fractional iteration values into outIterations (size: width * height)
         // Optional sparse subpixel samples refine boundaries and detailed regions. Center
@@ -161,6 +165,7 @@ namespace Mandelbrot
         };
 
     private:
+        ExecutionMode m_executionMode{ ExecutionMode::Automatic };
         double ComputeJulia(const MandelbrotConfig& config, std::vector<float>& outIterations,
             const std::atomic<bool>* cancelToken, std::vector<SubpixelSamples>* subpixelSamples);
         std::vector<float> m_sampleWeights;
