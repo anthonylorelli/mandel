@@ -139,6 +139,95 @@ TEST_CASE(Movie, FixedSamplingIsRepeatableAndIndependentOfRenderBands)
     cancel = true; ASSERT_TRUE(RenderMovieFrame(p, 4, cancel).empty());
 }
 
+TEST_CASE(Movie, AutomaticTargetsAreRepeatableAcrossFrameRatesAndSubframeRequests)
+{
+    auto p = SmallMovie(); p.autoRetarget = true; p.targetSeed = 101; p.seconds = 3; p.endZoom = 1e6;
+    std::atomic<bool> cancel{}; ASSERT_TRUE(p.PrepareAutoTargets(cancel));
+    auto other = p; other.fps = 60; other.width = 1280; other.height = 960;
+    ASSERT_TRUE(other.PrepareAutoTargets(cancel));
+    ASSERT_TRUE(p.CameraAt(0).hpCenterX == p.start.hpCenterX);
+    ASSERT_TRUE(p.CameraAt(0).hpCenterY == p.start.hpCenterY);
+    ASSERT_EQ(p.endZoom, p.CameraAt(p.FrameCount() - 1).zoom);
+    for (double t : {1.0, .25, .75, 0.0, .5, .25})
+    {
+        const auto a = p.CameraAt((p.FrameCount() - 1) * t);
+        const auto b = other.CameraAt((other.FrameCount() - 1) * t);
+        ASSERT_TRUE(a.hpCenterX == b.hpCenterX); ASSERT_TRUE(a.hpCenterY == b.hpCenterY);
+        ASSERT_EQ(a.zoom, b.zoom); ASSERT_EQ(p.start.maxIterations, a.maxIterations);
+    }
+    const auto frame = RenderMovieFrame(p, 12.25, cancel, {}, 4);
+    ASSERT_TRUE(frame == RenderMovieFrame(p, 12.25, cancel, {}, 4));
+    const auto whole = RenderMovieFrame(p, 12.25, cancel, {}, p.height);
+    for (size_t i = 0; i < frame.size(); ++i) for (int shift : {0, 8, 16})
+        ASSERT_NEAR((frame[i] >> shift) & 255, (whole[i] >> shift) & 255, 1);
+}
+
+TEST_CASE(Movie, AutomaticRetargetsPreservePositionAndVelocity)
+{
+    auto p = SmallMovie(); p.autoRetarget = true; p.targetSeed = 101; p.seconds = 8; p.endZoom = 1e12;
+    std::atomic<bool> cancel{}; ASSERT_TRUE(p.PrepareAutoTargets(cancel));
+    ASSERT_GT(p.AutoTargets().size(), 1u);
+    const double range = std::log(p.endZoom / p.start.zoom), epsilon = 1e-7;
+    for (const auto& target : p.AutoTargets())
+    {
+        if (target.progress == 0) continue;
+        const double frame = (p.FrameCount() - 1) * target.progress;
+        const double dt = (p.FrameCount() - 1) * epsilon / range;
+        const auto at = p.CameraAt(frame), left = p.CameraAt(frame - dt), right = p.CameraAt(frame + dt);
+        const double span = 3.0 / at.zoom;
+        ASSERT_LT(std::abs((at.hpCenterX - target.x).ToDouble()) / span, 1e-10);
+        ASSERT_LT(std::abs((at.hpCenterY - target.y).ToDouble()) / span, 1e-10);
+        for (auto values : {std::array<BigFloat, 3>{left.hpCenterX, at.hpCenterX, right.hpCenterX},
+            std::array<BigFloat, 3>{left.hpCenterY, at.hpCenterY, right.hpCenterY}})
+        {
+            const double before = (values[1] - values[0]).ToDouble() / epsilon;
+            const double after = (values[2] - values[1]).ToDouble() / epsilon;
+            ASSERT_LT(std::abs(before - after) / span, 1e-4);
+        }
+    }
+}
+
+TEST_CASE(Movie, AutomaticTargetsUseLiveInterestChecksAcrossFractalTypes)
+{
+    std::atomic<bool> cancel{}; MandelbrotEngine engine;
+    for (auto type : GetAllFractalTypes())
+    {
+        auto p = SmallMovie(); p.autoRetarget = true; p.targetSeed = 101; p.start.fractalType = type;
+        const auto& overview = GetBookmarks(type).front();
+        p.start.SetCenter(overview.centerX, overview.centerY); p.start.zoom = overview.zoom; p.endZoom = p.start.zoom * 100;
+        ASSERT_TRUE(p.PrepareAutoTargets(cancel)); ASSERT_FALSE(p.AutoTargets().empty());
+        auto probe = p.CameraAt(0); probe.width = 144; probe.height = 108;
+        std::vector<float> iterations; engine.Compute(probe, iterations);
+        const auto& selected = p.AutoTargets().front();
+        ASSERT_FALSE(MandelbrotEngine::ShouldRetargetZoom(probe, iterations, selected.targetX, selected.targetY));
+    }
+}
+
+TEST_CASE(Movie, AutomaticZoomRetainsDeepCoordinatesAndAvoidsDistantFallbackJumps)
+{
+    auto p = SmallMovie(); p.autoRetarget = true; p.targetSeed = 101;
+    p.start.SetCenter(0.0, 1.0); p.start.zoom = 1e25; p.endZoom = 1e28;
+    std::atomic<bool> cancel{}; ASSERT_TRUE(p.PrepareAutoTargets(cancel));
+    const auto next = p.CameraAt(5.25);
+    ASSERT_EQ(p.start.centerY, next.centerY);
+    ASSERT_FALSE((next.hpCenterY - p.start.hpCenterY).IsZero());
+    ASSERT_LT(std::abs((next.hpCenterY - p.start.hpCenterY).ToDouble()), 3.0 / p.start.zoom);
+
+    p.start.SetCenter(0.0, 0.0); p.start.zoom = 1e25;
+    ASSERT_TRUE(p.PrepareAutoTargets(cancel));
+    const auto last = p.CameraAt(p.FrameCount() - 1);
+    ASSERT_TRUE(last.hpCenterX == p.start.hpCenterX); ASSERT_TRUE(last.hpCenterY == p.start.hpCenterY);
+}
+
+TEST_CASE(Movie, AutomaticTargetPlanningIsCancelableAndRequiresZoomIn)
+{
+    auto p = SmallMovie(); p.autoRetarget = true;
+    std::atomic<bool> cancel{true}; ASSERT_FALSE(p.PrepareAutoTargets(cancel)); ASSERT_TRUE(p.AutoTargets().empty());
+    cancel = false; p.endZoom = p.start.zoom;
+    bool rejected = false; try { p.PrepareAutoTargets(cancel); } catch (const std::invalid_argument&) { rejected = true; }
+    ASSERT_TRUE(rejected);
+}
+
 TEST_CASE(Movie, SupersamplingRetainsDeepSubpixelBoundaries)
 {
     auto p = SmallMovie(); p.width = 8; p.height = 4; p.start.SetCenter(1.0, 0.0);
@@ -289,11 +378,23 @@ TEST_CASE(Movie, BackgroundExportReportsFootageAndPublishesTheLastPreview)
     ASSERT_FALSE(Read(file.path).empty());
 }
 
+TEST_CASE(Movie, BackgroundExportPreparesAutomaticTargets)
+{
+    File file; auto p = SmallMovie(); p.autoRetarget = true;
+    MovieExporter exporter(p, file.path.wstring()); WaitFor(exporter);
+    const auto status = exporter.Progress(); ASSERT_TRUE(status.error.empty()); ASSERT_FALSE(status.canceled);
+    ASSERT_FALSE(status.planning); ASSERT_EQ(p.FrameCount(), status.completed);
+    ASSERT_TRUE(exporter.TakePreview().has_value()); ASSERT_FALSE(Read(file.path).empty());
+}
+
 TEST_CASE(Movie, CancelPreservesAnExistingDestination)
 {
-    File file; { std::ofstream stream(file.path); stream << "original"; }
-    auto p = SmallMovie(); p.width = 1920; p.height = 1080; p.start.maxIterations = 10000;
-    MovieExporter exporter(p, file.path.wstring()); exporter.Cancel(); WaitFor(exporter);
-    ASSERT_TRUE(exporter.Progress().canceled);
-    const auto bytes = Read(file.path); ASSERT_EQ(std::string("original"), std::string(bytes.begin(), bytes.end()));
+    for (bool automatic : {false, true})
+    {
+        File file; { std::ofstream stream(file.path); stream << "original"; }
+        auto p = SmallMovie(); p.width = 1920; p.height = 1080; p.start.maxIterations = 10000; p.autoRetarget = automatic;
+        MovieExporter exporter(p, file.path.wstring()); exporter.Cancel(); WaitFor(exporter);
+        ASSERT_TRUE(exporter.Progress().canceled); ASSERT_FALSE(exporter.Progress().planning);
+        const auto bytes = Read(file.path); ASSERT_EQ(std::string("original"), std::string(bytes.begin(), bytes.end()));
+    }
 }

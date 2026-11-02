@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "MainWindow.xaml.h"
 #include <winrt/Microsoft.UI.Xaml.Automation.h>
+#include <random>
 #pragma comment(lib, "uuid.lib")
 
 using namespace winrt;
@@ -44,7 +45,7 @@ namespace winrt::MandelbrotViewer::implementation
 
             StackPanel settings; settings.Spacing(10);
             TextBlock help;
-            help.Text(L"Starts from the current view and zooms to the target below. High-quality MP4 output supports 8K and can produce large files.");
+            help.Text(L"Starts from the current view and zooms to a fixed target or automatically follows detailed regions. High-quality MP4 output supports 8K and can produce large files.");
             help.TextWrapping(TextWrapping::Wrap); settings.Children().Append(help);
             ComboBox resolution; resolution.Header(box_value(L"Resolution")); resolution.HorizontalAlignment(HorizontalAlignment::Stretch);
             for (const auto& item : Mandelbrot::MovieResolutions) resolution.Items().Append(box_value(item.label));
@@ -60,8 +61,20 @@ namespace winrt::MandelbrotViewer::implementation
                 m_zoomInDirection ? plan.start.zoom * 1000.0 : plan.start.zoom / 1000.0,
                 Mandelbrot::MandelbrotEngine::MinZoom, Mandelbrot::MandelbrotEngine::MaxZoom);
             endZoom.Text(zoomText.str()); settings.Children().Append(endZoom);
+            CheckBox autoTarget; autoTarget.Content(box_value(L"Auto-Pick Target (zoom in)"));
+            const bool automatic = m_autoPickInterestingTarget && m_zoomInDirection;
+            autoTarget.IsChecked(automatic); settings.Children().Append(autoTarget);
+            TextBlock autoHelp; autoHelp.Text(L"Choose new detailed targets automatically as the zoom reaches uniform areas.");
+            autoHelp.TextWrapping(TextWrapping::Wrap); settings.Children().Append(autoHelp);
             TextBox targetX; targetX.Header(box_value(L"Target center X")); targetX.Text(targetXText); settings.Children().Append(targetX);
             TextBox targetY; targetY.Header(box_value(L"Target center Y")); targetY.Text(targetYText); settings.Children().Append(targetY);
+            targetX.IsEnabled(!automatic); targetY.IsEnabled(!automatic);
+            const auto updateTargets = [targetX, targetY](IInspectable const& sender, RoutedEventArgs const&)
+            {
+                const bool manual = !sender.as<CheckBox>().IsChecked().GetBoolean();
+                targetX.IsEnabled(manual); targetY.IsEnabled(manual);
+            };
+            autoTarget.Checked(updateTargets); autoTarget.Unchecked(updateTargets);
             CheckBox motion; motion.Content(box_value(L"Smooth motion between frames")); motion.IsChecked(true); settings.Children().Append(motion);
             TextBlock errorText; errorText.TextWrapping(TextWrapping::Wrap); settings.Children().Append(errorText);
             ScrollViewer scroller; scroller.Content(settings); scroller.MaxHeight(510);
@@ -82,16 +95,22 @@ namespace winrt::MandelbrotViewer::implementation
                     plan.seconds = static_cast<int>(duration.Value());
                     size_t used{}; const std::wstring text(endZoom.Text()); plan.endZoom = std::stod(text, &used);
                     if (used != text.size()) throw std::invalid_argument("Enter a valid end zoom.");
+                    plan.autoRetarget = autoTarget.IsChecked().GetBoolean();
                     plan.targetX = exactX; plan.targetY = exactY;
-                    if (!(exactXText && targetX.Text() == targetXText) && !Mandelbrot::BigFloat::TryParse(targetX.Text(), plan.targetX))
+                    if (!plan.autoRetarget && !(exactXText && targetX.Text() == targetXText) && !Mandelbrot::BigFloat::TryParse(targetX.Text(), plan.targetX))
                         throw std::invalid_argument("Enter a valid target X coordinate.");
-                    if (!(exactYText && targetY.Text() == targetYText) && !Mandelbrot::BigFloat::TryParse(targetY.Text(), plan.targetY))
+                    if (!plan.autoRetarget && !(exactYText && targetY.Text() == targetYText) && !Mandelbrot::BigFloat::TryParse(targetY.Text(), plan.targetY))
                         throw std::invalid_argument("Enter a valid target Y coordinate.");
                     if (autoIterations)
                         plan.start.maxIterations = Mandelbrot::MandelbrotEngine::RecommendMaxIterations(
                             std::max(plan.start.zoom, plan.endZoom), plan.start.fractalType, baseIterations);
                     plan.motionSmoothing = motion.IsChecked().GetBoolean();
                     plan.Validate();
+                    if (plan.autoRetarget)
+                    {
+                        std::random_device random;
+                        plan.targetSeed = (static_cast<uint64_t>(random()) << 32) ^ random();
+                    }
                 }
                 catch (const std::exception& error) { errorText.Text(to_hstring(error.what())); args.Cancel(true); }
             });
@@ -167,7 +186,9 @@ namespace winrt::MandelbrotViewer::implementation
                 progress.canceled ? L"Export canceled. No partial movie was saved." : L"Movie saved.");
             MovieCancelButton().Content(box_value(L"Close")); MovieCancelButton().IsEnabled(true);
         }
+        else if (progress.planning) MovieStatusText().Text(L"Finding interesting zoom targets...");
         else if (progress.completed == progress.total) MovieStatusText().Text(L"Finalizing movie...");
+        else MovieStatusText().Text(L"Rendering...");
     }
 
     void MainWindow::OnMovieCancelClick(IInspectable const&, RoutedEventArgs const&)

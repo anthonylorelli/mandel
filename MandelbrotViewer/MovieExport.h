@@ -10,6 +10,8 @@
 namespace Mandelbrot
 {
     struct MoviePreview { int width{}, height{}; uint32_t frame{}; std::vector<uint32_t> pixels; };
+    // Automatic plans must call PrepareAutoTargets after their settings are finalized.
+    // MovieExporter prepares them on its worker before rendering the first frame.
     std::vector<uint32_t> RenderMovieFrame(const MoviePlan& plan, double frameIndex,
         const std::atomic<bool>& cancel, const std::function<void(float)>& progress = {}, int bandRows = 64);
     MoviePreview MakeMoviePreview(const std::vector<uint32_t>& pixels, int width, int height, uint32_t frame);
@@ -18,7 +20,7 @@ namespace Mandelbrot
     {
         uint32_t completed{}, total{};
         float frameFraction{};
-        bool finished{}, canceled{};
+        bool finished{}, canceled{}, planning{};
         std::wstring error;
     };
 
@@ -36,6 +38,7 @@ namespace Mandelbrot
         std::atomic<bool> m_cancel{};
         std::atomic<uint32_t> m_completed{};
         std::atomic<float> m_fraction{};
+        std::atomic<bool> m_planning{};
         uint32_t m_total;
         mutable std::mutex m_mutex;
         std::optional<MoviePreview> m_preview;

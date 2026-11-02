@@ -2,7 +2,9 @@
 #include "MandelbrotEngine.h"
 #include "ColorTheme.h"
 #include <array>
+#include <atomic>
 #include <cmath>
+#include <iterator>
 #include <stdexcept>
 
 namespace Mandelbrot
@@ -23,7 +25,19 @@ namespace Mandelbrot
         ColorTheme theme;
         float frequency{1.0f}, phase{};
         bool invert{}, motionSmoothing{true};
+        bool autoRetarget{};
+        uint64_t targetSeed{1};
         uint32_t interior{0xFF000000};
+
+        // Prepared once on the export worker. CameraAt remains a pure lookup for all
+        // render bands, shutter samples, and out-of-order frame requests afterwards.
+        struct AutoTarget
+        {
+            double progress{};
+            BigFloat x, y, velocityX, velocityY, targetX, targetY;
+        };
+        bool PrepareAutoTargets(const std::atomic<bool>& cancel);
+        const std::vector<AutoTarget>& AutoTargets() const { return m_autoTargets; }
 
         uint32_t FrameCount() const { return static_cast<uint32_t>(static_cast<uint64_t>(fps) * seconds); }
         void Validate() const
@@ -37,6 +51,8 @@ namespace Mandelbrot
                 !std::isfinite(start.hpCenterX.ToDouble()) || !std::isfinite(start.hpCenterY.ToDouble()) ||
                 !std::isfinite(frequency) || !std::isfinite(phase))
                 throw std::invalid_argument("Invalid movie resolution, frame rate, duration, or zoom.");
+            if (autoRetarget && (endZoom <= start.zoom || start.juliaSet))
+                throw std::invalid_argument("Auto-Pick Target requires zooming in on a fractal's main view.");
         }
 
         MandelbrotConfig CameraAt(double frameIndex) const
@@ -48,6 +64,15 @@ namespace Mandelbrot
             const double t = std::clamp(frameIndex / (FrameCount() - 1.0), 0.0, 1.0);
             const double range = std::log(endZoom) - std::log(start.zoom);
             camera.zoom = t == 0 ? start.zoom : t == 1 ? endZoom : std::exp(std::log(start.zoom) + range * t);
+            if (autoRetarget)
+            {
+                if (m_autoTargets.empty()) throw std::logic_error("Prepare automatic movie targets before rendering.");
+                const auto next = std::upper_bound(m_autoTargets.begin(), m_autoTargets.end(), t,
+                    [](double at, const AutoTarget& target) { return at < target.progress; });
+                const auto state = AdvanceAutoTarget(*std::prev(next), t);
+                camera.SetCenter(state.x, state.y);
+                return camera;
+            }
             if (t == 0) return camera;
             if (t == 1) { camera.SetCenter(targetX, targetY); return camera; }
             // Evaluate each camera from absolute footage time. Use the nearer endpoint as
@@ -67,6 +92,38 @@ namespace Mandelbrot
                     start.hpCenterY + (targetY - start.hpCenterY).Mul(b));
             }
             return camera;
+        }
+
+    private:
+        std::vector<AutoTarget> m_autoTargets;
+
+        AutoTarget AdvanceAutoTarget(const AutoTarget& anchor, double progress) const
+        {
+            auto state = anchor;
+            const double delta = (std::log(endZoom) - std::log(start.zoom)) * (progress - anchor.progress);
+            const double q = 3.0 * delta, decay = std::exp(-q);
+            const BigFloat dx = anchor.x - anchor.targetX, dy = anchor.y - anchor.targetY;
+            const BigFloat travel(delta * decay);
+            // Critically damped tracking keeps both position and velocity continuous
+            // when a new target replaces the old one. Anchor near the start for tiny
+            // steps, and near the target for deep zooms, avoiding double cancellation.
+            if (q < .5)
+            {
+                const BigFloat shift(std::expm1(-q) + q * decay);
+                state.x = anchor.x + dx.Mul(shift) + anchor.velocityX.Mul(travel);
+                state.y = anchor.y + dy.Mul(shift) + anchor.velocityY.Mul(travel);
+            }
+            else
+            {
+                const BigFloat weight((1 + q) * decay);
+                state.x = anchor.targetX + dx.Mul(weight) + anchor.velocityX.Mul(travel);
+                state.y = anchor.targetY + dy.Mul(weight) + anchor.velocityY.Mul(travel);
+            }
+            const BigFloat a(1 - q), b(3 * q), d(decay);
+            state.velocityX = (anchor.velocityX.Mul(a) - dx.Mul(b)).Mul(d);
+            state.velocityY = (anchor.velocityY.Mul(a) - dy.Mul(b)).Mul(d);
+            state.progress = progress;
+            return state;
         }
     };
 }
