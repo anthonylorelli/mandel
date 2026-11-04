@@ -73,8 +73,8 @@ namespace Mandelbrot
         static constexpr double MaxZoom = 1e300;
         static constexpr double MinZoom = 0.15;
 
-        // Automatic selects supported CPU optimizations. Scalar retains the reference
-        // implementation for accuracy checks and platforms without a SIMD backend.
+        // Automatic selects supported CPU optimizations, including guarded deep-zoom
+        // iteration skipping. Scalar retains unaccelerated reference arithmetic.
         enum class ExecutionMode { Automatic, Scalar };
         MandelbrotEngine() = default;
         explicit MandelbrotEngine(ExecutionMode mode) noexcept : m_executionMode(mode) {}

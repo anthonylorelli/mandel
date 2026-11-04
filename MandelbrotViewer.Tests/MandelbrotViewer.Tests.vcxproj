@@ -103,6 +103,7 @@
     <ClInclude Include="TestHarness.h" />
     <ClInclude Include="..\MandelbrotViewer\HighPrecision.h" />
     <ClInclude Include="..\MandelbrotViewer\MandelbrotEngine.h" />
+    <ClInclude Include="..\MandelbrotViewer\MandelbrotBla.h" />
     <ClInclude Include="..\MandelbrotViewer\ColorTheme.h" />
     <ClInclude Include="..\MandelbrotViewer\ViewState.h" />
     <ClInclude Include="..\MandelbrotViewer\FrameTiming.h" />
@@ -129,6 +130,7 @@
     <ClCompile Include="FramePresentationTests.cpp" />
     <ClCompile Include="SubpixelSamplingTests.cpp" />
     <ClCompile Include="SimdTests.cpp" />
+    <ClCompile Include="BlaTests.cpp" />
     <ClCompile Include="JuliaTests.cpp" />
     <ClCompile Include="JuliaTourTests.cpp" />
     <ClCompile Include="MovieTests.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>

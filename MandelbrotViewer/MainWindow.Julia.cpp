@@ -2,6 +2,7 @@
 #include "MainWindow.xaml.h"
 #include "JuliaView.h"
 #include "ViewState.h"
+#include <limits>
 #include <winrt/Microsoft.UI.Dispatching.h>
 #include <winrt/Microsoft.UI.Xaml.Automation.h>
 #include <winrt/Windows.ApplicationModel.DataTransfer.h>
@@ -20,7 +21,7 @@ namespace winrt::MandelbrotViewer::implementation
         m_juliaVisible = ShowJuliaToggle().IsOn() && m_config.fractalType == Mandelbrot::FractalType::Mandelbrot;
         JuliaPane().Visibility(m_juliaVisible ? Visibility::Visible : Visibility::Collapsed);
         JuliaSettingsPanel().Visibility(m_juliaVisible ? Visibility::Visible : Visibility::Collapsed);
-        JuliaColumn().Width(GridLength{ m_juliaVisible ? 1.0 : 0.0, m_juliaVisible ? GridUnitType::Star : GridUnitType::Pixel });
+        UpdateJuliaLayout();
         m_juliaDragging = false;
         JuliaSurface().ReleasePointerCaptures();
         if (!m_juliaVisible)
@@ -53,6 +54,51 @@ namespace winrt::MandelbrotViewer::implementation
     void MainWindow::OnJuliaCloseClick(IInspectable const&, RoutedEventArgs const&)
     {
         ShowJuliaToggle().IsOn(false);
+    }
+
+    void MainWindow::OnViewportLayoutSizeChanged(IInspectable const&, SizeChangedEventArgs const&)
+    {
+        if (m_juliaTraveling) UpdateJuliaLayout();
+    }
+
+    void MainWindow::UpdateJuliaLayout()
+    {
+        if (m_isClosed) return;
+        const bool touring = m_juliaVisible && m_juliaTraveling;
+        const bool split = m_juliaVisible && !touring;
+        JuliaColumn().Width(GridLength{ split ? 1.0 : 0.0, split ? GridUnitType::Star : GridUnitType::Pixel });
+        Controls::Grid::SetColumn(JuliaPane(), touring ? 0 : 1);
+        JuliaPane().BorderThickness(Thickness{ touring ? 0.0 : 1.0, 0.0, 0.0, 0.0 });
+
+        auto pane = MandelbrotPane();
+        pane.HorizontalAlignment(touring ? HorizontalAlignment::Left : HorizontalAlignment::Stretch);
+        pane.VerticalAlignment(touring ? VerticalAlignment::Bottom : VerticalAlignment::Stretch);
+        pane.Margin(touring ? Thickness{ 16.0, 16.0, 16.0, 16.0 } : Thickness{});
+        pane.BorderThickness(touring ? Thickness{ 1.0, 1.0, 1.0, 1.0 } : Thickness{});
+        pane.CornerRadius(touring ? CornerRadius{ 8.0, 8.0, 8.0, 8.0 } : CornerRadius{});
+        if (touring)
+        {
+            // A bounded 4:3 overview stays small as the main Julia view grows,
+            // and shrinks with narrow/short windows instead of covering the view.
+            const double width = std::max(0.0, std::min({360.0,
+                (ViewportLayout().ActualWidth() - 32.0) * .34,
+                (ViewportLayout().ActualHeight() - 32.0) * .5}));
+            pane.Width(width);
+            pane.Height(width * .75);
+            if (!pane.Shadow()) pane.Shadow(Media::ThemeShadow());
+        }
+        else
+        {
+            pane.Width(std::numeric_limits<double>::quiet_NaN());
+            pane.Height(std::numeric_limits<double>::quiet_NaN());
+            pane.Shadow(nullptr);
+        }
+        pane.Translation(float3{ 0.0f, 0.0f, touring ? 24.0f : 0.0f });
+        MandelbrotOverlays().Visibility(touring ? Visibility::Collapsed : Visibility::Visible);
+        MandelbrotReferenceLabel().Visibility(touring ? Visibility::Visible : Visibility::Collapsed);
+        JuliaWindowControls().Visibility(touring ? Visibility::Visible : Visibility::Collapsed);
+        JuliaHud().Margin(Thickness{ 12.0, 12.0, touring ? 112.0 : 12.0, 12.0 });
+        ShowJuliaToggle().OnContent(box_value(touring ? L"Tour with picture in picture" : L"Side-by-side view"));
     }
 
     void MainWindow::OnJuliaUseCenterClick(IInspectable const&, RoutedEventArgs const&)
@@ -146,6 +192,7 @@ namespace winrt::MandelbrotViewer::implementation
         Mandelbrot::ResetJuliaView(m_juliaConfig);
         m_juliaConfig.renderStride = 2;
         m_juliaTraveling = true;
+        UpdateJuliaLayout();
         UpdateJuliaTravelControls();
         if (!m_juliaTravelTimer)
         {
@@ -175,6 +222,7 @@ namespace winrt::MandelbrotViewer::implementation
             m_juliaConfig.juliaY = m_juliaDisplayedConfig.juliaY;
         }
         m_juliaConfig.renderStride = 1;
+        UpdateJuliaLayout();
         UpdateJuliaTravelControls();
         if (!m_isClosed)
         {
@@ -237,7 +285,11 @@ namespace winrt::MandelbrotViewer::implementation
         m_juliaConfig.height = height;
         JuliaImage().Width(width);
         JuliaImage().Height(height);
-        if (!m_juliaSized) Mandelbrot::ResetJuliaView(m_juliaConfig);
+        if (!m_juliaSized || m_juliaTraveling)
+        {
+            Mandelbrot::ResetJuliaView(m_juliaConfig);
+            if (m_juliaTraveling) m_juliaConfig.renderStride = 2;
+        }
         m_juliaSized = true;
         RenderJulia();
     }
