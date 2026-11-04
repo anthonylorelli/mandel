@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "MandelbrotEngine.h"
+#include "MandelbrotBla.h"
 #include <cmath>
 #include <chrono>
 #include <algorithm>
@@ -2525,6 +2526,16 @@ namespace Mandelbrot
         const double refCxDouble = m_cachedRefX.ToDouble();
         const double refCyDouble = m_cachedRefY.ToDouble();
 
+        detail::BlaTable bla;
+        if (m_executionMode == ExecutionMode::Automatic && type == FractalType::Mandelbrot)
+        {
+            // Include the quarter-pixel halo used by optional subpixel refinement.
+            const double maxCx = std::max(std::abs(-.25 - refPosX), std::abs(width - .75 - refPosX)) * stepX;
+            const double maxCy = std::max(std::abs(refPosY + .25), std::abs(refPosY - (height - .75))) * stepY;
+            bla.Build(orbitPtr, refLen, std::hypot(maxCx, maxCy), cancelToken);
+            if (cancelToken && cancelToken->load(std::memory_order_relaxed)) return 0.0;
+        }
+
         auto evalDeepPixel = [&](double px, double py) -> float
         {
             if (cancelToken && cancelToken->load(std::memory_order_relaxed)) return -1.0f;
@@ -2541,42 +2552,16 @@ namespace Mandelbrot
             switch (type)
             {
             case FractalType::Mandelbrot:
-                while (iter < maxIter)
-                {
-                    double rx = orbitPtr[m].x;
-                    double ry = orbitPtr[m].y;
-                    const double zx = rx + dx;
-                    const double zy = ry + dy;
-                    const double mod2 = zx * zx + zy * zy;
-
-                    if (mod2 > bailoutRadius2)
-                    {
-                        escapedZx = zx;
-                        escapedZy = zy;
-                        escapedMod2 = mod2;
-                        break;
-                    }
-
-                    const double dz2 = dx * dx + dy * dy;
-                    if (m == refLen || (m > 0 && mod2 < dz2))
-                    {
-                        dx = zx;
-                        dy = zy;
-                        m = 0;
-                        rx = 0.0;
-                        ry = 0.0;
-                    }
-
-                    const double sx = rx + zx;
-                    const double sy = ry + zy;
-                    const double nextDx = sx * dx - sy * dy + dcx;
-                    const double nextDy = sx * dy + sy * dx + dcy;
-                    dx = nextDx;
-                    dy = nextDy;
-                    m++;
-                    iter++;
-                }
+            {
+                auto result = bla.Enabled()
+                    ? detail::EvalMandelbrotPerturbation<true>(orbitPtr, refLen, maxIter, dcx, dcy, bla)
+                    : detail::EvalMandelbrotPerturbation<false>(orbitPtr, refLen, maxIter, dcx, dcy, bla);
+                if (result.replay != detail::ReplayReason::None)
+                    result = detail::EvalMandelbrotPerturbation<false>(orbitPtr, refLen, maxIter, dcx, dcy, bla);
+                iter = result.iterations;
+                escapedZx = result.x; escapedZy = result.y;
                 break;
+            }
 
             case FractalType::BurningShip:
                 while (iter < maxIter)

@@ -22,6 +22,7 @@ namespace winrt::MandelbrotViewer::implementation
         void OnJuliaCloseClick(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::RoutedEventArgs const&);
         void OnJuliaTravelClick(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::RoutedEventArgs const&);
         void OnJuliaTravelSpeedChanged(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::Controls::Primitives::RangeBaseValueChangedEventArgs const&);
+        void OnViewportLayoutSizeChanged(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::SizeChangedEventArgs const&);
         void OnJuliaViewportSizeChanged(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::SizeChangedEventArgs const&);
         void OnJuliaPointerPressed(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const&);
         void OnJuliaPointerMoved(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const&);
@@ -120,6 +121,7 @@ namespace winrt::MandelbrotViewer::implementation
         void StopJuliaTravel(bool renderFinalFrame = true);
         void AdvanceJuliaTravel();
         void UpdateJuliaTravelControls();
+        void UpdateJuliaLayout();
         void UpdateJuliaParameterReadout(const Mandelbrot::MandelbrotConfig& config);
         void RefreshJuliaSettings();
         void OnJuliaRenderCompleted();
