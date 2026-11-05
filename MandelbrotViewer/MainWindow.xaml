@@ -199,7 +199,7 @@
                             <Button Content="Use Mandelbrot Center" HorizontalAlignment="Stretch" Click="OnJuliaUseCenterClick"/>
                             <Button Content="Copy Julia Coordinates &amp; Config" HorizontalAlignment="Stretch" Click="OnJuliaCopyCoordsClick"/>
                             <ToggleButton x:Name="JuliaTravelButton" Content="Start Random Tour" HorizontalAlignment="Stretch" Click="OnJuliaTravelClick"/>
-                            <TextBlock Text="Favors detailed edges, with inward trips and occasional excursions beyond the boundary."
+                            <TextBlock Text="Favors longer runs outside the main boundary, with occasional inward visits."
                                        TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
                             <Grid>
                                 <TextBlock Text="Tour Speed"/>

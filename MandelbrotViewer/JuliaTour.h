@@ -10,8 +10,8 @@
 
 namespace Mandelbrot
 {
-    // Multiplier paths explore the main cardioid and period-two bulb, with brief
-    // excursions beyond their edges. The regions meet at c=-.75 for continuous transfers.
+    // Multiplier paths favor the exterior of the main cardioid and period-two bulb,
+    // with occasional inward visits. The regions meet at c=-.75 for continuous transfers.
     class JuliaTour
     {
     public:
@@ -26,7 +26,6 @@ namespace Mandelbrot
             const double q = (x - 0.25) * (x - 0.25) + y * y;
             const bool bounded = std::isfinite(x) && std::isfinite(y) && std::abs(x) <= 2.0 && std::abs(y) <= 2.0;
             m_bulb = false;
-            m_returnFromExterior = false;
             if (bounded && q * (q + x - 0.25) <= 0.25 * y * y)
             {
                 const Point root = std::sqrt(Point(1.0) - 4.0 * c);
@@ -52,15 +51,11 @@ namespace Mandelbrot
                     m_bulb = std::abs(bulb) < std::abs(cardioid);
                     const Point selected = m_bulb ? bulb : cardioid;
                     if (std::abs(selected) <= MaxMultiplierRadius)
-                    {
                         m_from = selected;
-                        m_returnFromExterior = true;
-                    }
                     else m_bulb = false;
                 }
             }
             m_current = Parameter(m_from);
-            m_exteriorCooldown = std::uniform_int_distribution<int>(3, 6)(m_random);
             BeginVisit();
             PlanSegment();
             return m_current;
@@ -116,15 +111,14 @@ namespace Mandelbrot
 
         void BeginVisit()
         {
-            m_wanders = std::uniform_int_distribution<int>(4, 7)(m_random);
+            m_wanders = std::uniform_int_distribution<int>(8, 11)(m_random);
             m_direction = std::uniform_int_distribution<int>(0, 1)(m_random) ? 1 : -1;
-            m_detailStopsRemaining = std::uniform_int_distribution<int>(1, 2)(m_random);
+            m_exteriorStopsRemaining = std::uniform_int_distribution<int>(3, 5)(m_random);
         }
 
         double NextDetailAngle()
         {
-            // Near roots of unity the attracting cycle is close to bifurcation,
-            // producing lobes and fine branches. Favor lower-order rotations, with
+            // Aim near low-order bifurcations for lobes and fine branches, with
             // small random offsets so successive visits need not look identical.
             static constexpr std::array<std::pair<int, int>, 18> rotations{
                 std::pair{0, 1}, {1, 2}, {1, 3}, {2, 3}, {1, 4}, {3, 4},
@@ -138,7 +132,7 @@ namespace Mandelbrot
                 const auto [numerator, denominator] = rotations[i];
                 const double angle = turn * numerator / denominator;
                 deltas[i] = std::fmod(m_direction * (angle - m_fromAngle) + turn, turn);
-                // Keep successive detail stops nearby, leaving broader moves to excursions.
+                // Keep successive detail stops nearby, leaving broader moves to inward visits.
                 if (deltas[i] >= 0.35 && deltas[i] <= 1.65)
                     total += weights[i] = 8.0 - denominator;
             }
@@ -159,13 +153,15 @@ namespace Mandelbrot
                 : multiplier * 0.5 - multiplier * multiplier * 0.25;
         }
 
-        bool PlanExteriorExcursion()
+        bool PlanExteriorStop()
         {
-            if (m_exteriorCooldown > 0 || m_fromRadius < 0.90) return false;
-            for (int attempt = 0; attempt < 12; ++attempt)
+            for (int attempt = 0; attempt < 24; ++attempt)
             {
-                const double radius = std::uniform_real_distribution<double>(1.04, MaxMultiplierRadius)(m_random);
-                const double angle = m_fromAngle + std::uniform_real_distribution<double>(-0.75, 0.75)(m_random);
+                // Keep most stops close to detailed edges, varying the outward depth
+                // so an exterior run also reveals broader disconnected forms.
+                const double depth = std::uniform_real_distribution<double>(0.0, 1.0)(m_random);
+                const double radius = 1.02 + (MaxMultiplierRadius - 1.02) * depth * depth;
+                const double angle = NextDetailAngle();
                 const Point multiplier = std::polar(radius, angle);
                 const Point c = Parameter(multiplier);
                 Point z{};
@@ -181,8 +177,6 @@ namespace Mandelbrot
                 m_targetRadius = radius;
                 m_targetAngle = angle;
                 m_target = multiplier;
-                m_returnFromExterior = true;
-                m_exteriorCooldown = std::uniform_int_distribution<int>(3, 6)(m_random);
                 return true;
             }
             return false;
@@ -202,52 +196,49 @@ namespace Mandelbrot
 
         void PlanSegment()
         {
-            m_crossing = !m_returnFromExterior && m_wanders == 0;
+            m_crossing = m_wanders == 0;
             m_fromRadius = std::abs(m_from);
             m_fromAngle = std::arg(m_from);
-            bool shortDetour = false;
-            if (m_returnFromExterior)
-            {
-                m_targetRadius = std::uniform_real_distribution<double>(0.92, 0.98)(m_random);
-                m_targetAngle = m_fromAngle + std::uniform_real_distribution<double>(-0.12, 0.12)(m_random);
-                m_target = std::polar(m_targetRadius, m_targetAngle);
-                m_returnFromExterior = false;
-                shortDetour = true;
-            }
-            else if (m_crossing)
+            bool exteriorStop = false, interiorStop = false;
+            if (m_crossing)
             {
                 m_target = Point(m_bulb ? 1.0 : -1.0);
                 m_targetRadius = 1.0;
                 m_targetAngle = m_fromAngle + std::remainder(std::arg(m_target) - m_fromAngle,
                     2.0 * std::numbers::pi);
             }
-            else if (PlanExteriorExcursion()) shortDetour = true;
+            else if (m_exteriorStopsRemaining > 0 && PlanExteriorStop())
+            {
+                --m_exteriorStopsRemaining;
+                --m_wanders;
+                exteriorStop = true;
+            }
             else
             {
-                if (m_detailStopsRemaining > 0)
+                if (m_exteriorStopsRemaining > 0 || !std::bernoulli_distribution(0.35)(m_random))
                 {
-                    m_targetRadius = 0.90 + 0.095 * std::sqrt(std::uniform_real_distribution<double>(0.0, 1.0)(m_random));
+                    m_targetRadius = std::uniform_real_distribution<double>(0.95, 0.995)(m_random);
                     m_targetAngle = NextDetailAngle();
-                    --m_detailStopsRemaining;
                 }
                 else
                 {
-                    // Limit consecutive edge stops so every component visit explores its
-                    // interior too. Mix moderate excursions with occasional deeper dives.
-                    m_targetRadius = std::bernoulli_distribution(0.35)(m_random)
-                        ? std::uniform_real_distribution<double>(0.20, 0.55)(m_random)
+                    // Brief, infrequent inward visits add contrast without making
+                    // the tour repeatedly dwell on large filled Julia interiors.
+                    interiorStop = true;
+                    m_targetRadius = std::bernoulli_distribution(0.20)(m_random)
+                        ? std::uniform_real_distribution<double>(0.25, 0.55)(m_random)
                         : std::uniform_real_distribution<double>(0.55, 0.82)(m_random);
                     m_direction = std::uniform_int_distribution<int>(0, 1)(m_random) ? 1 : -1;
                     m_targetAngle = m_fromAngle + m_direction *
                         std::uniform_real_distribution<double>(0.55, 2.4)(m_random);
-                    m_detailStopsRemaining = std::uniform_int_distribution<int>(1, 3)(m_random);
                 }
                 m_target = std::polar(m_targetRadius, m_targetAngle);
+                m_exteriorStopsRemaining = std::uniform_int_distribution<int>(3, 5)(m_random);
                 --m_wanders;
-                if (m_exteriorCooldown > 0) --m_exteriorCooldown;
             }
-            m_duration = (shortDetour ? std::uniform_real_distribution<double>(3.0, 4.5)(m_random)
-                : std::uniform_real_distribution<double>(5.0, 7.0)(m_random)) +
+            m_duration = (exteriorStop ? std::uniform_real_distribution<double>(6.0, 8.0)(m_random)
+                : interiorStop ? std::uniform_real_distribution<double>(3.0, 4.0)(m_random)
+                : std::uniform_real_distribution<double>(4.0, 6.0)(m_random)) +
                 1.5 * std::abs(m_targetAngle - m_fromAngle);
             m_progress = 0.0;
         }
@@ -256,8 +247,7 @@ namespace Mandelbrot
         Point m_from{ -1.0 }, m_target{}, m_current{ -0.75 };
         double m_fromRadius{}, m_targetRadius{}, m_fromAngle{}, m_targetAngle{};
         double m_progress{}, m_duration{ 5.0 };
-        int m_wanders{}, m_direction{ 1 }, m_detailStopsRemaining{};
-        int m_exteriorCooldown{};
-        bool m_bulb{}, m_crossing{}, m_returnFromExterior{};
+        int m_wanders{}, m_direction{ 1 }, m_exteriorStopsRemaining{};
+        bool m_bulb{}, m_crossing{};
     };
 }
