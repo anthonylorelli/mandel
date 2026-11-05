@@ -51,14 +51,16 @@ TEST_CASE(JuliaTour, UnsupportedSelectionsStartAtTheSharedPoint)
         ASSERT_NEAR(0.0, std::abs(tour.Start(c.real(), c.imag(), 42) - JuliaTour::Point(-0.75)), 0.0);
 }
 
-TEST_CASE(JuliaTour, RestartsAtNearbyExteriorSelectionsAndReturnsInward)
+TEST_CASE(JuliaTour, RestartsAtNearbyExteriorSelectionsWithoutAnImmediateInwardReturn)
 {
     for (auto c : { JuliaTour::Point(0.3, 0.0), JuliaTour::Point(-1.28, 0.05) })
     {
         JuliaTour tour;
         ASSERT_NEAR(0.0, std::abs(tour.Start(c.real(), c.imag(), 42) - c), 1e-14);
-        for (int tick = 0; tick < 600; ++tick) tour.Advance(1.0 / 60.0);
-        ASSERT_TRUE(Locate(tour.Current()).primary);
+        int exterior = 0;
+        for (int tick = 0; tick < 600; ++tick)
+            exterior += !Locate(tour.Advance(1.0 / 60.0)).primary;
+        ASSERT_GT(exterior, 400);
     }
 }
 
@@ -103,44 +105,47 @@ TEST_CASE(JuliaTour, SeedsReproduceRoutesAndGenerateDifferentTours)
     ASSERT_GT(std::abs(first.Current() - other.Current()), 0.01);
 }
 
-TEST_CASE(JuliaTour, BalancesBoundaryDetailWithInteriorExcursionsInBothRegions)
+TEST_CASE(JuliaTour, PrioritizesExteriorTimeAroundBothPrimaryRegionsAtDifferentFrameRates)
 {
-    for (uint64_t seed : { 1, 42, 9127 })
-    {
-        JuliaTour tour;
-        tour.Start(0.0, 0.0, seed);
-        std::array<int, 2> nearBoundary{}, interior{}, samples{};
-        int deepInterior = 0;
-        for (int tick = 0; tick < 36000; ++tick)
+    for (double frameSeconds : {1.0 / 60.0, 1.0 / 30.0})
+        for (uint64_t seed : { 1, 42, 9127 })
         {
-            const auto c = tour.Advance(1.0 / 60.0);
-            if (tick < 900) continue; // Allow the tour to leave the initial selection.
-            const auto location = Locate(c);
-            const int region = location.bulb ? 1 : 0;
-            nearBoundary[region] += location.radius > 0.85 && location.radius < 1.05;
-            interior[region] += location.radius < 0.80;
-            deepInterior += location.radius < 0.60;
-            ++samples[region];
+            JuliaTour tour;
+            tour.Start(0.0, 0.0, seed);
+            std::array<int, 2> exterior{}, samples{};
+            int interior = 0;
+            int deepInterior = 0;
+            for (int tick = 0; tick < static_cast<int>(600 / frameSeconds); ++tick)
+            {
+                const auto c = tour.Advance(frameSeconds);
+                if (tick * frameSeconds < 15) continue; // Allow the tour to leave the initial selection.
+                const auto location = Locate(c);
+                const int region = location.bulb ? 1 : 0;
+                exterior[region] += !location.primary;
+                interior += location.radius < 0.80;
+                deepInterior += location.radius < 0.60;
+                ++samples[region];
+            }
+            for (int region = 0; region < 2; ++region)
+            {
+                ASSERT_GT(samples[region], 0);
+                const double exteriorFraction = static_cast<double>(exterior[region]) / samples[region];
+                ASSERT_GT(exteriorFraction, 0.60);
+                ASSERT_LT(exteriorFraction, 0.95);
+            }
+            ASSERT_GT(interior, 0);
+            ASSERT_LT(static_cast<double>(interior) / (samples[0] + samples[1]), 0.10);
+            ASSERT_LT(static_cast<double>(deepInterior) / (samples[0] + samples[1]), 0.05);
         }
-        for (int region = 0; region < 2; ++region)
-        {
-            ASSERT_GT(samples[region], 0);
-            const double boundaryFraction = static_cast<double>(nearBoundary[region]) / samples[region];
-            ASSERT_GT(boundaryFraction, 0.40);
-            ASSERT_LT(boundaryFraction, 0.85);
-            ASSERT_GT(static_cast<double>(interior[region]) / samples[region], 0.15);
-        }
-        ASSERT_GT(static_cast<double>(deepInterior) / (samples[0] + samples[1]), 0.04);
-    }
 }
 
-TEST_CASE(JuliaTour, ExteriorExcursionsAreOccasionalAndReturnInside)
+TEST_CASE(JuliaTour, LongerExteriorRunsFavorEscapingParametersAndStillReturnInside)
 {
     for (uint64_t seed : { 1, 42, 9127 })
     {
         JuliaTour tour;
         tour.Start(-0.75, 0.0, seed);
-        int samples = 0, exterior = 0, returned = 0, leftAt = -1;
+        int samples = 0, exterior = 0, returned = 0, leftAt = -1, longestRun = 0;
         for (int tick = 0; tick < 36000; ++tick)
         {
             const auto c = tour.Advance(1.0 / 60.0);
@@ -152,19 +157,24 @@ TEST_CASE(JuliaTour, ExteriorExcursionsAreOccasionalAndReturnInside)
                 if (leftAt < 0) leftAt = tick;
             }
             if (location.primary && leftAt >= 0) { ++returned; leftAt = -1; }
-            if (leftAt >= 0) ASSERT_LT(tick - leftAt, 1200);
+            if (leftAt >= 0)
+            {
+                longestRun = std::max(longestRun, tick - leftAt);
+                ASSERT_LT(tick - leftAt, 7200);
+            }
             ++samples;
         }
-        ASSERT_GT(static_cast<double>(exterior) / samples, 0.01);
-        ASSERT_LT(static_cast<double>(exterior) / samples, 0.25);
+        ASSERT_GT(static_cast<double>(exterior) / samples, 0.55);
+        ASSERT_LT(static_cast<double>(exterior) / samples, 0.90);
         ASSERT_GT(returned, 1);
+        ASSERT_GT(longestRun, 600);
     }
 }
 
-TEST_CASE(JuliaTour, RenderedRoutesMixDetailedAndBroaderJuliaShapes)
+TEST_CASE(JuliaTour, RenderedRoutesRetainDetailInDisconnectedJuliaShapes)
 {
     Mandelbrot::MandelbrotEngine engine;
-    auto boundaryLength = [&](JuliaTour::Point c)
+    auto renderedDetail = [&](JuliaTour::Point c)
     {
         Mandelbrot::MandelbrotConfig config;
         config.width = config.height = 96;
@@ -175,19 +185,24 @@ TEST_CASE(JuliaTour, RenderedRoutesMixDetailedAndBroaderJuliaShapes)
         Mandelbrot::ResetJuliaView(config);
         std::vector<float> pixels;
         engine.Compute(config, pixels);
+        // Escaping Julia sets have no filled interior boundary to count. Measure
+        // their iteration bands and local contrast to catch flat exterior footage.
+        std::array<int, 500> histogram{};
+        for (float pixel : pixels)
+            if (pixel >= 0 && pixel < 500) ++histogram[static_cast<int>(pixel)];
+        const auto levels = std::count_if(histogram.begin(), histogram.end(), [](int count) { return count >= 3; });
         int transitions = 0;
         for (int y = 0; y < config.height - 1; ++y)
             for (int x = 0; x < config.width - 1; ++x)
             {
                 const auto i = static_cast<size_t>(y) * config.width + x;
-                transitions += (pixels[i] < 0) != (pixels[i + 1] < 0);
-                transitions += (pixels[i] < 0) != (pixels[i + config.width] < 0);
+                transitions += std::abs(pixels[i] - pixels[i + 1]) >= 2;
+                transitions += std::abs(pixels[i] - pixels[i + config.width]) >= 2;
             }
-        return transitions;
+        return std::pair{static_cast<int>(levels), transitions};
     };
-    const double centers = (boundaryLength(JuliaTour::Point(0.0)) + boundaryLength(JuliaTour::Point(-1.0))) * 0.5;
-    double detail = 0.0;
-    int rendered = 0, detailedShapes = 0, broaderShapes = 0;
+    int rendered = 0, exteriorFrames = 0, detailedExterior = 0, broaderShapes = 0;
+    int minLevels = 500, maxLevels = 0, exteriorLevels = 0;
     for (uint64_t seed : { 1, 42, 9127 })
     {
         JuliaTour tour;
@@ -196,18 +211,24 @@ TEST_CASE(JuliaTour, RenderedRoutesMixDetailedAndBroaderJuliaShapes)
         {
             const auto c = tour.Advance(1.0 / 60.0);
             if (frame % 300 != 0) continue;
-            const int length = boundaryLength(c);
-            detail += length;
-            detailedShapes += length > centers * 1.5;
-            broaderShapes += length < centers * 1.2;
+            const auto [levels, transitions] = renderedDetail(c);
+            if (!Locate(c).primary && CriticalOrbitEscapes(c))
+            {
+                ++exteriorFrames;
+                exteriorLevels += levels;
+                detailedExterior += levels >= 24 && transitions >= 500;
+            }
+            broaderShapes += levels < 20;
+            minLevels = std::min(minLevels, levels);
+            maxLevels = std::max(maxLevels, levels);
             ++rendered;
         }
     }
-    // Both detailed and broad forms should appear regularly; an average alone could
-    // pass for a route that stays near the edge throughout.
-    ASSERT_GT(static_cast<double>(detailedShapes) / rendered, 0.20);
-    ASSERT_GT(static_cast<double>(broaderShapes) / rendered, 0.20);
-    ASSERT_GT(detail / rendered, centers * 1.1);
+    ASSERT_GT(static_cast<double>(exteriorFrames) / rendered, 0.50);
+    ASSERT_GT(static_cast<double>(detailedExterior) / exteriorFrames, 0.80);
+    ASSERT_GT(static_cast<double>(exteriorLevels) / exteriorFrames, 30.0);
+    ASSERT_GT(broaderShapes, 0);
+    ASSERT_GT(maxLevels, minLevels * 2);
 }
 
 TEST_CASE(JuliaTour, InvalidTimesDoNotMoveAndLongDelaysCannotJump)
