@@ -21,6 +21,16 @@ namespace winrt::MandelbrotViewer::implementation
                 << std::setw(2) << tenths / 600 % 60 << L":" << std::setw(2) << tenths / 10 % 60 << L"." << tenths % 10;
             return hstring(text.str());
         }
+
+        std::wstring FormatMovieZoom(double zoom)
+        {
+            std::wostringstream ss;
+            if (zoom < 1e4)
+                ss << std::fixed << std::setprecision(1) << zoom << L"x";
+            else
+                ss << std::scientific << std::setprecision(2) << zoom << L"x";
+            return ss.str();
+        }
     }
 
     IAsyncAction MainWindow::OnExportMovieClick(IInspectable const&, RoutedEventArgs const&)
@@ -56,25 +66,47 @@ namespace winrt::MandelbrotViewer::implementation
             NumberBox duration; duration.Header(box_value(L"Duration (seconds)")); duration.Minimum(1); duration.Maximum(3600);
             duration.Value(30); duration.SmallChange(1); duration.SpinButtonPlacementMode(NumberBoxSpinButtonPlacementMode::Inline);
             settings.Children().Append(duration);
-            TextBox endZoom; endZoom.Header(box_value(L"End zoom (x)"));
-            std::wostringstream zoomText; zoomText << std::setprecision(12) << std::clamp(
-                m_zoomInDirection ? plan.start.zoom * 1000.0 : plan.start.zoom / 1000.0,
-                Mandelbrot::MandelbrotEngine::MinZoom, Mandelbrot::MandelbrotEngine::MaxZoom);
-            endZoom.Text(zoomText.str()); settings.Children().Append(endZoom);
+            ComboBox direction; direction.Header(box_value(L"Zoom direction")); direction.HorizontalAlignment(HorizontalAlignment::Stretch);
+            direction.Items().Append(box_value(L"Zoom in")); direction.Items().Append(box_value(L"Zoom out"));
+            direction.SelectedIndex(m_zoomInDirection ? 0 : 1); settings.Children().Append(direction);
+            Slider zoomSpeed;
+            zoomSpeed.Minimum(Mandelbrot::MinMovieZoomSpeed); zoomSpeed.Maximum(Mandelbrot::MaxMovieZoomSpeed); zoomSpeed.StepFrequency(0.1);
+            zoomSpeed.Value(std::clamp(m_zoomSpeed, Mandelbrot::MinMovieZoomSpeed, Mandelbrot::MaxMovieZoomSpeed));
+            settings.Children().Append(zoomSpeed);
+            TextBlock zoomSummary; zoomSummary.TextWrapping(TextWrapping::Wrap); settings.Children().Append(zoomSummary);
             CheckBox autoTarget; autoTarget.Content(box_value(L"Auto-Pick Target (zoom in)"));
-            const bool automatic = m_autoPickInterestingTarget && m_zoomInDirection;
+            const bool automatic = m_autoPickInterestingTarget && m_zoomInDirection && !plan.start.juliaSet;
             autoTarget.IsChecked(automatic); settings.Children().Append(autoTarget);
             TextBlock autoHelp; autoHelp.Text(L"Choose new detailed targets automatically as the zoom reaches uniform areas.");
             autoHelp.TextWrapping(TextWrapping::Wrap); settings.Children().Append(autoHelp);
             TextBox targetX; targetX.Header(box_value(L"Target center X")); targetX.Text(targetXText); settings.Children().Append(targetX);
             TextBox targetY; targetY.Header(box_value(L"Target center Y")); targetY.Text(targetYText); settings.Children().Append(targetY);
-            targetX.IsEnabled(!automatic); targetY.IsEnabled(!automatic);
-            const auto updateTargets = [targetX, targetY](IInspectable const& sender, RoutedEventArgs const&)
+            const double startZoom = plan.start.zoom;
+            const bool isJulia = plan.start.juliaSet;
+            const auto updateZoomAndTargets = [duration, direction, zoomSpeed, zoomSummary, autoTarget, targetX, targetY, startZoom, isJulia]()
             {
-                const bool manual = !sender.as<CheckBox>().IsChecked().GetBoolean();
+                const bool zoomIn = direction.SelectedIndex() == 0;
+                const double speed = std::clamp(std::round(zoomSpeed.Value() * 10.0) / 10.0,
+                    Mandelbrot::MinMovieZoomSpeed, Mandelbrot::MaxMovieZoomSpeed);
+                std::wostringstream speedHeader;
+                speedHeader << L"Zoom speed (" << std::fixed << std::setprecision(1) << speed << L"x)";
+                zoomSpeed.Header(box_value(speedHeader.str()));
+                const int secs = std::isfinite(duration.Value())
+                    ? std::clamp(static_cast<int>(std::floor(duration.Value())), 1, 3600) : 30;
+                const double previewEndZoom = Mandelbrot::MoviePlan::EndZoomForSpeed(startZoom, zoomIn, speed, secs);
+                zoomSummary.Text(hstring(L"Zoom range: " + FormatMovieZoom(startZoom) + L" \u2192 " + FormatMovieZoom(previewEndZoom)));
+                const bool canAutoTarget = zoomIn && !isJulia;
+                if (!canAutoTarget && autoTarget.IsChecked().GetBoolean()) autoTarget.IsChecked(false);
+                autoTarget.IsEnabled(canAutoTarget);
+                const bool manual = !canAutoTarget || !autoTarget.IsChecked().GetBoolean();
                 targetX.IsEnabled(manual); targetY.IsEnabled(manual);
             };
-            autoTarget.Checked(updateTargets); autoTarget.Unchecked(updateTargets);
+            updateZoomAndTargets();
+            duration.ValueChanged([updateZoomAndTargets](auto&&, auto&&) { updateZoomAndTargets(); });
+            direction.SelectionChanged([updateZoomAndTargets](auto&&, auto&&) { updateZoomAndTargets(); });
+            zoomSpeed.ValueChanged([updateZoomAndTargets](auto&&, auto&&) { updateZoomAndTargets(); });
+            autoTarget.Checked([updateZoomAndTargets](auto&&, auto&&) { updateZoomAndTargets(); });
+            autoTarget.Unchecked([updateZoomAndTargets](auto&&, auto&&) { updateZoomAndTargets(); });
             CheckBox motion; motion.Content(box_value(L"Smooth motion between frames")); motion.IsChecked(true); settings.Children().Append(motion);
             TextBlock errorText; errorText.TextWrapping(TextWrapping::Wrap); settings.Children().Append(errorText);
             ScrollViewer scroller; scroller.Content(settings); scroller.MaxHeight(510);
@@ -93,9 +125,11 @@ namespace winrt::MandelbrotViewer::implementation
                         duration.Value() != std::floor(duration.Value()))
                         throw std::invalid_argument("Enter a whole number of seconds.");
                     plan.seconds = static_cast<int>(duration.Value());
-                    size_t used{}; const std::wstring text(endZoom.Text()); plan.endZoom = std::stod(text, &used);
-                    if (used != text.size()) throw std::invalid_argument("Enter a valid end zoom.");
-                    plan.autoRetarget = autoTarget.IsChecked().GetBoolean();
+                    const bool zoomIn = direction.SelectedIndex() == 0;
+                    const double speed = std::clamp(std::round(zoomSpeed.Value() * 10.0) / 10.0,
+                        Mandelbrot::MinMovieZoomSpeed, Mandelbrot::MaxMovieZoomSpeed);
+                    plan.SetZoomMotion(zoomIn, speed);
+                    plan.autoRetarget = zoomIn && !plan.start.juliaSet && autoTarget.IsChecked().GetBoolean();
                     plan.targetX = exactX; plan.targetY = exactY;
                     if (!plan.autoRetarget && !(exactXText && targetX.Text() == targetXText) && !Mandelbrot::BigFloat::TryParse(targetX.Text(), plan.targetX))
                         throw std::invalid_argument("Enter a valid target X coordinate.");
