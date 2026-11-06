@@ -15,6 +15,8 @@ namespace Mandelbrot
         {2560, 1440, L"1440p - 2560 x 1440"}, {3840, 2160, L"4K UHD - 3840 x 2160"},
         {7680, 4320, L"8K UHD - 7680 x 4320"} }};
     inline constexpr std::array<int, 6> MovieFrameRates{24, 25, 30, 48, 50, 60};
+    inline constexpr double MinMovieZoomSpeed = 0.2;
+    inline constexpr double MaxMovieZoomSpeed = 5.0;
 
     struct MoviePlan
     {
@@ -28,6 +30,22 @@ namespace Mandelbrot
         bool autoRetarget{};
         uint64_t targetSeed{1};
         uint32_t interior{0xFF000000};
+
+        static double EndZoomForSpeed(double startZoom, bool zoomIn, double speed, int seconds)
+        {
+            if (!std::isfinite(startZoom) || startZoom < MandelbrotEngine::MinZoom || startZoom > MandelbrotEngine::MaxZoom ||
+                !std::isfinite(speed) || speed < MinMovieZoomSpeed || speed > MaxMovieZoomSpeed || seconds < 1 || seconds > 3600)
+                throw std::invalid_argument("Invalid movie duration or zoom speed.");
+            const double octaves = (zoomIn ? 1.0 : -1.0) * speed * seconds;
+            if (octaves >= std::log2(MandelbrotEngine::MaxZoom / startZoom)) return MandelbrotEngine::MaxZoom;
+            if (octaves <= std::log2(MandelbrotEngine::MinZoom / startZoom)) return MandelbrotEngine::MinZoom;
+            return std::clamp(startZoom * std::exp2(octaves), MandelbrotEngine::MinZoom, MandelbrotEngine::MaxZoom);
+        }
+
+        void SetZoomMotion(bool zoomIn, double speed)
+        {
+            endZoom = EndZoomForSpeed(start.zoom, zoomIn, speed, seconds);
+        }
 
         // Prepared once on the export worker. CameraAt remains a pure lookup for all
         // render bands, shutter samples, and out-of-order frame requests afterwards.

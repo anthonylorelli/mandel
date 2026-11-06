@@ -127,6 +127,29 @@ TEST_CASE(Movie, ResolutionChoicesIncludeEightKAndValidateLimits)
     bool rejected = false; try { p.Validate(); } catch (const std::invalid_argument&) { rejected = true; } ASSERT_TRUE(rejected);
 }
 
+TEST_CASE(Movie, ZoomMotionComputesEndZoomFromDirectionSpeedAndDuration)
+{
+    auto p = SmallMovie(); p.start.zoom = 3.0; p.seconds = 4;
+    p.SetZoomMotion(true, 1.5);
+    ASSERT_EQ(3.0 * 64.0, p.endZoom);
+    ASSERT_EQ(p.endZoom, p.CameraAt(p.FrameCount() - 1).zoom);
+
+    p.start.zoom = 192.0; p.seconds = 3;
+    p.SetZoomMotion(false, 2.0);
+    ASSERT_EQ(3.0, p.endZoom);
+
+    ASSERT_EQ(MandelbrotEngine::MaxZoom, MoviePlan::EndZoomForSpeed(1.0, true, MaxMovieZoomSpeed, 3600));
+    ASSERT_EQ(MandelbrotEngine::MinZoom, MoviePlan::EndZoomForSpeed(1.0, false, MaxMovieZoomSpeed, 3600));
+
+    for (double badSpeed : {0.0, 0.1, 5.1, std::numeric_limits<double>::quiet_NaN()})
+    {
+        bool rejected = false;
+        try { MoviePlan::EndZoomForSpeed(1.0, true, badSpeed, 10); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        ASSERT_TRUE(rejected);
+    }
+}
+
 TEST_CASE(Movie, FixedSamplingIsRepeatableAndIndependentOfRenderBands)
 {
     const auto p = SmallMovie(); std::atomic<bool> cancel{};
