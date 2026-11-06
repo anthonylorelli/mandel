@@ -13,7 +13,8 @@ namespace Mandelbrot
     // Automatic plans must call PrepareAutoTargets after their settings are finalized.
     // MovieExporter prepares them on its worker before rendering the first frame.
     std::vector<uint32_t> RenderMovieFrame(const MoviePlan& plan, double frameIndex,
-        const std::atomic<bool>& cancel, const std::function<void(float)>& progress = {}, int bandRows = 64);
+        const std::atomic<bool>& cancel, const std::function<void(float)>& progress = {},
+        int bandRows = 64, MandelbrotEngine* sharedEngine = nullptr);
     MoviePreview MakeMoviePreview(const std::vector<uint32_t>& pixels, int width, int height, uint32_t frame);
 
     struct MovieProgress

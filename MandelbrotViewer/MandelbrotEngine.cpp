@@ -307,17 +307,24 @@ namespace Mandelbrot
             const int stride = std::clamp(renderStride, 1, 8);
             if (stride <= 1 || width < 8 || height < 8)
             {
-                // Expensive rows vary widely in cost; dispatch one at a time to avoid a long tail.
+                // Partition rows into 64-pixel horizontal segments so all cores share heavy scanlines
+                // and localized central zoom targets instead of stalling on a few long rows.
+                constexpr int kSegmentWidth = 64;
+                const int segmentsPerRow = std::max(1, (width + kSegmentWidth - 1) / kSegmentWidth);
+                const int totalSegments = height * segmentsPerRow;
                 #pragma omp parallel for schedule(dynamic, 1)
-                for (int py = 0; py < height; ++py)
+                for (int seg = 0; seg < totalSegments; ++seg)
                 {
                     if (cancelToken && cancelToken->load(std::memory_order_relaxed))
                     {
                         continue;
                     }
 
+                    const int py = seg / segmentsPerRow;
+                    const int pxStart = (seg % segmentsPerRow) * kSegmentWidth;
+                    const int pxEnd = std::min(width, pxStart + kSegmentWidth);
                     float* rowPtr = &outIterations[static_cast<size_t>(py) * width];
-                    for (int px = 0; px < width; ++px)
+                    for (int px = pxStart; px < pxEnd; ++px)
                     {
                         rowPtr[px] = evalPixel(px, py);
                     }
@@ -636,24 +643,41 @@ namespace Mandelbrot
             {
                 if (canceled()) continue;
                 size_t selected = 0;
+                const int y0 = std::max(0, y - 1), y1 = std::min(height - 1, y + 1);
                 for (int x = 0; x < width; ++x)
                 {
                     const size_t index = static_cast<size_t>(y) * width + x;
                     const float center = centers[index];
+                    const int x0 = std::max(0, x - 1), x1 = std::min(width - 1, x + 1);
+                    if (center < 0.0f)
+                    {
+                        bool boundary = false;
+                        for (int ny = y0; ny <= y1 && !boundary; ++ny)
+                        {
+                            const float* nRow = centers.data() + static_cast<size_t>(ny) * width;
+                            for (int nx = x0; nx <= x1; ++nx)
+                                if (nRow[nx] >= 0.0f) { boundary = true; break; }
+                        }
+                        weights[index] = boundary ? 1.0f : 0.0f;
+                        if (boundary) ++selected;
+                        continue;
+                    }
                     float variation = 0.0f;
                     bool boundary = false;
-                    for (int ny = std::max(0, y - 1); ny <= std::min(height - 1, y + 1); ++ny)
-                        for (int nx = std::max(0, x - 1); nx <= std::min(width - 1, x + 1); ++nx)
+                    for (int ny = y0; ny <= y1; ++ny)
+                    {
+                        const float* nRow = centers.data() + static_cast<size_t>(ny) * width;
+                        for (int nx = x0; nx <= x1; ++nx)
                         {
-                            const float neighbor = centers[static_cast<size_t>(ny) * width + nx];
-                            if ((center < 0.0f) != (neighbor < 0.0f)) boundary = true;
-                            if (center < 0.0f || neighbor < 0.0f) continue;
+                            const float neighbor = nRow[nx];
+                            if (neighbor < 0.0f) { boundary = true; continue; }
                             if (!SameBasin(center, neighbor, type) || (!smooth && center != neighbor))
                                 boundary = true;
                             const float a = type == FractalType::Newton ? std::fmod(center, 1000000.0f) : center;
                             const float b = type == FractalType::Newton ? std::fmod(neighbor, 1000000.0f) : neighbor;
                             variation = std::max(variation, std::abs(a - b) / (10.0f + std::min(a, b)));
                         }
+                    }
                     // A smooth transition avoids a second source of popping at the refinement
                     // threshold. The mask depends on local detail, never on render timings.
                     const float t = std::clamp((variation - 0.015f) / 0.065f, 0.0f, 1.0f);
@@ -665,25 +689,60 @@ namespace Mandelbrot
             }
             if (canceled()) return;
             for (int y = 0; y < height; ++y) rowOffsets[y + 1] += rowOffsets[y];
+            if (rowOffsets.back() == 0) return;
             samples->resize(rowOffsets.back());
 
-            #pragma omp parallel for schedule(dynamic, 1)
+            #pragma omp parallel for schedule(static)
             for (int y = 0; y < height; ++y)
             {
+                if (rowOffsets[y] == rowOffsets[y + 1]) continue;
                 size_t output = rowOffsets[y];
                 for (int x = 0; x < width; ++x)
                 {
-                    if (canceled()) break;
                     const size_t index = static_cast<size_t>(y) * width + x;
                     if (weights[index] <= 0.0f) continue;
                     auto& sample = (*samples)[output++];
                     sample.pixelIndex = static_cast<uint32_t>(index);
                     sample.weight = weights[index];
-                    sample.iterations = { evalPixel(x - 0.25, y - 0.25), evalPixel(x + 0.25, y - 0.25),
-                        evalPixel(x - 0.25, y + 0.25), evalPixel(x + 0.25, y + 0.25) };
                 }
             }
+
+            const intptr_t sampleCount = static_cast<intptr_t>(samples->size());
+            #pragma omp parallel for schedule(dynamic, 32)
+            for (intptr_t i = 0; i < sampleCount; ++i)
+            {
+                if (canceled()) continue;
+                auto& sample = (*samples)[i];
+                const int y = static_cast<int>(sample.pixelIndex / static_cast<uint32_t>(width));
+                const int x = static_cast<int>(sample.pixelIndex % static_cast<uint32_t>(width));
+                sample.iterations = { evalPixel(x - 0.25, y - 0.25), evalPixel(x + 0.25, y - 0.25),
+                    evalPixel(x - 0.25, y + 0.25), evalPixel(x + 0.25, y + 0.25) };
+            }
             if (canceled()) samples->clear();
+        }
+
+        void DisableCurrentThreadPowerThrottling()
+        {
+            THREAD_POWER_THROTTLING_STATE throttling{};
+            throttling.Version = THREAD_POWER_THROTTLING_CURRENT_VERSION;
+            throttling.ControlMask = THREAD_POWER_THROTTLING_EXECUTION_SPEED;
+            throttling.StateMask = 0;
+            SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, &throttling, sizeof(throttling));
+        }
+
+        void EnsureOpenMpAllCores()
+        {
+            thread_local bool initialized = false;
+            if (initialized) return;
+            initialized = true;
+
+            const int numProcs = std::max(1, omp_get_num_procs());
+            omp_set_dynamic(0);
+            omp_set_num_threads(numProcs);
+            #pragma omp parallel num_threads(numProcs)
+            {
+                DisableCurrentThreadPowerThrottling();
+            }
         }
     }
 
@@ -1631,6 +1690,7 @@ namespace Mandelbrot
     {
         if (subpixelSamples) subpixelSamples->clear();
         if (config.width <= 0 || config.height <= 0) return 0.0;
+        EnsureOpenMpAllCores();
         if (config.juliaSet) return ComputeJulia(config, outIterations, cancelToken, subpixelSamples);
 
         if (config.zoom >= DeepZoomThreshold)
@@ -1682,21 +1742,27 @@ namespace Mandelbrot
         if (m_executionMode == ExecutionMode::Automatic &&
             type == FractalType::Mandelbrot && config.renderStride <= 1)
         {
+            constexpr int kSegmentWidth = 64;
+            const int segmentsPerRow = std::max(1, (width + kSegmentWidth - 1) / kSegmentWidth);
+            const int totalSegments = height * segmentsPerRow;
             #pragma omp parallel for schedule(dynamic, 1)
-            for (int py = 0; py < height; ++py)
+            for (int seg = 0; seg < totalSegments; ++seg)
             {
                 if (cancelToken && cancelToken->load(std::memory_order_relaxed)) continue;
+                const int py = seg / segmentsPerRow;
+                const int pxStart = (seg % segmentsPerRow) * kSegmentWidth;
+                const int pxEnd = std::min(width, pxStart + kSegmentWidth);
                 float* row = outIterations.data() + static_cast<size_t>(py) * width;
                 const double cy = config.centerY + (halfH - (static_cast<double>(py) + 0.5)) * dy;
-                int px = 0;
-                for (; px + 1 < width; px += 2)
+                int px = pxStart;
+                for (; px + 1 < pxEnd; px += 2)
                 {
                     if (cancelToken && cancelToken->load(std::memory_order_relaxed)) break;
                     const double x0 = config.centerX + ((static_cast<double>(px) + 0.5) - halfW) * dx;
                     const double x1 = config.centerX + ((static_cast<double>(px + 1) + 0.5) - halfW) * dx;
                     EvalMandelbrotPair(x0, x1, cy, maxIter, smooth, row + px);
                 }
-                if (px < width) row[px] = evalStandardPixel(px, py);
+                if (px < pxEnd) row[px] = evalStandardPixel(px, py);
             }
         }
         else
@@ -2248,6 +2314,7 @@ namespace Mandelbrot
         double refPosY = centerPosY;
         int bestRefLen = 0;
         bool reusedUnescapedCache = false;
+        const double cacheSpanY = std::max(spanY, spanX * 2.0);
 
         // Check if we can reuse or incrementally extend the cached reference orbit from the previous frame
         if (m_hasCachedOrbit &&
@@ -2260,7 +2327,7 @@ namespace Mandelbrot
 
             if (!m_cachedEscaped &&
                 std::abs(diffX) <= spanX * 0.40 &&
-                std::abs(diffY) <= spanY * 0.40)
+                std::abs(diffY) <= cacheSpanY * 0.40)
             {
                 if (maxIter > m_cachedMaxIter)
                 {
@@ -2289,7 +2356,7 @@ namespace Mandelbrot
             }
             else if (m_cachedEscaped &&
                      std::abs(diffX) <= spanX * 0.35 &&
-                     std::abs(diffY) <= spanY * 0.35 &&
+                     std::abs(diffY) <= cacheSpanY * 0.35 &&
                      m_cachedSearchZoom > 0.0 &&
                      clampedZoom >= m_cachedSearchZoom * 0.65 &&
                      clampedZoom <= m_cachedSearchZoom * 1.50)
@@ -2320,7 +2387,7 @@ namespace Mandelbrot
                 m_cachedActiveLimbs >= activeLimbs &&
                 !m_cachedOrbit.empty() &&
                 ((m_cachedRefX == centerX && m_cachedRefY == centerY) ||
-                 (std::abs(cachedDiffX) <= spanX * 0.30 && std::abs(cachedDiffY) <= spanY * 0.30)))
+                 (std::abs(cachedDiffX) <= spanX * 0.30 && std::abs(cachedDiffY) <= cacheSpanY * 0.30)))
             {
                 if (!m_cachedEscaped && maxIter > m_cachedMaxIter)
                 {
