@@ -225,6 +225,57 @@ TEST_CASE(MandelbrotEngine, Compute_Tricorn_Formula)
     ASSERT_TRUE(foundInside);
 }
 
+TEST_CASE(MandelbrotEngine, Compute_Celtic_Buffalo_Cubic_Phoenix_Formulas)
+{
+    MandelbrotEngine engine;
+    const FractalType newTypes[] = {
+        FractalType::Celtic,
+        FractalType::Buffalo,
+        FractalType::CubicMultibrot,
+        FractalType::Phoenix
+    };
+
+    for (FractalType type : newTypes)
+    {
+        MandelbrotConfig config;
+        config.fractalType = type;
+        config.width = 40;
+        config.height = 40;
+        config.maxIterations = 300;
+        config.smooth = true;
+
+        std::vector<float> iters;
+        if (type == FractalType::Phoenix)
+        {
+            // Overview contains both interior feather basins and high-iteration plumage
+            config.SetCenter(0.0, 0.0);
+            config.zoom = 1.0;
+            engine.Compute(config, iters);
+            bool foundInteriorOrPlume = false;
+            for (float v : iters)
+            {
+                if (v < 0.0f || v > 25.0f) { foundInteriorOrPlume = true; break; }
+            }
+            ASSERT_TRUE(foundInteriorOrPlume);
+        }
+        else
+        {
+            // Origin (0, 0) is inside Celtic, Buffalo, and CubicMultibrot
+            config.SetCenter(0.0, 0.0);
+            config.zoom = 5.0;
+            engine.Compute(config, iters);
+            ASSERT_EQ(-1.0f, iters[20 * 40 + 20]);
+        }
+
+        // Far exterior (3.0, 3.0) escapes quickly
+        config.SetCenter(3.0, 3.0);
+        config.zoom = 5.0;
+        engine.Compute(config, iters);
+        ASSERT_GT(iters[20 * 40 + 20], 0.0f);
+        ASSERT_LT(iters[20 * 40 + 20], 5.0f);
+    }
+}
+
 TEST_CASE(MandelbrotEngine, Compute_Newton_Roots)
 {
     MandelbrotEngine engine;
@@ -363,9 +414,10 @@ TEST_CASE(MandelbrotEngine, Bookmarks_NoBlankScreens)
             // NONE should be 100% black (the regression test for the user's issue!)
             if (insidePct >= 99.0)
             {
+                std::string narrowName;
+                for (wchar_t ch : bm.name) narrowName.push_back(static_cast<char>(ch));
                 std::ostringstream ss;
-                ss << "Bookmark renders as solid black: " << std::string(bm.name.length(), ' ');
-                for (size_t i = 0; i < bm.name.length(); ++i) ss.str().back() = static_cast<char>(bm.name[i]);
+                ss << "Bookmark renders as solid black (" << insidePct << "%): " << narrowName;
                 throw ::TestHarness::TestFailureException(ss.str(), __FILE__, __LINE__);
             }
 
@@ -376,10 +428,31 @@ TEST_CASE(MandelbrotEngine, Bookmarks_NoBlankScreens)
                 float maxV = *std::max_element(escaped.begin(), escaped.end());
                 if (maxV - minV < 0.5f)
                 {
+                    std::string narrowName;
+                    for (wchar_t ch : bm.name) narrowName.push_back(static_cast<char>(ch));
                     std::ostringstream ss;
-                    ss << "Bookmark renders as flat background with no fractal features: "
-                       << std::string(bm.name.length(), ' ');
-                    for (size_t i = 0; i < bm.name.length(); ++i) ss.str().back() = static_cast<char>(bm.name[i]);
+                    ss << "Bookmark renders as flat background with no fractal features: " << narrowName;
+                    throw ::TestHarness::TestFailureException(ss.str(), __FILE__, __LINE__);
+                }
+            }
+
+            // Zoomed-in bookmarks must not have most of the window filled by a flat exterior color area
+            if (bm.zoom > 2.0 && type != FractalType::Newton && !escaped.empty())
+            {
+                const float minV = *std::min_element(escaped.begin(), escaped.end());
+                int flatLowCount = 0;
+                for (float v : escaped)
+                {
+                    if (v < minV + 5.0f) ++flatLowCount;
+                }
+                const double flatLowPct = static_cast<double>(flatLowCount) / (w * h) * 100.0;
+                if (flatLowPct >= 60.0)
+                {
+                    std::string narrowName;
+                    for (wchar_t ch : bm.name) narrowName.push_back(static_cast<char>(ch));
+                    std::ostringstream ss;
+                    ss << "Bookmark has most of the window filled by a solid exterior color ("
+                       << flatLowPct << "%): " << narrowName;
                     throw ::TestHarness::TestFailureException(ss.str(), __FILE__, __LINE__);
                 }
             }
@@ -390,7 +463,7 @@ TEST_CASE(MandelbrotEngine, Bookmarks_NoBlankScreens)
 TEST_CASE(MandelbrotEngine, FractalTypeHelpers)
 {
     const auto& types = GetAllFractalTypes();
-    ASSERT_EQ(static_cast<size_t>(4), types.size());
+    ASSERT_EQ(static_cast<size_t>(8), types.size());
 
     for (auto type : types)
     {

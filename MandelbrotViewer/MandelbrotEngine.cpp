@@ -17,11 +17,15 @@ namespace Mandelbrot
     {
         switch (type)
         {
-        case FractalType::Mandelbrot:  return L"Mandelbrot Set";
-        case FractalType::BurningShip: return L"Burning Ship";
-        case FractalType::Tricorn:     return L"Tricorn (Mandelbar)";
-        case FractalType::Newton:      return L"Newton's Fractal";
-        default:                       return L"Unknown";
+        case FractalType::Mandelbrot:     return L"Mandelbrot Set";
+        case FractalType::BurningShip:    return L"Burning Ship";
+        case FractalType::Tricorn:        return L"Tricorn (Mandelbar)";
+        case FractalType::Celtic:         return L"Celtic Mandelbrot";
+        case FractalType::Buffalo:        return L"Buffalo Fractal";
+        case FractalType::CubicMultibrot: return L"Cubic Multibrot";
+        case FractalType::Phoenix:        return L"Phoenix Fractal";
+        case FractalType::Newton:         return L"Newton's Fractal";
+        default:                          return L"Unknown";
         }
     }
 
@@ -31,6 +35,10 @@ namespace Mandelbrot
             FractalType::Mandelbrot,
             FractalType::BurningShip,
             FractalType::Tricorn,
+            FractalType::Celtic,
+            FractalType::Buffalo,
+            FractalType::CubicMultibrot,
+            FractalType::Phoenix,
             FractalType::Newton
         };
         return types;
@@ -42,7 +50,7 @@ namespace Mandelbrot
             { L"Overview", L"Full view of the iconic Mandelbrot set", -0.75, 0.0, 1.0, 300 },
             { L"Seahorse Valley", L"Intricate spiral filaments connecting cardioid and bulb", -0.7436438870371587, 0.1318259042053119, 85000.0, 1000 },
             { L"Elephant Valley", L"Elephant trunk formations on the East side of main cardioid", 0.274, 0.482, 250.0, 500 },
-            { L"Triple Spiral", L"Hypnotic three-arm vortex of fractal energy", -0.088, 0.654, 1200.0, 800 },
+            { L"Triple Spiral", L"Hypnotic three-arm vortex of fractal energy", -0.088886, 0.654805, 1600.0, 800 },
             { L"Mini Mandelbrot Satellite", L"Self-similar satellite island along the primary spike", -1.768778833, -0.001738994, 30000.0, 1500 },
             { L"Scepter Valley", L"Branching candelabras and crowned antennae", -1.25066, 0.02012, 1000.0, 600 },
             { L"Deep Spiral Core", L"Deep zoom revealing dense cosmic spiral clusters", -0.7436438870371587, 0.1318259042053119, 500000.0, 2000 }
@@ -78,12 +86,60 @@ namespace Mandelbrot
             { L"Interlocking Lobe Vortex", L"Swirling vortex of interleaved color basins", -1.20, 0.20, 15.0, 200 }
         };
 
+        static const std::vector<BookmarkLocation> celticBookmarks = {
+            { L"Celtic Overview", L"Full view of the folded Celtic knotwork shield", -0.35, 0.0, 1.0, 300 },
+            { L"Braided Ribbon", L"Interwoven knotwork ribbons along the upper fold", -0.75, 0.12, 40.0, 600 },
+            { L"Western Shield Boss", L"Symmetrical spiked medallion on the western spearhead", -1.75, 0.0, 80.0, 800 },
+            { L"Crown Filigree", L"Ornate braided arches along the northern ridge", -0.76264658, 0.55803571, 35.0, 700 },
+            { L"Knotwork Spiral", L"Coiled spirals interlocking with folded creases", -1.2706251, 0.16593745, 60.0, 800 },
+            { L"Eastern Cusp", L"Sharp folded cusp where real-axis reflection meets", -0.10091822, -0.36870117, 25.0, 600 },
+            { L"Deep Celtic Medallion", L"Nested self-similar shield island deep in the spear", -0.75528991, 0.51689995, 400.0, 1200 }
+        };
+
+        static const std::vector<BookmarkLocation> buffaloBookmarks = {
+            { L"Buffalo Overview", L"Full silhouette of the horned Buffalo fractal", -0.45, 0.35, 1.0, 300 },
+            { L"Western Spine", L"Serrated dorsal ridge and miniature buffalo satellites", -1.76, 0.02, 60.0, 800 },
+            { L"Horn Tip Arch", L"Sweeping cathedral arches along the upper horn", 0.08179198, 1.0611132, 25.0, 600 },
+            { L"Forehead Filigree", L"Symmetrical folded lattice above the eastern cusp", 0.20870367, 0.90309527, 25.0, 600 },
+            { L"Lower Rib Web", L"Delicate ember webbing beneath the main body", -0.4743323, -0.32101934, 30.0, 700 },
+            { L"Twin Horn Valley", L"Deep cleft separating the primary and secondary horns", -1.4469982, 0.85565674, 45.0, 800 },
+            { L"Phantom Buffalo", L"Self-similar miniature buffalo embedded in the western needle", -1.5047967, 0.00089792, 400.0, 1200 }
+        };
+
+        static const std::vector<BookmarkLocation> cubicMultibrotBookmarks = {
+            { L"Cubic Overview", L"Twin-lobed symmetry of the degree-3 Multibrot set", 0.0, 0.0, 1.0, 300 },
+            { L"Northern Star", L"Four-fold star satellite crowning the upper antenna", -0.29520097, 0.68994895, 45.0, 800 },
+            { L"East Cusp Valley", L"Double seahorse spirals converging at the eastern pinch", 0.59173641, 0.47172444, 35.0, 700 },
+            { L"West Cusp Valley", L"Mirrored spiral canyon on the western cardioid pinch", -0.60583013, 0.48777918, 35.0, 700 },
+            { L"Upper Lobe Spiral", L"Hypnotic galaxy arms along the upper-right shoulder", 0.31423136, 0.6763531, 45.0, 800 },
+            { L"Southern Crown", L"Symmetric crystalline antenna at the southern pole", 0.31114628, -0.68133564, 50.0, 800 },
+            { L"Deep Cubic Satellite", L"Miniature twin-lobed Multibrot island on the northern spike", -0.15849872, 0.74878064, 300.0, 1200 }
+        };
+
+        static const std::vector<BookmarkLocation> phoenixBookmarks = {
+            { L"Phoenix Overview", L"Outspread feathered wings of Ushiki's Phoenix fractal", 0.0, 0.0, 1.0, 300 },
+            { L"Wingtip Plume", L"Layered feather barbs sweeping across the outer wing", -0.45, 0.25, 15.0, 500 },
+            { L"Feather Spiral", L"Coiled plumage vortex inside the right wing", 0.32, 0.18, 40.0, 800 },
+            { L"Phoenix Crest", L"Ornate crown feathers rising from the central body", 0.56697573, 0.11594143, 25.0, 600 },
+            { L"Tail Plume Filigree", L"Symmetrical tail feathers trailing below the core", -0.33037393, 0.07242102, 25.0, 600 },
+            { L"Inner Wing Vortex", L"Interlocking spiral quills along the primary wing joint", -0.46998201, -0.1845639, 40.0, 800 },
+            { L"Deep Plumage Rosette", L"Intricate self-similar feather rosette at high magnification", -0.31079524, 0.28984978, 250.0, 1200 }
+        };
+
         switch (type)
         {
         case FractalType::BurningShip:
             return burningShipBookmarks;
         case FractalType::Tricorn:
             return tricornBookmarks;
+        case FractalType::Celtic:
+            return celticBookmarks;
+        case FractalType::Buffalo:
+            return buffaloBookmarks;
+        case FractalType::CubicMultibrot:
+            return cubicMultibrotBookmarks;
+        case FractalType::Phoenix:
+            return phoenixBookmarks;
         case FractalType::Newton:
             return newtonBookmarks;
         case FractalType::Mandelbrot:
@@ -861,8 +917,12 @@ namespace Mandelbrot
             double zi = 0.0;
             double zr2 = 0.0;
             double zi2 = 0.0;
+            double prevZr = 0.0;
+            double prevZi = 0.0;
             double checkZr = 0.0;
             double checkZi = 0.0;
+            double checkPrevZr = 0.0;
+            double checkPrevZi = 0.0;
             int checkPeriod = 8;
             int stepsSinceCheck = 0;
             int iter = 0;
@@ -937,6 +997,109 @@ namespace Mandelbrot
                     }
                 }
                 break;
+
+            case FractalType::Celtic:
+                while (iter < maxIter && (zr2 + zi2) <= bailoutRadius2)
+                {
+                    zi = 2.0 * zr * zi + cy;
+                    zr = std::abs(zr2 - zi2) + cx;
+                    zr2 = zr * zr;
+                    zi2 = zi * zi;
+                    iter++;
+                    if (zr == checkZr && zi == checkZi)
+                    {
+                        iter = maxIter;
+                        break;
+                    }
+                    if (++stepsSinceCheck == checkPeriod)
+                    {
+                        checkZr = zr;
+                        checkZi = zi;
+                        stepsSinceCheck = 0;
+                        if (checkPeriod < 1024) checkPeriod <<= 1;
+                    }
+                }
+                break;
+
+            case FractalType::Buffalo:
+                while (iter < maxIter && (zr2 + zi2) <= bailoutRadius2)
+                {
+                    zi = -2.0 * std::abs(zr * zi) + cy;
+                    zr = std::abs(zr2 - zi2) + cx;
+                    zr2 = zr * zr;
+                    zi2 = zi * zi;
+                    iter++;
+                    if (zr == checkZr && zi == checkZi)
+                    {
+                        iter = maxIter;
+                        break;
+                    }
+                    if (++stepsSinceCheck == checkPeriod)
+                    {
+                        checkZr = zr;
+                        checkZi = zi;
+                        stepsSinceCheck = 0;
+                        if (checkPeriod < 1024) checkPeriod <<= 1;
+                    }
+                }
+                break;
+
+            case FractalType::CubicMultibrot:
+                while (iter < maxIter && (zr2 + zi2) <= bailoutRadius2)
+                {
+                    const double nextZr = zr * (zr2 - 3.0 * zi2) + cx;
+                    zi = zi * (3.0 * zr2 - zi2) + cy;
+                    zr = nextZr;
+                    zr2 = zr * zr;
+                    zi2 = zi * zi;
+                    iter++;
+                    if (zr == checkZr && zi == checkZi)
+                    {
+                        iter = maxIter;
+                        break;
+                    }
+                    if (++stepsSinceCheck == checkPeriod)
+                    {
+                        checkZr = zr;
+                        checkZi = zi;
+                        stepsSinceCheck = 0;
+                        if (checkPeriod < 1024) checkPeriod <<= 1;
+                    }
+                }
+                break;
+
+            case FractalType::Phoenix:
+                zr = cy;
+                zi = cx;
+                zr2 = zr * zr;
+                zi2 = zi * zi;
+                while (iter < maxIter && (zr2 + zi2) <= bailoutRadius2)
+                {
+                    const double nextZr = zr2 - zi2 + 0.5667 - 0.5 * prevZr;
+                    const double nextZi = 2.0 * zr * zi - 0.5 * prevZi;
+                    prevZr = zr;
+                    prevZi = zi;
+                    zr = nextZr;
+                    zi = nextZi;
+                    zr2 = zr * zr;
+                    zi2 = zi * zi;
+                    iter++;
+                    if (zr == checkZr && zi == checkZi && prevZr == checkPrevZr && prevZi == checkPrevZi)
+                    {
+                        iter = maxIter;
+                        break;
+                    }
+                    if (++stepsSinceCheck == checkPeriod)
+                    {
+                        checkZr = zr;
+                        checkZi = zi;
+                        checkPrevZr = prevZr;
+                        checkPrevZi = prevZi;
+                        stepsSinceCheck = 0;
+                        if (checkPeriod < 1024) checkPeriod <<= 1;
+                    }
+                }
+                break;
             }
 
             if (iter >= maxIter)
@@ -947,29 +1110,59 @@ namespace Mandelbrot
             if (smooth)
             {
                 int smoothIter = iter;
-                for (int extra = 0; extra < 3 && (zr2 + zi2) < 1e100; ++extra)
+                const double maxExtraMod2 = (type == FractalType::CubicMultibrot) ? 1e60 : 1e100;
+                for (int extra = 0; extra < 3 && (zr2 + zi2) < maxExtraMod2; ++extra)
                 {
                     if (type == FractalType::Mandelbrot)
                     {
                         zi = 2.0 * zr * zi + cy;
+                        zr = zr2 - zi2 + cx;
                     }
                     else if (type == FractalType::BurningShip)
                     {
                         zi = -2.0 * std::abs(zr * zi) + cy;
+                        zr = zr2 - zi2 + cx;
                     }
-                    else
+                    else if (type == FractalType::Tricorn)
                     {
                         zi = -2.0 * zr * zi + cy;
+                        zr = zr2 - zi2 + cx;
                     }
-                    zr = zr2 - zi2 + cx;
+                    else if (type == FractalType::Celtic)
+                    {
+                        zi = 2.0 * zr * zi + cy;
+                        zr = std::abs(zr2 - zi2) + cx;
+                    }
+                    else if (type == FractalType::Buffalo)
+                    {
+                        zi = -2.0 * std::abs(zr * zi) + cy;
+                        zr = std::abs(zr2 - zi2) + cx;
+                    }
+                    else if (type == FractalType::CubicMultibrot)
+                    {
+                        const double nextZr = zr * (zr2 - 3.0 * zi2) + cx;
+                        zi = zi * (3.0 * zr2 - zi2) + cy;
+                        zr = nextZr;
+                    }
+                    else // FractalType::Phoenix
+                    {
+                        const double nextZr = zr2 - zi2 + 0.5667 - 0.5 * prevZr;
+                        const double nextZi = 2.0 * zr * zi - 0.5 * prevZi;
+                        prevZr = zr;
+                        prevZi = zi;
+                        zr = nextZr;
+                        zi = nextZi;
+                    }
                     zr2 = zr * zr;
                     zi2 = zi * zi;
                     smoothIter++;
                 }
 
+                constexpr double invLn3 = 0.91023922662683739361; // 1.0 / ln(3)
+                const double invLnDegree = (type == FractalType::CubicMultibrot) ? invLn3 : invLn2;
                 const double mod2 = zr2 + zi2;
                 const double logZn = std::log(mod2) * 0.5;
-                const double nu = smoothIter + 1.0 - std::log(logZn) * invLn2;
+                const double nu = smoothIter + 1.0 - std::log(logZn) * invLnDegree;
                 return static_cast<float>(nu > 0.0 ? nu : 0.0);
             }
 
@@ -2263,6 +2456,15 @@ namespace Mandelbrot
 
             int len = startM;
             outEscaped = false;
+            BigFloat prevZx(0.0);
+            BigFloat prevZy(0.0);
+            const BigFloat phoenixC(0.5667);
+            const BigFloat phoenixHalf(0.5);
+            if (type == FractalType::Phoenix && startM == 0)
+            {
+                ioZx = cRefY;
+                ioZy = cRefX;
+            }
 
             for (int m = startM; m <= targetMaxIter; ++m)
             {
@@ -2301,10 +2503,38 @@ namespace Mandelbrot
                     ioZy = -twoZxy.Abs() + cRefY;
                     ioZx = Zx2 - Zy2 + cRefX;
                 }
-                else // FractalType::Tricorn
+                else if (type == FractalType::Tricorn)
                 {
                     ioZy = -twoZxy + cRefY;
                     ioZx = Zx2 - Zy2 + cRefX;
+                }
+                else if (type == FractalType::Celtic)
+                {
+                    ioZy = twoZxy + cRefY;
+                    ioZx = (Zx2 - Zy2).Abs() + cRefX;
+                }
+                else if (type == FractalType::Buffalo)
+                {
+                    ioZy = -twoZxy.Abs() + cRefY;
+                    ioZx = (Zx2 - Zy2).Abs() + cRefX;
+                }
+                else if (type == FractalType::CubicMultibrot)
+                {
+                    const BigFloat threeZx2 = Zx2 + Zx2 + Zx2;
+                    const BigFloat threeZy2 = Zy2 + Zy2 + Zy2;
+                    const BigFloat nextZx = ioZx.Mul(Zx2 - threeZy2, activeLimbs) + cRefX;
+                    const BigFloat nextZy = ioZy.Mul(threeZx2 - Zy2, activeLimbs) + cRefY;
+                    ioZx = nextZx;
+                    ioZy = nextZy;
+                }
+                else // FractalType::Phoenix
+                {
+                    const BigFloat nextZx = Zx2 - Zy2 + phoenixC - prevZx.Mul(phoenixHalf, activeLimbs);
+                    const BigFloat nextZy = twoZxy - prevZy.Mul(phoenixHalf, activeLimbs);
+                    prevZx = ioZx;
+                    prevZy = ioZy;
+                    ioZx = nextZx;
+                    ioZy = nextZy;
                 }
             }
             return len;
@@ -2327,7 +2557,8 @@ namespace Mandelbrot
 
             if (!m_cachedEscaped &&
                 std::abs(diffX) <= spanX * 0.40 &&
-                std::abs(diffY) <= cacheSpanY * 0.40)
+                std::abs(diffY) <= cacheSpanY * 0.40 &&
+                (type != FractalType::Phoenix || maxIter <= m_cachedMaxIter))
             {
                 if (maxIter > m_cachedMaxIter)
                 {
@@ -2386,6 +2617,7 @@ namespace Mandelbrot
                 m_cachedType == type &&
                 m_cachedActiveLimbs >= activeLimbs &&
                 !m_cachedOrbit.empty() &&
+                (type != FractalType::Phoenix || maxIter <= m_cachedMaxIter) &&
                 ((m_cachedRefX == centerX && m_cachedRefY == centerY) ||
                  (std::abs(cachedDiffX) <= spanX * 0.30 && std::abs(cachedDiffY) <= cacheSpanY * 0.30)))
             {
@@ -2458,8 +2690,10 @@ namespace Mandelbrot
                             const double dcx = (static_cast<double>(spx) - refPosX) * stepX;
                             if (dcx == 0.0 && dcy == 0.0) continue;
 
-                            double dx = 0.0;
-                            double dy = 0.0;
+                            double dx = (type == FractalType::Phoenix) ? dcy : 0.0;
+                            double dy = (type == FractalType::Phoenix) ? dcx : 0.0;
+                            double prevDx = 0.0;
+                            double prevDy = 0.0;
                             int m = 0;
                             int iter = 0;
 
@@ -2488,7 +2722,7 @@ namespace Mandelbrot
                                 }
 
                                 const double dz2 = dx * dx + dy * dy;
-                                if (m > 0 && mod2 < dz2)
+                                if (type != FractalType::Phoenix && m > 0 && mod2 < dz2)
                                 {
                                     dx = zx;
                                     dy = zy;
@@ -2514,10 +2748,44 @@ namespace Mandelbrot
                                     dx = nextDx;
                                     dy = nextDy;
                                 }
-                                else
+                                else if (type == FractalType::Tricorn)
                                 {
                                     const double nextDx = sx * dx - sy * dy + dcx;
                                     const double nextDy = -(sx * dy + sy * dx) + dcy;
+                                    dx = nextDx;
+                                    dy = nextDy;
+                                }
+                                else if (type == FractalType::Celtic)
+                                {
+                                    const double nextDx = DiffAbs(rx * rx - ry * ry, sx * dx - sy * dy) + dcx;
+                                    const double nextDy = sx * dy + sy * dx + dcy;
+                                    dx = nextDx;
+                                    dy = nextDy;
+                                }
+                                else if (type == FractalType::Buffalo)
+                                {
+                                    const double daX = DiffAbs(rx, dx);
+                                    const double daY = DiffAbs(ry, dy);
+                                    const double nextDx = DiffAbs(rx * rx - ry * ry, sx * dx - sy * dy) + dcx;
+                                    const double nextDy = -2.0 * (std::abs(rx) * daY + std::abs(ry) * daX + daX * daY) + dcy;
+                                    dx = nextDx;
+                                    dy = nextDy;
+                                }
+                                else if (type == FractalType::CubicMultibrot)
+                                {
+                                    const double pxTerm = (rx * rx - ry * ry) + (rx * zx - ry * zy) + (zx * zx - zy * zy);
+                                    const double pyTerm = 2.0 * rx * ry + (rx * zy + ry * zx) + 2.0 * zx * zy;
+                                    const double nextDx = pxTerm * dx - pyTerm * dy + dcx;
+                                    const double nextDy = pxTerm * dy + pyTerm * dx + dcy;
+                                    dx = nextDx;
+                                    dy = nextDy;
+                                }
+                                else // FractalType::Phoenix
+                                {
+                                    const double nextDx = sx * dx - sy * dy - 0.5 * prevDx;
+                                    const double nextDy = sx * dy + sy * dx - 0.5 * prevDy;
+                                    prevDx = dx;
+                                    prevDy = dy;
                                     dx = nextDx;
                                     dy = nextDy;
                                 }
@@ -2610,10 +2878,14 @@ namespace Mandelbrot
             const double dcx = (static_cast<double>(px) - refPosX) * stepX;
             double dx = 0.0;
             double dy = 0.0;
+            double prevDx = 0.0;
+            double prevDy = 0.0;
             int m = 0;
             int iter = 0;
             double escapedZx = 0.0;
             double escapedZy = 0.0;
+            double escapedPrevZx = 0.0;
+            double escapedPrevZy = 0.0;
             double escapedMod2 = 0.0;
 
             switch (type)
@@ -2631,47 +2903,10 @@ namespace Mandelbrot
             }
 
             case FractalType::BurningShip:
-                while (iter < maxIter)
-                {
-                    double rx = orbitPtr[m].x;
-                    double ry = orbitPtr[m].y;
-                    const double zx = rx + dx;
-                    const double zy = ry + dy;
-                    const double mod2 = zx * zx + zy * zy;
-
-                    if (mod2 > bailoutRadius2)
-                    {
-                        escapedZx = zx;
-                        escapedZy = zy;
-                        escapedMod2 = mod2;
-                        break;
-                    }
-
-                    const double dz2 = dx * dx + dy * dy;
-                    if (m == refLen || (m > 0 && mod2 < dz2))
-                    {
-                        dx = zx;
-                        dy = zy;
-                        m = 0;
-                        rx = 0.0;
-                        ry = 0.0;
-                    }
-
-                    const double sx = rx + zx;
-                    const double sy = ry + zy;
-                    const double daX = DiffAbs(rx, dx);
-                    const double daY = DiffAbs(ry, dy);
-                    const double nextDx = sx * dx - sy * dy + dcx;
-                    const double nextDy = -2.0 * (std::abs(rx) * daY + std::abs(ry) * daX + daX * daY) + dcy;
-                    dx = nextDx;
-                    dy = nextDy;
-                    m++;
-                    iter++;
-                }
-                break;
-
             case FractalType::Tricorn:
-            default:
+            case FractalType::Celtic:
+            case FractalType::Buffalo:
+            case FractalType::CubicMultibrot:
                 while (iter < maxIter)
                 {
                     double rx = orbitPtr[m].x;
@@ -2700,14 +2935,129 @@ namespace Mandelbrot
 
                     const double sx = rx + zx;
                     const double sy = ry + zy;
-                    const double nextDx = sx * dx - sy * dy + dcx;
-                    const double nextDy = -(sx * dy + sy * dx) + dcy;
-                    dx = nextDx;
-                    dy = nextDy;
+                    if (type == FractalType::BurningShip)
+                    {
+                        const double daX = DiffAbs(rx, dx);
+                        const double daY = DiffAbs(ry, dy);
+                        const double nextDx = sx * dx - sy * dy + dcx;
+                        const double nextDy = -2.0 * (std::abs(rx) * daY + std::abs(ry) * daX + daX * daY) + dcy;
+                        dx = nextDx;
+                        dy = nextDy;
+                    }
+                    else if (type == FractalType::Tricorn)
+                    {
+                        const double nextDx = sx * dx - sy * dy + dcx;
+                        const double nextDy = -(sx * dy + sy * dx) + dcy;
+                        dx = nextDx;
+                        dy = nextDy;
+                    }
+                    else if (type == FractalType::Celtic)
+                    {
+                        const double nextDx = DiffAbs(rx * rx - ry * ry, sx * dx - sy * dy) + dcx;
+                        const double nextDy = sx * dy + sy * dx + dcy;
+                        dx = nextDx;
+                        dy = nextDy;
+                    }
+                    else if (type == FractalType::Buffalo)
+                    {
+                        const double daX = DiffAbs(rx, dx);
+                        const double daY = DiffAbs(ry, dy);
+                        const double nextDx = DiffAbs(rx * rx - ry * ry, sx * dx - sy * dy) + dcx;
+                        const double nextDy = -2.0 * (std::abs(rx) * daY + std::abs(ry) * daX + daX * daY) + dcy;
+                        dx = nextDx;
+                        dy = nextDy;
+                    }
+                    else // FractalType::CubicMultibrot
+                    {
+                        const double pxTerm = (rx * rx - ry * ry) + (rx * zx - ry * zy) + (zx * zx - zy * zy);
+                        const double pyTerm = 2.0 * rx * ry + (rx * zy + ry * zx) + 2.0 * zx * zy;
+                        const double nextDx = pxTerm * dx - pyTerm * dy + dcx;
+                        const double nextDy = pxTerm * dy + pyTerm * dx + dcy;
+                        dx = nextDx;
+                        dy = nextDy;
+                    }
                     m++;
                     iter++;
                 }
                 break;
+
+            case FractalType::Phoenix:
+            default:
+            {
+                dx = dcy;
+                dy = dcx;
+                prevDx = 0.0;
+                prevDy = 0.0;
+                bool inPerturbation = true;
+                double zr = 0.0;
+                double zi = 0.0;
+                double prevZr = 0.0;
+                double prevZi = 0.0;
+
+                while (iter < maxIter)
+                {
+                    if (inPerturbation)
+                    {
+                        const double rx = orbitPtr[m].x;
+                        const double ry = orbitPtr[m].y;
+                        const double zx = rx + dx;
+                        const double zy = ry + dy;
+                        const double mod2 = zx * zx + zy * zy;
+
+                        if (mod2 > bailoutRadius2)
+                        {
+                            escapedZx = zx;
+                            escapedZy = zy;
+                            escapedPrevZx = (m > 0) ? (orbitPtr[m - 1].x + prevDx) : 0.0;
+                            escapedPrevZy = (m > 0) ? (orbitPtr[m - 1].y + prevDy) : 0.0;
+                            escapedMod2 = mod2;
+                            break;
+                        }
+
+                        if (m == refLen)
+                        {
+                            inPerturbation = false;
+                            zr = zx;
+                            zi = zy;
+                            prevZr = (m > 0) ? (orbitPtr[m - 1].x + prevDx) : 0.0;
+                            prevZi = (m > 0) ? (orbitPtr[m - 1].y + prevDy) : 0.0;
+                            continue;
+                        }
+
+                        const double sx = rx + zx;
+                        const double sy = ry + zy;
+                        const double nextDx = sx * dx - sy * dy - 0.5 * prevDx;
+                        const double nextDy = sx * dy + sy * dx - 0.5 * prevDy;
+                        prevDx = dx;
+                        prevDy = dy;
+                        dx = nextDx;
+                        dy = nextDy;
+                        m++;
+                        iter++;
+                    }
+                    else
+                    {
+                        const double mod2 = zr * zr + zi * zi;
+                        if (mod2 > bailoutRadius2)
+                        {
+                            escapedZx = zr;
+                            escapedZy = zi;
+                            escapedPrevZx = prevZr;
+                            escapedPrevZy = prevZi;
+                            escapedMod2 = mod2;
+                            break;
+                        }
+                        const double nextZr = zr * zr - zi * zi + 0.5667 - 0.5 * prevZr;
+                        const double nextZi = 2.0 * zr * zi - 0.5 * prevZi;
+                        prevZr = zr;
+                        prevZi = zi;
+                        zr = nextZr;
+                        zi = nextZi;
+                        iter++;
+                    }
+                }
+                break;
+            }
             }
 
             if (iter >= maxIter)
@@ -2724,33 +3074,65 @@ namespace Mandelbrot
                 const double cyApprox = refCyDouble + dcy;
                 double zr = escapedZx;
                 double zi = escapedZy;
+                double prevZr = escapedPrevZx;
+                double prevZi = escapedPrevZy;
                 double zr2 = zr * zr;
                 double zi2 = zi * zi;
                 int smoothIter = iter;
+                const double maxExtraMod2 = (type == FractalType::CubicMultibrot) ? 1e60 : 1e100;
 
-                for (int extra = 0; extra < 3 && (zr2 + zi2) < 1e100; ++extra)
+                for (int extra = 0; extra < 3 && (zr2 + zi2) < maxExtraMod2; ++extra)
                 {
                     if (type == FractalType::Mandelbrot)
                     {
                         zi = 2.0 * zr * zi + cyApprox;
+                        zr = zr2 - zi2 + cxApprox;
                     }
                     else if (type == FractalType::BurningShip)
                     {
                         zi = -2.0 * std::abs(zr * zi) + cyApprox;
+                        zr = zr2 - zi2 + cxApprox;
                     }
-                    else
+                    else if (type == FractalType::Tricorn)
                     {
                         zi = -2.0 * zr * zi + cyApprox;
+                        zr = zr2 - zi2 + cxApprox;
                     }
-                    zr = zr2 - zi2 + cxApprox;
+                    else if (type == FractalType::Celtic)
+                    {
+                        zi = 2.0 * zr * zi + cyApprox;
+                        zr = std::abs(zr2 - zi2) + cxApprox;
+                    }
+                    else if (type == FractalType::Buffalo)
+                    {
+                        zi = -2.0 * std::abs(zr * zi) + cyApprox;
+                        zr = std::abs(zr2 - zi2) + cxApprox;
+                    }
+                    else if (type == FractalType::CubicMultibrot)
+                    {
+                        const double nextZr = zr * (zr2 - 3.0 * zi2) + cxApprox;
+                        zi = zi * (3.0 * zr2 - zi2) + cyApprox;
+                        zr = nextZr;
+                    }
+                    else // FractalType::Phoenix
+                    {
+                        const double nextZr = zr2 - zi2 + 0.5667 - 0.5 * prevZr;
+                        const double nextZi = 2.0 * zr * zi - 0.5 * prevZi;
+                        prevZr = zr;
+                        prevZi = zi;
+                        zr = nextZr;
+                        zi = nextZi;
+                    }
                     zr2 = zr * zr;
                     zi2 = zi * zi;
                     smoothIter++;
                 }
 
+                constexpr double invLn3 = 0.91023922662683739361; // 1.0 / ln(3)
+                const double invLnDegree = (type == FractalType::CubicMultibrot) ? invLn3 : invLn2;
                 const double mod2 = zr2 + zi2;
                 const double logZn = std::log(mod2) * 0.5;
-                const double nu = smoothIter + 1.0 - std::log(logZn) * invLn2;
+                const double nu = smoothIter + 1.0 - std::log(logZn) * invLnDegree;
                 return static_cast<float>(nu > 0.0 ? nu : 0.0);
             }
 

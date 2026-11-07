@@ -11,6 +11,10 @@ A high-performance Windows desktop application built with native **C++/WinRT** a
   - **Mandelbrot Set**: $z_{n+1} = z_n^2 + c$ with fast cardioid and period-2 bulb checks.
   - **Burning Ship**: $z_{n+1} = (|\text{Re}(z_n)| + i|\text{Im}(z_n)|)^2 + c$, oriented upright with masts and rigging rising into view.
   - **Tricorn (Mandelbar)**: $z_{n+1} = (\bar{z}_n)^2 + c$, anti-holomorphic 3-cornered fractal.
+  - **Celtic Mandelbrot**: $z_{n+1} = |\text{Re}(z_n^2)| + i\,\text{Im}(z_n^2) + c$, folded quadratic knotwork and shield structures.
+  - **Buffalo Fractal**: $z_{n+1} = |\text{Re}(z_n^2)| - i\,|\text{Im}(z_n^2)| + c$, folded real and imaginary components producing horned silhouettes and arches.
+  - **Cubic Multibrot**: $z_{n+1} = z_n^3 + c$, degree-3 holomorphic fractal with twin-lobed symmetry and multi-armed spirals.
+  - **Phoenix Fractal**: $z_{n+1} = z_n^2 + 0.5667 - 0.5\,z_{n-1}$, Ushiki's two-step recurrence fractal with feathered wing plumage.
   - **Newton's Fractal ($z^3 - 1 = 0$)**: Multi-basin Newton-Raphson iteration with smooth quadratic convergence rate potential.
 - **Native C++ with OpenMP**: Multithreaded row-by-row scanning using dynamic scheduling.
 - **Continuous (Smooth) Potential Coloring**: Eliminates discrete step color banding across all fractals.
