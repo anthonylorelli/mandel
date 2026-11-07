@@ -159,6 +159,18 @@ TEST_CASE(Movie, FixedSamplingIsRepeatableAndIndependentOfRenderBands)
     ASSERT_EQ(first.size(), whole.size());
     for (size_t i = 0; i < first.size(); ++i)
         for (int shift : {0, 8, 16}) ASSERT_NEAR((first[i] >> shift) & 255, (whole[i] >> shift) & 255, 1);
+
+    auto deep = SmallMovie(); deep.start.SetCenter(-0.7436438870371587, 0.1318259042053119);
+    deep.targetX = deep.start.hpCenterX; deep.targetY = deep.start.hpCenterY;
+    deep.start.zoom = 1e15; deep.endZoom = 2e15; deep.start.maxIterations = 600;
+    MandelbrotEngine shared;
+    const auto deepFrame0 = RenderMovieFrame(deep, 0, cancel, {}, 6, &shared);
+    const auto deepFrame1 = RenderMovieFrame(deep, 1, cancel, {}, 6, &shared);
+    const auto deepWhole1 = RenderMovieFrame(deep, 1, cancel, {}, deep.height);
+    ASSERT_EQ(deepFrame0.size(), deepFrame1.size());
+    for (size_t i = 0; i < deepFrame1.size(); ++i)
+        for (int shift : {0, 8, 16}) ASSERT_NEAR((deepFrame1[i] >> shift) & 255, (deepWhole1[i] >> shift) & 255, 1);
+
     cancel = true; ASSERT_TRUE(RenderMovieFrame(p, 4, cancel).empty());
 }
 

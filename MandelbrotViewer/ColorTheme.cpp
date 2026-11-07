@@ -451,7 +451,7 @@ namespace Mandelbrot
         if (!subpixelSamples || subpixelSamples->empty()) return;
         static const LinearColorTables colorSpace;
         const intptr_t sampleCount = static_cast<intptr_t>(subpixelSamples->size());
-        #pragma omp parallel for schedule(static, 1024)
+        #pragma omp parallel for schedule(static, 64)
         for (intptr_t i = 0; i < sampleCount; ++i)
         {
             const auto& sample = (*subpixelSamples)[i];

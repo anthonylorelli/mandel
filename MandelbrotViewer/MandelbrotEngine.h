@@ -13,6 +13,10 @@ namespace Mandelbrot
         Mandelbrot = 0,
         BurningShip,
         Tricorn,
+        Celtic,
+        Buffalo,
+        CubicMultibrot,
+        Phoenix,
         Newton
     };
 

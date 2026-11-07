@@ -4,6 +4,9 @@
 #include <windows.h>
 #include "MovieExport.h"
 #include "MovieWriter.h"
+#include <condition_variable>
+#include <cstring>
+#include <exception>
 #include <filesystem>
 #include <system_error>
 
@@ -96,55 +99,71 @@ namespace Mandelbrot
     }
 
     std::vector<uint32_t> RenderMovieFrame(const MoviePlan& plan, double frameIndex,
-        const std::atomic<bool>& cancel, const std::function<void(float)>& progress, int bandRows)
+        const std::atomic<bool>& cancel, const std::function<void(float)>& progress,
+        int bandRows, MandelbrotEngine* sharedEngine)
     {
         plan.Validate();
         if (bandRows < 1) throw std::invalid_argument("Invalid movie render band size.");
         if (cancel.load(std::memory_order_relaxed)) return {};
         static const ColorSpace colors;
-        MandelbrotEngine engine;
+        MandelbrotEngine localEngine;
+        MandelbrotEngine& engine = sharedEngine ? *sharedEngine : localEngine;
         std::vector<uint32_t> output(static_cast<size_t>(plan.width) * plan.height), painted;
         std::vector<float> iterations;
+        std::vector<SubpixelSamples> subpixels;
         std::vector<std::array<float, 3>> accum;
         const int temporal = plan.motionSmoothing ? 2 : 1;
         for (int row = 0; row < plan.height; row += bandRows)
         {
             const int rows = std::min(bandRows, plan.height - row);
+            const int topHalo = row > 0 ? 1 : 0;
+            const int bottomHalo = (row + rows < plan.height) ? 1 : 0;
+            const int firstRow = row - topHalo;
+            const int bandHeight = rows + topHalo + bottomHalo;
             const size_t count = static_cast<size_t>(plan.width) * rows;
-            accum.assign(count, {}); painted.resize(count);
+            const size_t bandCount = static_cast<size_t>(plan.width) * bandHeight;
+            if (temporal > 1) accum.assign(count, {});
+            painted.resize(bandCount);
             for (int time = 0; time < temporal; ++time)
-                for (int spatial = 0; spatial < 4; ++spatial)
+            {
+                if (cancel.load(std::memory_order_relaxed)) return {};
+                const auto camera = plan.CameraAt(frameIndex + (temporal == 2 ? (time == 0 ? -.25 : .25) : 0));
+                auto band = camera;
+                band.height = bandHeight;
+                const BigFloat step(3.0 / camera.zoom / plan.width);
+                band.SetCenter(camera.hpCenterX,
+                    camera.hpCenterY + step.Mul(BigFloat((plan.height - bandHeight) * .5 - firstRow)));
+                engine.Compute(band, iterations, &cancel, &subpixels);
+                if (cancel.load(std::memory_order_relaxed)) return {};
+                // Halo rows provide complete 3x3 neighborhoods across band boundaries, making
+                // adaptive subpixel refinement and colors independent of render bands.
+                plan.theme.Recolor(iterations, painted.data(), bandCount, plan.frequency, plan.phase,
+                    plan.invert, plan.interior, band.fractalType, band.width, &subpixels, false);
+                const uint32_t* bandPixels = painted.data() + static_cast<size_t>(topHalo) * plan.width;
+                if (temporal == 1)
                 {
-                    if (cancel.load(std::memory_order_relaxed)) return {};
-                    // Same quarter-pixel grid and half-frame shutter on every frame.
-                    // No adaptive sample selection, changing stride, or temporal jitter.
-                    const auto camera = plan.CameraAt(frameIndex + (temporal == 2 ? (time == 0 ? -.25 : .25) : 0));
-                    auto band = camera;
-                    band.height = rows;
-                    const BigFloat step(3.0 / camera.zoom / plan.width);
-                    const double sx = spatial % 2 ? .25 : -.25;
-                    const double sy = spatial / 2 ? .25 : -.25;
-                    band.SetCenter(camera.hpCenterX + step.Mul(BigFloat(sx)),
-                        camera.hpCenterY + step.Mul(BigFloat((plan.height - rows) * .5 - row - sy)));
-                    engine.Compute(band, iterations, &cancel);
-                    if (cancel.load(std::memory_order_relaxed)) return {};
-                    // Explicit supersampling replaces neighbor-dependent palette filtering,
-                    // making colors independent of render bands and their boundaries.
-                    plan.theme.Recolor(iterations, painted.data(), count, plan.frequency, plan.phase,
-                        plan.invert, plan.interior, band.fractalType, band.width, nullptr, false);
+                    std::memcpy(output.data() + static_cast<size_t>(row) * plan.width,
+                        bandPixels, count * sizeof(uint32_t));
+                }
+                else
+                {
                     #pragma omp parallel for schedule(static)
                     for (intptr_t i = 0; i < static_cast<intptr_t>(count); ++i)
                         for (int channel = 0; channel < 3; ++channel)
-                            accum[i][channel] += colors.decode[(painted[i] >> (8 * channel)) & 255] / (4 * temporal);
-                    if (progress) progress(static_cast<float>(row + rows * ((time * 4 + spatial + 1.0) / (4 * temporal))) / plan.height);
+                            accum[i][channel] += colors.decode[(bandPixels[i] >> (8 * channel)) & 255] * 0.5f;
                 }
-            #pragma omp parallel for schedule(static)
-            for (intptr_t i = 0; i < static_cast<intptr_t>(count); ++i)
+                if (progress) progress(static_cast<float>(row + rows * ((time + 1.0) / temporal)) / plan.height);
+            }
+            if (temporal > 1)
             {
-                uint32_t color = 0xFF000000;
-                for (int channel = 0; channel < 3; ++channel)
-                    color |= static_cast<uint32_t>(colors.encode[static_cast<size_t>(std::clamp(accum[i][channel] * 4096 + .5f, 0.0f, 4096.0f))]) << (channel * 8);
-                output[static_cast<size_t>(row) * plan.width + i] = color;
+                #pragma omp parallel for schedule(static)
+                for (intptr_t i = 0; i < static_cast<intptr_t>(count); ++i)
+                {
+                    uint32_t color = 0xFF000000;
+                    for (int channel = 0; channel < 3; ++channel)
+                        color |= static_cast<uint32_t>(colors.encode[static_cast<size_t>(std::clamp(accum[i][channel] * 4096 + .5f, 0.0f, 4096.0f))]) << (channel * 8);
+                    output[static_cast<size_t>(row) * plan.width + i] = color;
+                }
             }
         }
         return output;
@@ -216,22 +235,106 @@ namespace Mandelbrot
             }
             {
                 MovieWriter writer(staging.wstring(), plan.width, plan.height, plan.fps);
-                auto lastPreview = std::chrono::steady_clock::now();
+                MandelbrotEngine engine;
+                struct PendingFrame { uint32_t frame{}; std::vector<uint32_t> pixels; };
+                std::mutex queueMutex;
+                std::condition_variable queueCv;
+                std::optional<PendingFrame> pending;
+                bool renderDone = false;
+                std::exception_ptr writerException;
+
+                std::thread encoderThread([&]()
+                {
+                    auto lastPreview = std::chrono::steady_clock::now();
+                    try
+                    {
+                        for (;;)
+                        {
+                            PendingFrame item;
+                            {
+                                std::unique_lock lock(queueMutex);
+                                queueCv.wait(lock, [&]
+                                {
+                                    return pending.has_value() || renderDone || m_cancel.load(std::memory_order_relaxed);
+                                });
+                                if (m_cancel.load(std::memory_order_relaxed)) break;
+                                if (!pending.has_value())
+                                {
+                                    if (renderDone) break;
+                                    continue;
+                                }
+                                item = std::move(*pending);
+                                pending.reset();
+                            }
+                            queueCv.notify_one();
+
+                            ThrowIfCanceled(m_cancel);
+                            writer.WriteFrame(item.pixels);
+                            ThrowIfCanceled(m_cancel);
+                            m_completed.store(item.frame + 1);
+                            const auto now = std::chrono::steady_clock::now();
+                            if (item.frame == 0 || item.frame + 1 == m_total || now - lastPreview >= std::chrono::seconds(15))
+                            {
+                                auto preview = MakeMoviePreview(item.pixels, plan.width, plan.height, item.frame + 1);
+                                { std::lock_guard lock(m_mutex); m_preview = std::move(preview); }
+                                lastPreview = now;
+                            }
+                        }
+                    }
+                    catch (...)
+                    {
+                        std::lock_guard lock(queueMutex);
+                        writerException = std::current_exception();
+                    }
+                    queueCv.notify_all();
+                });
+
+                struct EncoderGuard
+                {
+                    std::mutex& mutex;
+                    std::condition_variable& cv;
+                    bool& done;
+                    std::thread& thread;
+                    ~EncoderGuard()
+                    {
+                        { std::lock_guard lock(mutex); done = true; }
+                        cv.notify_all();
+                        if (thread.joinable()) thread.join();
+                    }
+                } guard{queueMutex, queueCv, renderDone, encoderThread};
+
+                const int exportBandRows = std::clamp((1920 * 270) / std::max(1, plan.width), 64, plan.height);
                 for (uint32_t frame = 0; frame < m_total; ++frame)
                 {
                     ThrowIfCanceled(m_cancel);
-                    auto pixels = RenderMovieFrame(plan, frame, m_cancel, [this](float fraction) { m_fraction.store(fraction); });
-                    ThrowIfCanceled(m_cancel);
-                    writer.WriteFrame(pixels);
-                    m_fraction.store(0); m_completed.store(frame + 1);
-                    const auto now = std::chrono::steady_clock::now();
-                    if (frame == 0 || frame + 1 == m_total || now - lastPreview >= std::chrono::seconds(15))
                     {
-                        auto preview = MakeMoviePreview(pixels, plan.width, plan.height, frame + 1);
-                        { std::lock_guard lock(m_mutex); m_preview = std::move(preview); }
-                        lastPreview = now;
+                        std::lock_guard lock(queueMutex);
+                        if (writerException) std::rethrow_exception(writerException);
                     }
+                    auto pixels = RenderMovieFrame(plan, frame, m_cancel,
+                        [this](float fraction) { m_fraction.store(fraction); }, exportBandRows, &engine);
+                    ThrowIfCanceled(m_cancel);
+                    {
+                        std::unique_lock lock(queueMutex);
+                        queueCv.wait(lock, [&]
+                        {
+                            return !pending.has_value() || writerException != nullptr || m_cancel.load(std::memory_order_relaxed);
+                        });
+                        if (writerException) std::rethrow_exception(writerException);
+                        ThrowIfCanceled(m_cancel);
+                        pending = PendingFrame{frame, std::move(pixels)};
+                        m_fraction.store(0);
+                    }
+                    queueCv.notify_one();
                 }
+
+                {
+                    std::lock_guard lock(queueMutex);
+                    renderDone = true;
+                }
+                queueCv.notify_all();
+                if (encoderThread.joinable()) encoderThread.join();
+                if (writerException) std::rethrow_exception(writerException);
                 ThrowIfCanceled(m_cancel);
                 writer.Finish();
             }

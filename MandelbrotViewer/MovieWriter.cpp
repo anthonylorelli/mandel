@@ -78,6 +78,7 @@ namespace Mandelbrot
 
         std::vector<uint8_t> Encode(const std::vector<uint32_t>& pixels)
         {
+            Apartment threadApartment;
             ComPtr<IStream> stream;
             Check(CreateStreamOnHGlobal(nullptr, TRUE, &stream));
             ComPtr<IWICBitmapEncoder> encoder;
