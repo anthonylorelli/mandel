@@ -18,7 +18,7 @@ namespace winrt::MandelbrotViewer::implementation
     void MainWindow::OnJuliaViewToggled(IInspectable const&, RoutedEventArgs const&)
     {
         if (m_suppressEvents || m_isClosed) return;
-        m_juliaVisible = ShowJuliaToggle().IsOn() && m_config.fractalType == Mandelbrot::FractalType::Mandelbrot;
+        m_juliaVisible = ShowJuliaToggle().IsOn() && Mandelbrot::SupportsJuliaCompanion(m_config.fractalType);
         JuliaPane().Visibility(m_juliaVisible ? Visibility::Visible : Visibility::Collapsed);
         JuliaSettingsPanel().Visibility(m_juliaVisible ? Visibility::Visible : Visibility::Collapsed);
         UpdateJuliaLayout();
@@ -46,7 +46,8 @@ namespace winrt::MandelbrotViewer::implementation
                 });
             });
         }
-        if (!m_juliaInitialized) OnJuliaUseCenterClick(nullptr, nullptr);
+        if (!m_juliaInitialized || m_juliaConfig.fractalType != m_config.fractalType)
+            OnJuliaUseCenterClick(nullptr, nullptr);
         else RenderJulia();
         UpdateJuliaMarker();
     }
@@ -64,6 +65,14 @@ namespace winrt::MandelbrotViewer::implementation
     void MainWindow::UpdateJuliaLayout()
     {
         if (m_isClosed) return;
+        const bool burningShip = m_config.fractalType == Mandelbrot::FractalType::BurningShip;
+        JuliaHudTitleText().Text(burningShip ? L"BURNING SHIP JULIA" : L"JULIA SET");
+        MandelbrotReferenceText().Text(burningShip ? L"BURNING SHIP REFERENCE" : L"MANDELBROT REFERENCE");
+        JuliaInstructionsText().Text(burningShip
+            ? L"Click a point in Burning Ship to choose c. Drag either image to pan; scroll to zoom."
+            : L"Click a point in Mandelbrot to choose c. Drag either image to pan; scroll to zoom.");
+        JuliaUseCenterButton().Content(box_value(burningShip ? L"Use Burning Ship Center" : L"Use Mandelbrot Center"));
+
         const bool touring = m_juliaVisible && m_juliaTraveling;
         const bool split = m_juliaVisible && !touring;
         JuliaColumn().Width(GridLength{ split ? 1.0 : 0.0, split ? GridUnitType::Star : GridUnitType::Pixel });
@@ -111,6 +120,7 @@ namespace winrt::MandelbrotViewer::implementation
     {
         StopJuliaTravel(false);
         m_juliaInitialized = true;
+        m_juliaConfig.fractalType = m_config.fractalType;
         m_juliaConfig.juliaX = x;
         m_juliaConfig.juliaY = y;
         Mandelbrot::ResetJuliaView(m_juliaConfig);
@@ -170,12 +180,21 @@ namespace winrt::MandelbrotViewer::implementation
         JuliaSurface().ReleasePointerCaptures();
 
         // Keep the full route visible without changing the user's iteration baseline or palette.
-        m_config.SetCenter(-0.75, 0.0);
-        m_config.zoom = 1.0;
+        const auto& bookmarks = Mandelbrot::GetBookmarks(m_config.fractalType);
+        if (!bookmarks.empty())
+        {
+            m_config.SetCenter(bookmarks[0].centerX, bookmarks[0].centerY);
+            m_config.zoom = bookmarks[0].zoom;
+        }
+        else
+        {
+            m_config.SetCenter(-0.75, 0.0);
+            m_config.zoom = 1.0;
+        }
         m_config.renderStride = 1;
         m_config.edgeRefine = true;
         if (m_autoScaleIterations)
-            m_config.maxIterations = Mandelbrot::MandelbrotEngine::RecommendMaxIterations(1.0, m_config.fractalType, m_baseIterations);
+            m_config.maxIterations = Mandelbrot::MandelbrotEngine::RecommendMaxIterations(m_config.zoom, m_config.fractalType, m_baseIterations);
         m_suppressEvents = true;
         BookmarksComboBox().SelectedIndex(0);
         IterationsSlider().Value(m_config.maxIterations);
@@ -186,7 +205,8 @@ namespace winrt::MandelbrotViewer::implementation
 
         const auto& selected = m_juliaBitmap ? m_juliaDisplayedConfig : m_juliaConfig;
         const auto seed = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
-        const auto point = m_juliaTour.Start(selected.juliaX.ToDouble(), selected.juliaY.ToDouble(), seed);
+        const auto point = m_juliaTour.Start(selected.juliaX.ToDouble(), selected.juliaY.ToDouble(), seed, m_config.fractalType);
+        m_juliaConfig.fractalType = m_config.fractalType;
         m_juliaConfig.juliaX = Mandelbrot::BigFloat(point.real());
         m_juliaConfig.juliaY = Mandelbrot::BigFloat(point.imag());
         Mandelbrot::ResetJuliaView(m_juliaConfig);
@@ -298,7 +318,7 @@ namespace winrt::MandelbrotViewer::implementation
     {
         if (!m_juliaVisible) return;
         const int iterations = m_autoScaleIterations
-            ? Mandelbrot::MandelbrotEngine::RecommendMaxIterations(m_juliaConfig.zoom, Mandelbrot::FractalType::Mandelbrot, m_baseIterations)
+            ? Mandelbrot::MandelbrotEngine::RecommendMaxIterations(m_juliaConfig.zoom, m_juliaConfig.fractalType, m_baseIterations)
             : m_config.maxIterations;
         if (m_juliaConfig.maxIterations != iterations || m_juliaConfig.smooth != m_config.smooth) RenderJulia();
     }
@@ -307,7 +327,7 @@ namespace winrt::MandelbrotViewer::implementation
     {
         if (!m_juliaVisible || m_isClosed || m_movieExporting || !m_juliaRenderer || !m_juliaSized) return;
         m_juliaConfig.maxIterations = m_autoScaleIterations
-            ? Mandelbrot::MandelbrotEngine::RecommendMaxIterations(m_juliaConfig.zoom, Mandelbrot::FractalType::Mandelbrot, m_baseIterations)
+            ? Mandelbrot::MandelbrotEngine::RecommendMaxIterations(m_juliaConfig.zoom, m_juliaConfig.fractalType, m_baseIterations)
             : m_config.maxIterations;
         m_juliaConfig.smooth = m_config.smooth;
         if (!continueTravel)

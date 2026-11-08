@@ -1,4 +1,5 @@
 #pragma once
+#include "MandelbrotEngine.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -19,9 +20,22 @@ namespace Mandelbrot
         static constexpr double MaxParameterStep = 0.006;
         static constexpr double MaxMultiplierRadius = 1.16;
 
-        Point Start(double x, double y, uint64_t seed)
+        Point Start(double x, double y, uint64_t seed, FractalType fractalType = FractalType::Mandelbrot)
         {
             m_random.seed(seed);
+            m_fractalType = fractalType;
+            if (m_fractalType == FractalType::BurningShip)
+            {
+                const bool bounded = std::isfinite(x) && std::isfinite(y) &&
+                    x >= -2.0 && x <= 1.0 && y >= -0.8 && y <= 1.5;
+                m_fromPoint = bounded ? Point(x, y) : Point(-0.45, 0.5);
+                m_current = m_fromPoint;
+                m_inFlames = true;
+                m_flameStopsRemaining = std::uniform_int_distribution<int>(4, 6)(m_random);
+                m_flameSide = (m_fromPoint.real() < -0.5) ? -1 : 1;
+                PlanBurningShipSegment();
+                return m_current;
+            }
             const Point c(x, y);
             const double q = (x - 0.25) * (x - 0.25) + y * y;
             const bool bounded = std::isfinite(x) && std::isfinite(y) && std::abs(x) <= 2.0 && std::abs(y) <= 2.0;
@@ -90,6 +104,12 @@ namespace Mandelbrot
                 m_current = Evaluate(next);
                 seconds -= elapsed;
                 if (next < 1.0) break;
+                if (m_fractalType == FractalType::BurningShip)
+                {
+                    m_fromPoint = m_targetPoint;
+                    PlanBurningShipSegment();
+                    continue;
+                }
                 m_from = m_target;
                 if (m_crossing)
                 {
@@ -103,6 +123,145 @@ namespace Mandelbrot
         }
 
     private:
+        int BurningShipEscapeIterations(Point c, int maxIter = 512) const
+        {
+            double zr = 0.0, zi = 0.0;
+            for (int iter = 0; iter < maxIter; ++iter)
+            {
+                const double nextR = zr * zr - zi * zi + c.real();
+                zi = -2.0 * std::abs(zr * zi) + c.imag();
+                zr = nextR;
+                if (zr * zr + zi * zi > 4.0) return iter;
+            }
+            return -1;
+        }
+
+        Point RefineBurningShipRay(Point insideAnchor, Point outsideAnchor, bool wantInterior)
+        {
+            constexpr int kSteps = 18;
+            Point lo = insideAnchor, hi = outsideAnchor;
+            bool foundBoundary = false;
+            int bestEscapingIter = -1;
+            Point bestEscapingPt = 0.5 * (insideAnchor + outsideAnchor);
+
+            // Walk from outer sky inward so we catch the outer/middle flame curtains first.
+            int prevIter = BurningShipEscapeIterations(outsideAnchor);
+            Point prevPt = outsideAnchor;
+            for (int i = kSteps - 1; i >= 0; --i)
+            {
+                const double s = static_cast<double>(i) / kSteps;
+                const Point pt = insideAnchor + s * (outsideAnchor - insideAnchor);
+                const int iter = BurningShipEscapeIterations(pt);
+                if (iter >= 14 && iter > bestEscapingIter)
+                {
+                    bestEscapingIter = iter;
+                    bestEscapingPt = pt;
+                }
+                const bool prevHighOrIn = (prevIter < 0 || prevIter >= 36);
+                const bool curHighOrIn = (iter < 0 || iter >= 36);
+                if (curHighOrIn && !prevHighOrIn)
+                {
+                    lo = pt;
+                    hi = prevPt;
+                    foundBoundary = true;
+                    // 70% chance to stop at the first outer/middle flame curtain; 30% to continue deeper.
+                    if (std::bernoulli_distribution(0.70)(m_random)) break;
+                }
+                prevIter = iter;
+                prevPt = pt;
+            }
+
+            if (!foundBoundary)
+            {
+                return (bestEscapingIter >= 14 && !wantInterior) ? bestEscapingPt : insideAnchor + 0.35 * (outsideAnchor - insideAnchor);
+            }
+
+            Point bestExterior = hi;
+            int bestExtIter = BurningShipEscapeIterations(hi);
+            for (int step = 0; step < 12; ++step)
+            {
+                const Point mid = 0.5 * (lo + hi);
+                const int iter = BurningShipEscapeIterations(mid);
+                if (iter < 0)
+                {
+                    lo = mid;
+                }
+                else
+                {
+                    if (iter >= 16)
+                    {
+                        bestExterior = mid;
+                        bestExtIter = iter;
+                    }
+                    if (iter >= 64) hi = mid;
+                    else lo = mid;
+                }
+            }
+            if (wantInterior) return lo;
+            return (bestExtIter >= 14) ? bestExterior : hi;
+        }
+
+        void PlanBurningShipSegment()
+        {
+            if (m_flameStopsRemaining <= 0)
+            {
+                m_inFlames = !m_inFlames;
+                m_flameStopsRemaining = m_inFlames
+                    ? std::uniform_int_distribution<int>(4, 6)(m_random)
+                    : std::uniform_int_distribution<int>(2, 3)(m_random);
+            }
+            --m_flameStopsRemaining;
+
+            const bool wantInterior = std::bernoulli_distribution(0.18)(m_random);
+            if (m_inFlames)
+            {
+                // Explore the towering flames, sails, and central mast above the ship (y in [0.58, 1.08]).
+                // Along x = -0.50, z_2 = (-0.25 - y^2, 0) stays on the bounded real axis for all y <= 1.05,
+                // providing an exact interior mast spine from which rays sweep outward through the flames.
+                if (std::bernoulli_distribution(0.25)(m_random))
+                {
+                    // High central spire & rigging near (-0.50, 0.88..1.08)
+                    const double yIn = std::uniform_real_distribution<double>(0.84, 1.00)(m_random);
+                    const double xOut = -0.50 + std::uniform_real_distribution<double>(-0.22, 0.22)(m_random);
+                    const double yOut = std::uniform_real_distribution<double>(1.08, 1.18)(m_random);
+                    m_targetPoint = RefineBurningShipRay(Point(-0.50, yIn), Point(xOut, yOut), wantInterior);
+                }
+                else
+                {
+                    if (std::bernoulli_distribution(0.65)(m_random)) m_flameSide = -m_flameSide;
+                    const double y = std::uniform_real_distribution<double>(0.60, 1.02)(m_random);
+                    const double dy = std::uniform_real_distribution<double>(-0.05, 0.08)(m_random);
+                    const double reach = (m_flameSide < 0) ? 0.58 : 0.48;
+                    const Point insideAnchor(-0.50, y);
+                    const Point outsideAnchor(-0.50 + m_flameSide * reach, std::clamp(y + dy, 0.58, 1.12));
+                    m_targetPoint = RefineBurningShipRay(insideAnchor, outsideAnchor, wantInterior);
+                }
+            }
+            else
+            {
+                // Visit the upper hull shoreline, western deck/superstructure, or lower keel ribs.
+                const double x0 = std::uniform_real_distribution<double>(-1.18, 0.05)(m_random);
+                const bool upperDeck = std::bernoulli_distribution(0.70)(m_random);
+                const double yOut = upperDeck
+                    ? std::uniform_real_distribution<double>(0.36, 0.56)(m_random)
+                    : std::uniform_real_distribution<double>(-0.26, -0.10)(m_random);
+                const double dx = std::uniform_real_distribution<double>(-0.12, 0.12)(m_random);
+                m_targetPoint = RefineBurningShipRay(Point(x0, 0.0), Point(x0 + dx, yOut), wantInterior);
+            }
+
+            const Point delta = m_targetPoint - m_fromPoint;
+            const Point perp(-delta.imag(), delta.real());
+            const double arcSign = (m_fromPoint.real() + m_targetPoint.real() < -1.0) ? -1.0 : 1.0;
+            m_controlPoint = 0.5 * (m_fromPoint + m_targetPoint) + 0.16 * arcSign * perp;
+            if (m_inFlames)
+            {
+                m_controlPoint = Point(
+                    std::clamp(m_controlPoint.real(), -1.05, 0.05),
+                    std::max(0.58, m_controlPoint.imag()));
+            }
+            m_duration = std::uniform_real_distribution<double>(4.5, 6.5)(m_random) + 4.0 * std::abs(delta);
+            m_progress = 0.0;
+        }
         static Point InDisk(Point p, double radius)
         {
             const double length = std::abs(p);
@@ -164,12 +323,16 @@ namespace Mandelbrot
                 const double angle = NextDetailAngle();
                 const Point multiplier = std::polar(radius, angle);
                 const Point c = Parameter(multiplier);
-                Point z{};
+                double zr = 0.0, zi = 0.0;
                 bool escapes = false;
                 for (int iter = 0; iter < 512; ++iter)
                 {
-                    z = z * z + c;
-                    if (std::norm(z) > 4.0) { escapes = true; break; }
+                    const double nextR = zr * zr - zi * zi + c.real();
+                    zi = (m_fractalType == FractalType::BurningShip)
+                        ? (-2.0 * std::abs(zr * zi) + c.imag())
+                        : (2.0 * zr * zi + c.imag());
+                    zr = nextR;
+                    if (zr * zr + zi * zi > 4.0) { escapes = true; break; }
                 }
                 // Beyond one component's multiplier disk can still lie in an adjoining
                 // bulb. An escaping critical orbit confirms a truly exterior destination.
@@ -184,6 +347,14 @@ namespace Mandelbrot
 
         Point Evaluate(double progress) const
         {
+            if (m_fractalType == FractalType::BurningShip)
+            {
+                if (progress <= 0.0) return m_fromPoint;
+                if (progress >= 1.0) return m_targetPoint;
+                const double t = progress * progress * progress * (10.0 + progress * (-15.0 + 6.0 * progress));
+                const double u = 1.0 - t;
+                return u * u * m_fromPoint + 2.0 * u * t * m_controlPoint + t * t * m_targetPoint;
+            }
             if (progress <= 0.0) return Parameter(m_from);
             if (progress >= 1.0) return Parameter(m_target);
             // Vary radius and angle together for edge stretches and inward/outward detours.
@@ -249,5 +420,9 @@ namespace Mandelbrot
         double m_progress{}, m_duration{ 5.0 };
         int m_wanders{}, m_direction{ 1 }, m_exteriorStopsRemaining{};
         bool m_bulb{}, m_crossing{};
+        FractalType m_fractalType{ FractalType::Mandelbrot };
+        Point m_fromPoint{ -0.45, 0.5 }, m_controlPoint{}, m_targetPoint{};
+        int m_flameStopsRemaining{}, m_flameSide{ 1 };
+        bool m_inFlames{ true };
     };
 }

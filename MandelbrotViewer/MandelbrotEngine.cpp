@@ -1987,13 +1987,14 @@ namespace Mandelbrot
         const auto start = std::chrono::steady_clock::now();
         if (subpixelSamples) subpixelSamples->clear();
         if (config.width <= 0 || config.height <= 0) return 0.0;
-        if (config.fractalType != FractalType::Mandelbrot)
-            throw std::invalid_argument("Julia view requires the quadratic Mandelbrot formula.");
+        if (config.fractalType != FractalType::Mandelbrot && config.fractalType != FractalType::BurningShip)
+            throw std::invalid_argument("Julia view requires the Mandelbrot or Burning Ship formula.");
+        const bool burningShip = (config.fractalType == FractalType::BurningShip);
         const double cx = config.juliaX.ToDouble(), cy = config.juliaY.ToDouble();
         if (!std::isfinite(cx) || !std::isfinite(cy)) throw std::invalid_argument("Invalid Julia parameter.");
         const double zoom = std::clamp(config.zoom, MinZoom, MaxZoom);
         const double step = 3.0 / zoom / config.width;
-        // R >= 4 and R^2 >= 4|c| guarantees escape, including parameters outside Mandelbrot.
+        // R >= 4 and R^2 >= 4|c| guarantees escape, including parameters outside Mandelbrot/Burning Ship.
         const double bailout2 = std::max(16.0, 4.0 * std::hypot(cx, cy));
         if (!std::isfinite(bailout2)) throw std::invalid_argument("Julia parameter is too large.");
         const bool deep = zoom >= DeepZoomThreshold;
@@ -2009,7 +2010,7 @@ namespace Mandelbrot
             for (int extra = 0; extra < 3 && zr * zr + zi * zi < 1e100; ++extra)
             {
                 const double nextR = zr * zr - zi * zi + cx;
-                zi = 2.0 * zr * zi + cy;
+                zi = burningShip ? (-2.0 * std::abs(zr * zi) + cy) : (2.0 * zr * zi + cy);
                 zr = nextR;
                 ++iter;
             }
@@ -2036,7 +2037,15 @@ namespace Mandelbrot
                 if (BigFloat::CompareMagnitude(mag, limit) > 0) return finish(zr.ToDouble(), zi.ToDouble(), iter);
                 const auto product = zr.Mul(zi, limbs);
                 zr = r2 - i2 + config.juliaX;
-                zi = product + product + config.juliaY;
+                if (burningShip)
+                {
+                    const auto twoAbs = (product + product).Abs();
+                    zi = config.juliaY - twoAbs;
+                }
+                else
+                {
+                    zi = product + product + config.juliaY;
+                }
             }
             return -1.0f;
         };
@@ -2059,10 +2068,28 @@ namespace Mandelbrot
                 if (zr.Sqr(limbs).ToDouble() + zi.Sqr(limbs).ToDouble() > bailout2) break;
                 const auto nextR = zr.Sqr(limbs) - zi.Sqr(limbs) + config.juliaX;
                 const auto product = zr.Mul(zi, limbs);
-                zi = product + product + config.juliaY;
+                if (burningShip)
+                {
+                    const auto twoAbs = (product + product).Abs();
+                    zi = config.juliaY - twoAbs;
+                }
+                else
+                {
+                    zi = product + product + config.juliaY;
+                }
                 zr = nextR;
             }
         }
+        auto bigDiffAbs = [](const BigFloat& r, const BigFloat& d) -> BigFloat
+        {
+            if (r.IsZero()) return d.Abs();
+            const BigFloat sum = r + d;
+            if (!sum.IsZero() && sum.sign == r.sign)
+            {
+                return r.sign ? -d : d;
+            }
+            return sum.Abs() - r.Abs();
+        };
         // A critical point can square a visible displacement below double's exponent
         // range. Keep that displacement separate from Z so adding it to c cannot erase it.
         auto extendedPixel = [&](double px, double py) -> float
@@ -2079,8 +2106,18 @@ namespace Mandelbrot
                 if (BigFloat::CompareMagnitude(zr.Sqr(limbs) + zi.Sqr(limbs), limit) > 0)
                     return finish(zr.ToDouble(), zi.ToDouble(), iter);
                 const auto nextDx = (rx + rx + dx).Mul(dx, limbs) - (ry + ry + dy).Mul(dy, limbs);
-                const auto product = rx.Mul(dy, limbs) + ry.Mul(dx, limbs) + dx.Mul(dy, limbs);
-                dy = product + product;
+                if (burningShip)
+                {
+                    const auto daX = bigDiffAbs(rx, dx);
+                    const auto daY = bigDiffAbs(ry, dy);
+                    const auto product = rx.Abs().Mul(daY, limbs) + ry.Abs().Mul(daX, limbs) + daX.Mul(daY, limbs);
+                    dy = -(product + product);
+                }
+                else
+                {
+                    const auto product = rx.Mul(dy, limbs) + ry.Mul(dx, limbs) + dx.Mul(dy, limbs);
+                    dy = product + product;
+                }
                 dx = nextDx;
             }
             return -1.0f;
@@ -2101,7 +2138,7 @@ namespace Mandelbrot
                     if ((iter & 63) == 0 && canceled()) return -1.0f;
                     if (zr * zr + zi * zi > bailout2) return finish(zr, zi, iter);
                     const double nextR = zr * zr - zi * zi + cx;
-                    zi = 2.0 * zr * zi + cy;
+                    zi = burningShip ? (-2.0 * std::abs(zr * zi) + cy) : (2.0 * zr * zi + cy);
                     zr = nextR;
                     // Exact repetition proves this floating-point orbit cannot escape.
                     // No tolerance is used, so slowly escaping detail is retained.
@@ -2129,11 +2166,24 @@ namespace Mandelbrot
                 const double zr = ref.x + dx, zi = ref.y + dy;
                 const double mag = zr * zr + zi * zi;
                 if (std::abs(mag - bailout2) < 1e-12 * bailout2 ||
-                    (iter > 0 && mag < 1e-12 * (ref.x * ref.x + ref.y * ref.y + dx * dx + dy * dy)))
+                    (iter > 0 && mag < 1e-12 * (ref.x * ref.x + ref.y * ref.y + dx * dx + dy * dy)) ||
+                    (burningShip && iter > 0 &&
+                        (std::abs(zr) < 1e-6 * (std::abs(ref.x) + std::abs(dx)) ||
+                         std::abs(zi) < 1e-6 * (std::abs(ref.y) + std::abs(dy)))))
                     return exactPixel(px, py);
                 if (mag > bailout2) return finish(zr, zi, iter);
                 const double nextDx = (2.0 * ref.x + dx) * dx - (2.0 * ref.y + dy) * dy;
-                const double nextDy = 2.0 * (ref.x * dy + ref.y * dx + dx * dy);
+                double nextDy;
+                if (burningShip)
+                {
+                    const double daX = DiffAbs(ref.x, dx);
+                    const double daY = DiffAbs(ref.y, dy);
+                    nextDy = -2.0 * (std::abs(ref.x) * daY + std::abs(ref.y) * daX + daX * daY);
+                }
+                else
+                {
+                    nextDy = 2.0 * (ref.x * dy + ref.y * dx + dx * dy);
+                }
                 if (nextDx == 0.0 && nextDy == 0.0 && (dx != 0.0 || dy != 0.0)) return extendedPixel(px, py);
                 dy = nextDy;
                 dx = nextDx;
@@ -2141,8 +2191,8 @@ namespace Mandelbrot
             return -1.0f;
         };
         ExecuteRenderPass(config.width, config.height, config.renderStride, config.edgeRefine,
-            config.smooth, FractalType::Mandelbrot, outIterations, cancelToken, evalPixel);
-        RefineSubpixels(config.width, config.height, config.smooth, FractalType::Mandelbrot,
+            config.smooth, config.fractalType, outIterations, cancelToken, evalPixel);
+        RefineSubpixels(config.width, config.height, config.smooth, config.fractalType,
             outIterations, m_sampleWeights, subpixelSamples, cancelToken, evalPixel);
         return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     }
