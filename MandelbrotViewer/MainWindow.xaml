@@ -39,7 +39,7 @@
                             Background="#D012121A" BorderBrush="#33FFFFFF" BorderThickness="1">
                         <StackPanel Spacing="4">
                             <Grid>
-                                <TextBlock Text="JULIA SET" FontSize="11" FontWeight="SemiBold" CharacterSpacing="100" Foreground="#99FFFFFF" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="JuliaHudTitleText" Text="JULIA SET" FontSize="11" FontWeight="SemiBold" CharacterSpacing="100" Foreground="#99FFFFFF" VerticalAlignment="Center"/>
                                 <Button HorizontalAlignment="Right" Click="OnJuliaCloseClick" AutomationProperties.Name="Close Julia view"
                                         ToolTipService.ToolTip="Hide Julia View" Background="Transparent" BorderThickness="0" Padding="4">
                                     <FontIcon Glyph="&#xE711;" FontSize="11"/>
@@ -151,7 +151,7 @@
             <Border x:Name="MandelbrotReferenceLabel" Visibility="Collapsed" IsHitTestVisible="False"
                     HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8" Padding="8,4" CornerRadius="4"
                     Background="#D012121A">
-                <TextBlock Text="MANDELBROT REFERENCE" FontSize="10" FontWeight="SemiBold" Foreground="#DDFFFFFF"/>
+                <TextBlock x:Name="MandelbrotReferenceText" Text="MANDELBROT REFERENCE" FontSize="10" FontWeight="SemiBold" Foreground="#DDFFFFFF"/>
             </Border>
         </Grid>
         </Border>
@@ -194,9 +194,9 @@
                         <ToggleSwitch x:Name="ShowJuliaToggle" Header="Julia Companion" IsOn="False"
                                       OnContent="Side-by-side view" OffContent="Hidden" Toggled="OnJuliaViewToggled"/>
                         <StackPanel x:Name="JuliaSettingsPanel" Visibility="Collapsed" Spacing="8">
-                            <TextBlock Text="Click a point in Mandelbrot to choose c. Drag either image to pan; scroll to zoom."
+                            <TextBlock x:Name="JuliaInstructionsText" Text="Click a point in Mandelbrot to choose c. Drag either image to pan; scroll to zoom."
                                        TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
-                            <Button Content="Use Mandelbrot Center" HorizontalAlignment="Stretch" Click="OnJuliaUseCenterClick"/>
+                            <Button x:Name="JuliaUseCenterButton" Content="Use Mandelbrot Center" HorizontalAlignment="Stretch" Click="OnJuliaUseCenterClick"/>
                             <Button Content="Copy Julia Coordinates &amp; Config" HorizontalAlignment="Stretch" Click="OnJuliaCopyCoordsClick"/>
                             <ToggleButton x:Name="JuliaTravelButton" Content="Start Random Tour" HorizontalAlignment="Stretch" Click="OnJuliaTravelClick"/>
                             <TextBlock Text="Favors longer runs outside the main boundary, with occasional inward visits."

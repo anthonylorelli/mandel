@@ -244,3 +244,41 @@ TEST_CASE(JuliaTour, InvalidTimesDoNotMoveAndLongDelaysCannotJump)
         ASSERT_LE(std::abs(tour.Advance(1000.0) - previous), JuliaTour::MaxParameterStep + 1e-14);
     }
 }
+
+TEST_CASE(JuliaTour, BurningShipTourStaysContinuousAndVisitsExteriorParameters)
+{
+    JuliaTour tour;
+    const auto start = tour.Start(-0.45, 0.5, 42, Mandelbrot::FractalType::BurningShip);
+    ASSERT_NEAR(0.0, std::abs(start - JuliaTour::Point(-0.45, 0.5)), 1e-14);
+
+    auto previous = start;
+    int escapingStops = 0;
+    int flameSamples = 0;
+    int highFlameSamples = 0;
+    int hullSamples = 0;
+    for (int tick = 0; tick < 5400; ++tick)
+    {
+        const auto c = tour.Advance(1.0 / 60.0);
+        ASSERT_TRUE(std::isfinite(c.real()) && std::isfinite(c.imag()));
+        ASSERT_LE(std::abs(c - previous), JuliaTour::MaxParameterStep + 1e-14);
+        previous = c;
+        if (tick % 60 == 0)
+        {
+            if (c.imag() > 0.60) ++flameSamples;
+            if (c.imag() > 0.80) ++highFlameSamples;
+            if (c.imag() < 0.50) ++hullSamples;
+            double zr = 0.0, zi = 0.0;
+            for (int iter = 0; iter < 512; ++iter)
+            {
+                const double nextR = zr * zr - zi * zi + c.real();
+                zi = -2.0 * std::abs(zr * zi) + c.imag();
+                zr = nextR;
+                if (zr * zr + zi * zi > 4.0) { ++escapingStops; break; }
+            }
+        }
+    }
+    ASSERT_GT(escapingStops, 25);
+    ASSERT_GT(flameSamples, 25);
+    ASSERT_GT(highFlameSamples, 5);
+    ASSERT_GT(hullSamples, 10);
+}

@@ -1072,8 +1072,9 @@ namespace winrt::MandelbrotViewer::implementation
         {
             const auto type = types[index];
             m_config.fractalType = type;
-            JuliaOptionsPanel().Visibility(type == Mandelbrot::FractalType::Mandelbrot ? Visibility::Visible : Visibility::Collapsed);
-            if (type != Mandelbrot::FractalType::Mandelbrot) ShowJuliaToggle().IsOn(false);
+            const bool supportsJulia = Mandelbrot::SupportsJuliaCompanion(type);
+            JuliaOptionsPanel().Visibility(supportsJulia ? Visibility::Visible : Visibility::Collapsed);
+            if (!supportsJulia) ShowJuliaToggle().IsOn(false);
 
             const auto typeName = Mandelbrot::GetFractalTypeName(type);
             HudTitleText().Text(winrt::hstring(typeName));
@@ -1094,6 +1095,15 @@ namespace winrt::MandelbrotViewer::implementation
                 IterationsSlider().Value(bm.maxIterations);
                 IterationsValueText().Text(winrt::to_hstring(bm.maxIterations));
                 m_suppressEvents = false;
+            }
+
+            if (supportsJulia)
+            {
+                UpdateJuliaLayout();
+                if (m_juliaVisible)
+                {
+                    SelectJuliaParameter(m_config.hpCenterX, m_config.hpCenterY);
+                }
             }
 
             SyncTargetInputsFromCenter();

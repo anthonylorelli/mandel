@@ -21,9 +21,15 @@ namespace Mandelbrot
             view.height * 0.5 - (y - view.hpCenterY).ToDouble() * pixelsPerUnit };
     }
 
+    inline bool SupportsJuliaCompanion(FractalType type) noexcept
+    {
+        return type == FractalType::Mandelbrot || type == FractalType::BurningShip;
+    }
+
     inline void ResetJuliaView(MandelbrotConfig& view)
     {
-        view.fractalType = FractalType::Mandelbrot;
+        if (!SupportsJuliaCompanion(view.fractalType))
+            view.fractalType = FractalType::Mandelbrot;
         view.juliaSet = true;
         view.SetCenter(0.0, 0.0);
         // |z| > sqrt(|c|)+1 is an escape radius. Fit its disk in either viewport aspect.

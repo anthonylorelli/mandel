@@ -25,8 +25,11 @@ namespace Mandelbrot
         ss.imbue(std::locale::classic());
         ss << std::setprecision(std::numeric_limits<double>::max_digits10);
         const size_t decimals = CoordinateDecimalPlaces(config.zoom);
+        const std::wstring fractalName = config.juliaSet
+            ? (config.fractalType == FractalType::BurningShip ? L"Burning Ship Julia Set" : L"Julia Set")
+            : GetFractalTypeName(config.fractalType);
         ss << L"{\n"
-           << L"  \"fractalType\": \"" << (config.juliaSet ? L"Julia Set" : GetFractalTypeName(config.fractalType)) << L"\",\n"
+           << L"  \"fractalType\": \"" << fractalName << L"\",\n"
            << L"  \"centerX\": \"" << config.hpCenterX.ToWString(decimals) << L"\",\n"
            << L"  \"centerY\": \"" << config.hpCenterY.ToWString(decimals) << L"\",\n"
            << L"  \"zoom\": " << config.zoom << L",\n";

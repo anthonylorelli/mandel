@@ -243,3 +243,63 @@ TEST_CASE(Julia, BackgroundRendererPublishesOnlyTheLatestSelectedParameter)
     MandelbrotEngine{}.Compute(next, expected);
     ASSERT_TRUE(pixels == expected);
 }
+
+TEST_CASE(Julia, BurningShipJuliaMatchesFoldedOrbitsAndDeepZoom)
+{
+    ASSERT_TRUE(SupportsJuliaCompanion(FractalType::Mandelbrot));
+    ASSERT_TRUE(SupportsJuliaCompanion(FractalType::BurningShip));
+    ASSERT_FALSE(SupportsJuliaCompanion(FractalType::Tricorn));
+    ASSERT_FALSE(SupportsJuliaCompanion(FractalType::Newton));
+
+    auto burningShipOrbit = [](double zr, double zi, double cx, double cy, int maxIter) -> float
+    {
+        const double bailout = std::max(16.0, 4.0 * std::hypot(cx, cy));
+        for (int i = 0; i < maxIter; ++i)
+        {
+            if (zr * zr + zi * zi > bailout) return static_cast<float>(i);
+            const double next = zr * zr - zi * zi + cx;
+            zi = -2.0 * std::abs(zr * zi) + cy;
+            zr = next;
+        }
+        return -1.0f;
+    };
+
+    MandelbrotEngine engine;
+    for (auto parameter : { std::pair{-0.45, 0.5}, std::pair{-1.75, 0.03}, std::pair{0.0, 0.0} })
+    {
+        auto config = JuliaConfig(parameter.first, parameter.second);
+        config.fractalType = FractalType::BurningShip;
+        config.smooth = false;
+        std::vector<float> pixels;
+        engine.Compute(config, pixels);
+        for (int y = 0; y < config.height; ++y)
+            for (int x = 0; x < config.width; ++x)
+            {
+                double zr, zi;
+                MandelbrotEngine::ScreenToComplex(x, y, config.width, config.height, 0, 0, config.zoom, zr, zi);
+                ASSERT_EQ(burningShipOrbit(zr, zi, parameter.first, parameter.second, config.maxIterations),
+                    pixels[static_cast<size_t>(y) * config.width + x]);
+            }
+
+        ResetJuliaView(config);
+        ASSERT_TRUE(config.fractalType == FractalType::BurningShip);
+    }
+
+    // Deep zoom on Burning Ship Julia set with c = (0, 0) at the unit circle boundary
+    auto deepConfig = JuliaConfig(0.0, 0.0);
+    deepConfig.fractalType = FractalType::BurningShip;
+    deepConfig.SetCenter(1.0, 0.0);
+    deepConfig.zoom = 1e25;
+    deepConfig.width = 8;
+    deepConfig.height = 4;
+    deepConfig.maxIterations = 300;
+    std::vector<float> deepPixels;
+    engine.Compute(deepConfig, deepPixels);
+    for (int y = 0; y < deepConfig.height; ++y)
+        for (int x = 0; x < deepConfig.width; ++x)
+            ASSERT_EQ(x < deepConfig.width / 2, deepPixels[y * deepConfig.width + x] < 0);
+
+    ColorTheme theme;
+    const auto json = SerializeViewState(deepConfig, theme, 1, 0, false, 0xFF000000);
+    ASSERT_TRUE(json.find(L"\"fractalType\": \"Burning Ship Julia Set\"") != std::wstring::npos);
+}
