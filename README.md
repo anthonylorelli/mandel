@@ -94,7 +94,7 @@ A high-performance Windows desktop application built with native **C++/WinRT** a
 ### Prerequisites
 - Windows 11 (ARM64 or x64)
 - Visual Studio 2026 (with Desktop development with C++)
-- Windows App SDK 1.6 Runtime (installed via NuGet package references)
+- Windows App SDK 2.0 Runtime (installed via NuGet package references)
 
 ### Running the Application
 The executable binaries are pre-compiled and ready:

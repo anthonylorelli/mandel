@@ -2,10 +2,6 @@
 #include "App.xaml.h"
 #include "MainWindow.xaml.h"
 
-#if __has_include("App.xaml.g.hpp")
-#include "App.xaml.g.hpp"
-#endif
-
 namespace winrt::MandelbrotViewer::implementation
 {
     App::App()
