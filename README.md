@@ -93,8 +93,8 @@ A high-performance Windows desktop application built with native **C++/WinRT** a
 
 ### Prerequisites
 - Windows 11 (ARM64 or x64)
-- Visual Studio 2022 (with Desktop development with C++)
-- Windows App SDK 1.6 Runtime (installed via NuGet package references)
+- Visual Studio 2026 (with Desktop development with C++)
+- Windows App SDK 2.0 Runtime (installed via NuGet package references)
 
 ### Running the Application
 The executable binaries are pre-compiled and ready:
@@ -112,7 +112,7 @@ The executable binaries are pre-compiled and ready:
 ### Rebuilding from Source
 Using the Visual Studio Developer Command Prompt:
 ```cmd
-call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" arm64
+call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvarsall.bat" arm64
 msbuild MandelbrotViewer.sln /p:Configuration=Release /p:Platform=ARM64
 ```
 

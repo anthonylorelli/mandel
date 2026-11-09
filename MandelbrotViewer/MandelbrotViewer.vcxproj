@@ -27,7 +27,7 @@
     <ProjectName>MandelbrotViewer</ProjectName>
     <RootNamespace>MandelbrotViewer</RootNamespace>
     <DefaultLanguage>en-US</DefaultLanguage>
-    <MinimumVisualStudioVersion>16.0</MinimumVisualStudioVersion>
+    <MinimumVisualStudioVersion>18.0</MinimumVisualStudioVersion>
     <AppContainerApplication>false</AppContainerApplication>
     <AppxPackage>false</AppxPackage>
     <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
@@ -46,34 +46,42 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
 
   <!-- Package props MUST be imported before Microsoft.Cpp.props so CustomBeforeMicrosoftCommonTargets is set -->
   <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.Windows.CppWinRT.2.0.240405.15\build\native\Microsoft.Windows.CppWinRT.props" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.Windows.CppWinRT.2.0.240405.15\build\native\Microsoft.Windows.CppWinRT.props')" />
-  <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.Windows.SDK.BuildTools.10.0.26100.1742\build\Microsoft.Windows.SDK.BuildTools.props" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.Windows.SDK.BuildTools.10.0.26100.1742\build\Microsoft.Windows.SDK.BuildTools.props')" />
-  <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.1.6.250205002\build\native\Microsoft.WindowsAppSDK.props" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.1.6.250205002\build\native\Microsoft.WindowsAppSDK.props')" />
+  <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.Windows.SDK.BuildTools.10.0.26100.4654\build\Microsoft.Windows.SDK.BuildTools.props" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.Windows.SDK.BuildTools.10.0.26100.4654\build\Microsoft.Windows.SDK.BuildTools.props')" />
+  <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.Windows.SDK.BuildTools.MSIX.1.7.251221100\build\Microsoft.Windows.SDK.BuildTools.MSIX.props" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.Windows.SDK.BuildTools.MSIX.1.7.251221100\build\Microsoft.Windows.SDK.BuildTools.MSIX.props')" />
+  <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.Base.2.6.5\build\native\Microsoft.WindowsAppSDK.Base.props" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.Base.2.6.5\build\native\Microsoft.WindowsAppSDK.Base.props')" />
+  <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.DWrite.2.6.5\build\Microsoft.WindowsAppSDK.DWrite.props" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.DWrite.2.6.5\build\Microsoft.WindowsAppSDK.DWrite.props')" />
+  <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.Foundation.2.6.5\build\native\Microsoft.WindowsAppSDK.Foundation.props" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.Foundation.2.6.5\build\native\Microsoft.WindowsAppSDK.Foundation.props')" />
+  <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.WinUI.2.6.5\build\native\Microsoft.WindowsAppSDK.WinUI.props" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.WinUI.2.6.5\build\native\Microsoft.WindowsAppSDK.WinUI.props')" />
+  <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.InteractiveExperiences.2.6.5\build\native\Microsoft.WindowsAppSDK.InteractiveExperiences.props" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.InteractiveExperiences.2.6.5\build\native\Microsoft.WindowsAppSDK.InteractiveExperiences.props')" />
+  <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.Widgets.2.6.5\build\native\Microsoft.WindowsAppSDK.Widgets.props" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.Widgets.2.6.5\build\native\Microsoft.WindowsAppSDK.Widgets.props')" />
+  <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.Runtime.2.6.5\build\native\Microsoft.WindowsAppSDK.Runtime.props" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.Runtime.2.6.5\build\native\Microsoft.WindowsAppSDK.Runtime.props')" />
+  <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.2.6.5\build\native\Microsoft.WindowsAppSDK.props" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.2.6.5\build\native\Microsoft.WindowsAppSDK.props')" />
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
@@ -81,7 +89,9 @@
   <ImportGroup Label="PropertySheets">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
-  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Label="UserMacros">
+    <GeneratedFilesDir Condition="'$(GeneratedFilesDir)' == ''">$(IntDir)Generated Files\</GeneratedFilesDir>
+  </PropertyGroup>
 
   <ItemDefinitionGroup>
     <ClCompile>
@@ -118,9 +128,14 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ReferencePath Include="$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.1.6.250205002\lib\uap10.0\*.winmd" />
-    <ReferencePath Include="$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.1.6.250205002\lib\uap10.0.18362\*.winmd" />
-    <ReferencePath Include="$(MSBuildThisFileDirectory)..\packages\Microsoft.Web.WebView2.1.0.2651.64\lib\*.winmd" />
+    <ReferencePath Include="$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.Foundation.2.6.5\metadata\*.winmd" />
+    <ReferencePath Include="$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.WinUI.2.6.5\metadata\*.winmd" />
+    <ReferencePath Include="$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.Widgets.2.6.5\metadata\*.winmd" />
+    <ReferencePath Include="$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.InteractiveExperiences.2.6.5\metadata\10.0.18362.0\*.winmd" />
+    <Reference Include="$(MSBuildThisFileDirectory)..\packages\Microsoft.Web.WebView2.1.0.3719.77\lib\Microsoft.Web.WebView2.Core.winmd">
+      <Private>false</Private>
+    </Reference>
+    <ReferencePath Include="$(MSBuildThisFileDirectory)..\packages\Microsoft.Web.WebView2.1.0.3719.77\lib\*.winmd" />
     <WinMDReferenceToCompile Include="@(ReferencePath)" />
   </ItemGroup>
   <ItemGroup>
@@ -195,10 +210,18 @@
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
-    <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.Web.WebView2.1.0.2651.64\build\native\Microsoft.Web.WebView2.targets" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.Web.WebView2.1.0.2651.64\build\native\Microsoft.Web.WebView2.targets')" />
+
     <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.Windows.CppWinRT.2.0.240405.15\build\native\Microsoft.Windows.CppWinRT.targets" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.Windows.CppWinRT.2.0.240405.15\build\native\Microsoft.Windows.CppWinRT.targets')" />
-    <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.Windows.SDK.BuildTools.10.0.26100.1742\build\Microsoft.Windows.SDK.BuildTools.targets" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.Windows.SDK.BuildTools.10.0.26100.1742\build\Microsoft.Windows.SDK.BuildTools.targets')" />
-    <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.1.6.250205002\build\native\Microsoft.WindowsAppSDK.targets" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.1.6.250205002\build\native\Microsoft.WindowsAppSDK.targets')" />
+    <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.Windows.SDK.BuildTools.10.0.26100.4654\build\Microsoft.Windows.SDK.BuildTools.targets" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.Windows.SDK.BuildTools.10.0.26100.4654\build\Microsoft.Windows.SDK.BuildTools.targets')" />
+    <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.Windows.SDK.BuildTools.MSIX.1.7.251221100\build\Microsoft.Windows.SDK.BuildTools.MSIX.targets" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.Windows.SDK.BuildTools.MSIX.1.7.251221100\build\Microsoft.Windows.SDK.BuildTools.MSIX.targets')" />
+    <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.Base.2.6.5\build\native\Microsoft.WindowsAppSDK.Base.targets" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.Base.2.6.5\build\native\Microsoft.WindowsAppSDK.Base.targets')" />
+    <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.DWrite.2.6.5\build\Microsoft.WindowsAppSDK.DWrite.targets" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.DWrite.2.6.5\build\Microsoft.WindowsAppSDK.DWrite.targets')" />
+    <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.Foundation.2.6.5\build\native\Microsoft.WindowsAppSDK.Foundation.targets" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.Foundation.2.6.5\build\native\Microsoft.WindowsAppSDK.Foundation.targets')" />
+    <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.WinUI.2.6.5\build\native\Microsoft.WindowsAppSDK.WinUI.targets" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.WinUI.2.6.5\build\native\Microsoft.WindowsAppSDK.WinUI.targets')" />
+    <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.InteractiveExperiences.2.6.5\build\native\Microsoft.WindowsAppSDK.InteractiveExperiences.targets" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.InteractiveExperiences.2.6.5\build\native\Microsoft.WindowsAppSDK.InteractiveExperiences.targets')" />
+    <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.Widgets.2.6.5\build\native\Microsoft.WindowsAppSDK.Widgets.targets" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.Widgets.2.6.5\build\native\Microsoft.WindowsAppSDK.Widgets.targets')" />
+    <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.Runtime.2.6.5\build\native\Microsoft.WindowsAppSDK.Runtime.targets" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.Runtime.2.6.5\build\native\Microsoft.WindowsAppSDK.Runtime.targets')" />
+    <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.2.6.5\build\native\Microsoft.WindowsAppSDK.targets" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.2.6.5\build\native\Microsoft.WindowsAppSDK.targets')" />
   </ImportGroup>
   <Target Name="_RunXamlMarkupCompile" BeforeTargets="ClCompile" DependsOnTargets="MarkupCompilePass1;MarkupCompilePass2" />
   <Target Name="_SyncLegacyProjectOutDir" AfterTargets="Build" Condition="'$(OutDir)' != '$(ProjectDir)$(Platform)\$(Configuration)\'">
