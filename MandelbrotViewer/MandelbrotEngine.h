@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdint>
 #include "HighPrecision.h"
+#include "MandelbrotBla.h"
 #include "PixelSampling.h"
 
 namespace Mandelbrot
@@ -101,6 +102,12 @@ namespace Mandelbrot
             const std::atomic<bool>* cancelToken = nullptr,
             std::vector<SubpixelSamples>* subpixelSamples = nullptr);
 
+        // Prepares and caches the reference orbit and BLA table for a full-frame deep view
+        // before rendering horizontal movie bands.
+        void PrepareDeepReference(
+            const MandelbrotConfig& config,
+            const std::atomic<bool>* cancelToken = nullptr);
+
         // High-precision cursor-centered zoom without double cancellation
         static void ZoomViewport(
             MandelbrotConfig& config,
@@ -172,6 +179,9 @@ namespace Mandelbrot
         ExecutionMode m_executionMode{ ExecutionMode::Automatic };
         double ComputeJulia(const MandelbrotConfig& config, std::vector<float>& outIterations,
             const std::atomic<bool>* cancelToken, std::vector<SubpixelSamples>* subpixelSamples);
+        bool EnsureDeepReference(const MandelbrotConfig& config, const BigFloat& centerX,
+            const BigFloat& centerY, double& outRefPosX, double& outRefPosY, int& outRefLen,
+            const std::atomic<bool>* cancelToken);
         std::vector<float> m_sampleWeights;
         // Cached high-precision reference orbit across consecutive deep-zoom frames
         bool m_hasCachedOrbit{ false };
@@ -186,5 +196,10 @@ namespace Mandelbrot
         double m_cachedSearchZoom{ 0.0 };
         bool m_cachedEscaped{ false };
         std::vector<ComplexOrbitPt> m_cachedOrbit;
+        uint64_t m_cachedOrbitVersion{ 0 };
+        detail::BlaTable m_cachedBla{};
+        uint64_t m_cachedBlaVersion{ 0 };
+        int m_cachedBlaRefLen{ 0 };
+        double m_cachedBlaCMax{ 0.0 };
     };
 }
