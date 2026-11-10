@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main, dev ]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: Build & Test (${{ matrix.platform }} ${{ matrix.configuration }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: x64
+            configuration: Release
+            os: windows-latest
+            run_tests: true
+          - platform: ARM64
+            configuration: Release
+            os: windows-latest
+            run_tests: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/packages.config') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Restore NuGet packages
+        run: nuget restore MandelbrotViewer.sln -PackagesDirectory packages
+
+      - name: Ensure C++ ${{ matrix.platform }} build tools are installed
+        if: matrix.platform == 'ARM64'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * -Property installationPath
+          $arm64Cl = Get-ChildItem -Path "$vsPath\VC\Tools\MSVC" -Filter "cl.exe" -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "Hostx64\\arm64\\cl\.exe$" }
+          if (-not $arm64Cl) {
+            Write-Host "Installing MSVC ARM64 build tools..."
+            $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+            Start-Process -FilePath $installer -ArgumentList "modify --installPath `"$vsPath`" --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --add Microsoft.VisualStudio.Component.VC.Runtimes.ARM64.Spectre --quiet --norestart" -Wait -NoNewWindow
+          }
+
+      - name: Build solution (${{ matrix.platform }} | ${{ matrix.configuration }})
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * -Property installationPath
+
+          # Use v145 (VS 2026) if available on the runner; otherwise fall back to v143 (VS 2022)
+          $v145Props = Join-Path $vsPath "MSBuild\Microsoft\VC\v180\Platforms\${{ matrix.platform }}\PlatformToolsets\v145\Toolset.props"
+          $v170v145Props = Join-Path $vsPath "MSBuild\Microsoft\VC\v170\Platforms\${{ matrix.platform }}\PlatformToolsets\v145\Toolset.props"
+          if ((Test-Path $v145Props) -or (Test-Path $v170v145Props)) {
+            $toolsetArg = "/p:PlatformToolset=v145"
+          } else {
+            $toolsetArg = "/p:PlatformToolset=v143"
+          }
+
+          # Use Windows SDK 10.0.26100.0 if installed; otherwise fall back to the latest installed Windows 10/11 SDK
+          $sdkRoot = "${env:ProgramFiles(x86)}\Windows Kits\10\Include"
+          $targetSdk = "10.0.26100.0"
+          if (-not (Test-Path (Join-Path $sdkRoot $targetSdk))) {
+            $latestSdk = Get-ChildItem -Path $sdkRoot -Directory |
+              Where-Object { $_.Name -match '^10\.0\.\d+\.0$' } |
+              Sort-Object { [version]$_.Name } -Descending |
+              Select-Object -First 1
+            if ($latestSdk) {
+              $targetSdk = $latestSdk.Name
+            }
+          }
+
+          Write-Host "Building with $toolsetArg and WindowsTargetPlatformVersion=$targetSdk"
+          msbuild MandelbrotViewer.sln `
+            /p:Configuration=${{ matrix.configuration }} `
+            /p:Platform=${{ matrix.platform }} `
+            $toolsetArg `
+            /p:WindowsTargetPlatformVersion=$targetSdk `
+            /p:TargetPlatformVersion=$targetSdk `
+            /p:MultiProcessorCompilation=true `
+            /v:minimal
+
+      - name: Run unit tests (${{ matrix.platform }})
+        if: matrix.run_tests
+        shell: pwsh
+        run: |
+          $testExe = ".\${{ matrix.platform }}\${{ matrix.configuration }}\MandelbrotViewer.Tests.exe"
+          if (-not (Test-Path $testExe)) {
+            Write-Error "Test executable not found at $testExe"
+            exit 1
+          }
+          & $testExe
+
+      - name: Upload build artifacts (${{ matrix.platform }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: MandelbrotViewer-${{ matrix.platform }}-${{ matrix.configuration }}
+          path: |
+            ${{ matrix.platform }}/${{ matrix.configuration }}/MandelbrotViewer.exe
+            ${{ matrix.platform }}/${{ matrix.configuration }}/*.dll
+            ${{ matrix.platform }}/${{ matrix.configuration }}/*.pri
+            ${{ matrix.platform }}/${{ matrix.configuration }}/*.winmd
+          if-no-files-found: error
