@@ -111,8 +111,17 @@ namespace Mandelbrot
         std::vector<uint32_t> output(static_cast<size_t>(plan.width) * plan.height), painted;
         std::vector<float> iterations;
         std::vector<SubpixelSamples> subpixels;
-        std::vector<std::array<float, 3>> accum;
         const int temporal = plan.motionSmoothing ? 2 : 1;
+        std::array<MandelbrotConfig, 2> cameras{};
+        std::array<BigFloat, 2> steps{};
+        for (int time = 0; time < temporal; ++time)
+        {
+            cameras[time] = plan.CameraAt(frameIndex + (temporal == 2 ? (time == 0 ? -.25 : .25) : 0));
+            steps[time] = BigFloat(3.0 / cameras[time].zoom / plan.width);
+        }
+        engine.PrepareDeepReference(cameras[0], &cancel);
+        if (cancel.load(std::memory_order_relaxed)) return {};
+
         for (int row = 0; row < plan.height; row += bandRows)
         {
             const int rows = std::min(bandRows, plan.height - row);
@@ -122,17 +131,16 @@ namespace Mandelbrot
             const int bandHeight = rows + topHalo + bottomHalo;
             const size_t count = static_cast<size_t>(plan.width) * rows;
             const size_t bandCount = static_cast<size_t>(plan.width) * bandHeight;
-            if (temporal > 1) accum.assign(count, {});
             painted.resize(bandCount);
+            const BigFloat rowOffset((plan.height - bandHeight) * .5 - firstRow);
             for (int time = 0; time < temporal; ++time)
             {
                 if (cancel.load(std::memory_order_relaxed)) return {};
-                const auto camera = plan.CameraAt(frameIndex + (temporal == 2 ? (time == 0 ? -.25 : .25) : 0));
+                const auto& camera = cameras[time];
                 auto band = camera;
                 band.height = bandHeight;
-                const BigFloat step(3.0 / camera.zoom / plan.width);
                 band.SetCenter(camera.hpCenterX,
-                    camera.hpCenterY + step.Mul(BigFloat((plan.height - bandHeight) * .5 - firstRow)));
+                    camera.hpCenterY + steps[time].Mul(rowOffset));
                 engine.Compute(band, iterations, &cancel, &subpixels);
                 if (cancel.load(std::memory_order_relaxed)) return {};
                 // Halo rows provide complete 3x3 neighborhoods across band boundaries, making
@@ -140,30 +148,30 @@ namespace Mandelbrot
                 plan.theme.Recolor(iterations, painted.data(), bandCount, plan.frequency, plan.phase,
                     plan.invert, plan.interior, band.fractalType, band.width, &subpixels, false);
                 const uint32_t* bandPixels = painted.data() + static_cast<size_t>(topHalo) * plan.width;
-                if (temporal == 1)
+                uint32_t* outBand = output.data() + static_cast<size_t>(row) * plan.width;
+                if (time == 0)
                 {
-                    std::memcpy(output.data() + static_cast<size_t>(row) * plan.width,
-                        bandPixels, count * sizeof(uint32_t));
+                    std::memcpy(outBand, bandPixels, count * sizeof(uint32_t));
                 }
                 else
                 {
                     #pragma omp parallel for schedule(static)
                     for (intptr_t i = 0; i < static_cast<intptr_t>(count); ++i)
+                    {
+                        const uint32_t c0 = outBand[i];
+                        const uint32_t c1 = bandPixels[i];
+                        if (c0 == c1) continue;
+                        uint32_t color = 0xFF000000;
                         for (int channel = 0; channel < 3; ++channel)
-                            accum[i][channel] += colors.decode[(bandPixels[i] >> (8 * channel)) & 255] * 0.5f;
+                        {
+                            const float avg = (colors.decode[(c0 >> (8 * channel)) & 255] +
+                                               colors.decode[(c1 >> (8 * channel)) & 255]) * 0.5f;
+                            color |= static_cast<uint32_t>(colors.encode[static_cast<size_t>(std::clamp(avg * 4096 + .5f, 0.0f, 4096.0f))]) << (channel * 8);
+                        }
+                        outBand[i] = color;
+                    }
                 }
                 if (progress) progress(static_cast<float>(row + rows * ((time + 1.0) / temporal)) / plan.height);
-            }
-            if (temporal > 1)
-            {
-                #pragma omp parallel for schedule(static)
-                for (intptr_t i = 0; i < static_cast<intptr_t>(count); ++i)
-                {
-                    uint32_t color = 0xFF000000;
-                    for (int channel = 0; channel < 3; ++channel)
-                        color |= static_cast<uint32_t>(colors.encode[static_cast<size_t>(std::clamp(accum[i][channel] * 4096 + .5f, 0.0f, 4096.0f))]) << (channel * 8);
-                    output[static_cast<size_t>(row) * plan.width + i] = color;
-                }
             }
         }
         return output;

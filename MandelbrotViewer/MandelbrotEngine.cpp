@@ -679,11 +679,11 @@ namespace Mandelbrot
 
     namespace
     {
-        template <typename EvalPixelFn>
-        void RefineSubpixels(int width, int height, bool smooth, FractalType type,
+        template <typename EvalPairFn>
+        void RefineSubpixelsPairs(int width, int height, bool smooth, FractalType type,
             const std::vector<float>& centers, std::vector<float>& weights,
             std::vector<SubpixelSamples>* samples, const std::atomic<bool>* cancelToken,
-            EvalPixelFn&& evalPixel)
+            EvalPairFn&& evalPair)
         {
             if (!samples) return;
             samples->clear();
@@ -771,10 +771,24 @@ namespace Mandelbrot
                 auto& sample = (*samples)[i];
                 const int y = static_cast<int>(sample.pixelIndex / static_cast<uint32_t>(width));
                 const int x = static_cast<int>(sample.pixelIndex % static_cast<uint32_t>(width));
-                sample.iterations = { evalPixel(x - 0.25, y - 0.25), evalPixel(x + 0.25, y - 0.25),
-                    evalPixel(x - 0.25, y + 0.25), evalPixel(x + 0.25, y + 0.25) };
+                evalPair(x - 0.25, x + 0.25, y - 0.25, sample.iterations.data());
+                evalPair(x - 0.25, x + 0.25, y + 0.25, sample.iterations.data() + 2);
             }
             if (canceled()) samples->clear();
+        }
+
+        template <typename EvalPixelFn>
+        void RefineSubpixels(int width, int height, bool smooth, FractalType type,
+            const std::vector<float>& centers, std::vector<float>& weights,
+            std::vector<SubpixelSamples>* samples, const std::atomic<bool>* cancelToken,
+            EvalPixelFn&& evalPixel)
+        {
+            RefineSubpixelsPairs(width, height, smooth, type, centers, weights, samples, cancelToken,
+                [&](double x0, double x1, double y, float* out)
+                {
+                    out[0] = evalPixel(x0, y);
+                    out[1] = evalPixel(x1, y);
+                });
         }
 
         void DisableCurrentThreadPowerThrottling()
@@ -1973,8 +1987,25 @@ namespace Mandelbrot
                 evalStandardPixel);
         }
 
-        RefineSubpixels(width, height, smooth, type, outIterations, m_sampleWeights,
-            subpixelSamples, cancelToken, evalStandardPixel);
+#if defined(_M_ARM64)
+        if (m_executionMode == ExecutionMode::Automatic && type == FractalType::Mandelbrot)
+        {
+            RefineSubpixelsPairs(width, height, smooth, type, outIterations, m_sampleWeights,
+                subpixelSamples, cancelToken,
+                [&](double px0, double px1, double py, float outSamples[2])
+                {
+                    const double cy = config.centerY + (halfH - (py + 0.5)) * dy;
+                    const double x0 = config.centerX + ((px0 + 0.5) - halfW) * dx;
+                    const double x1 = config.centerX + ((px1 + 0.5) - halfW) * dx;
+                    EvalMandelbrotPair(x0, x1, cy, maxIter, smooth, outSamples);
+                });
+        }
+        else
+#endif
+        {
+            RefineSubpixels(width, height, smooth, type, outIterations, m_sampleWeights,
+                subpixelSamples, cancelToken, evalStandardPixel);
+        }
 
         const auto endTime = std::chrono::high_resolution_clock::now();
         const std::chrono::duration<double, std::milli> elapsed = endTime - startTime;
@@ -2487,439 +2518,18 @@ namespace Mandelbrot
         // High-precision reference orbit + hardware double perturbation with Zhuoran's dynamic rebasing,
         // cross-frame reference orbit caching, and fast sample-grid reference search when the center escapes early.
         constexpr double bailoutRadius2 = 16.0;
-        const double centerPosX = (static_cast<double>(width) - 1.0) * 0.5;
-        const double centerPosY = (static_cast<double>(height) - 1.0) * 0.5;
-
-        auto stepBigFloatOrbit = [&](const BigFloat& cRefX,
-                                     const BigFloat& cRefY,
-                                     int startM,
-                                     int targetMaxIter,
-                                     BigFloat& ioZx,
-                                     BigFloat& ioZy,
-                                     std::vector<ComplexOrbitPt>& outOrbit,
-                                     bool& outEscaped) -> int
+        double refPosX = 0.0;
+        double refPosY = 0.0;
+        int refLen = 0;
+        if (!EnsureDeepReference(config, centerX, centerY, refPosX, refPosY, refLen, cancelToken))
         {
-            if (static_cast<int>(outOrbit.size()) <= targetMaxIter)
-            {
-                outOrbit.resize(static_cast<size_t>(targetMaxIter) + 1);
-            }
-
-            int len = startM;
-            outEscaped = false;
-            BigFloat prevZx(0.0);
-            BigFloat prevZy(0.0);
-            const BigFloat phoenixC(0.5667);
-            const BigFloat phoenixHalf(0.5);
-            if (type == FractalType::Phoenix && startM == 0)
-            {
-                ioZx = cRefY;
-                ioZy = cRefX;
-            }
-
-            for (int m = startM; m <= targetMaxIter; ++m)
-            {
-                if (cancelToken && cancelToken->load(std::memory_order_relaxed))
-                {
-                    return len;
-                }
-
-                const double rx = ioZx.ToDouble();
-                const double ry = ioZy.ToDouble();
-                outOrbit[m] = { rx, ry };
-                len = m;
-
-                if (rx * rx + ry * ry > bailoutRadius2)
-                {
-                    outEscaped = true;
-                    break;
-                }
-                if (m == targetMaxIter)
-                {
-                    break;
-                }
-
-                const BigFloat Zx2 = ioZx.Sqr(activeLimbs);
-                const BigFloat Zy2 = ioZy.Sqr(activeLimbs);
-                const BigFloat Zxy = ioZx.Mul(ioZy, activeLimbs);
-                const BigFloat twoZxy = Zxy + Zxy;
-
-                if (type == FractalType::Mandelbrot)
-                {
-                    ioZy = twoZxy + cRefY;
-                    ioZx = Zx2 - Zy2 + cRefX;
-                }
-                else if (type == FractalType::BurningShip)
-                {
-                    ioZy = -twoZxy.Abs() + cRefY;
-                    ioZx = Zx2 - Zy2 + cRefX;
-                }
-                else if (type == FractalType::Tricorn)
-                {
-                    ioZy = -twoZxy + cRefY;
-                    ioZx = Zx2 - Zy2 + cRefX;
-                }
-                else if (type == FractalType::Celtic)
-                {
-                    ioZy = twoZxy + cRefY;
-                    ioZx = (Zx2 - Zy2).Abs() + cRefX;
-                }
-                else if (type == FractalType::Buffalo)
-                {
-                    ioZy = -twoZxy.Abs() + cRefY;
-                    ioZx = (Zx2 - Zy2).Abs() + cRefX;
-                }
-                else if (type == FractalType::CubicMultibrot)
-                {
-                    const BigFloat threeZx2 = Zx2 + Zx2 + Zx2;
-                    const BigFloat threeZy2 = Zy2 + Zy2 + Zy2;
-                    const BigFloat nextZx = ioZx.Mul(Zx2 - threeZy2, activeLimbs) + cRefX;
-                    const BigFloat nextZy = ioZy.Mul(threeZx2 - Zy2, activeLimbs) + cRefY;
-                    ioZx = nextZx;
-                    ioZy = nextZy;
-                }
-                else // FractalType::Phoenix
-                {
-                    const BigFloat nextZx = Zx2 - Zy2 + phoenixC - prevZx.Mul(phoenixHalf, activeLimbs);
-                    const BigFloat nextZy = twoZxy - prevZy.Mul(phoenixHalf, activeLimbs);
-                    prevZx = ioZx;
-                    prevZy = ioZy;
-                    ioZx = nextZx;
-                    ioZy = nextZy;
-                }
-            }
-            return len;
-        };
-
-        double refPosX = centerPosX;
-        double refPosY = centerPosY;
-        int bestRefLen = 0;
-        bool reusedUnescapedCache = false;
-        const double cacheSpanY = std::max(spanY, spanX * 2.0);
-
-        // Check if we can reuse or incrementally extend the cached reference orbit from the previous frame
-        if (m_hasCachedOrbit &&
-            m_cachedType == type &&
-            m_cachedActiveLimbs >= activeLimbs &&
-            !m_cachedOrbit.empty())
-        {
-            const double diffX = (m_cachedRefX - centerX).ToDouble();
-            const double diffY = (m_cachedRefY - centerY).ToDouble();
-
-            if (!m_cachedEscaped &&
-                std::abs(diffX) <= spanX * 0.40 &&
-                std::abs(diffY) <= cacheSpanY * 0.40 &&
-                (type != FractalType::Phoenix || maxIter <= m_cachedMaxIter))
-            {
-                if (maxIter > m_cachedMaxIter)
-                {
-                    const int targetExtendIter = maxIter + 32;
-                    bool escapedNow = false;
-                    m_cachedRefLen = stepBigFloatOrbit(
-                        m_cachedRefX,
-                        m_cachedRefY,
-                        m_cachedMaxIter,
-                        targetExtendIter,
-                        m_cachedEndZx,
-                        m_cachedEndZy,
-                        m_cachedOrbit,
-                        escapedNow);
-                    m_cachedMaxIter = targetExtendIter;
-                    m_cachedEscaped = escapedNow;
-                }
-
-                if (!m_cachedEscaped || m_cachedRefLen >= maxIter)
-                {
-                    refPosX = centerPosX + diffX / stepX;
-                    refPosY = centerPosY - diffY / stepY;
-                    bestRefLen = maxIter;
-                    reusedUnescapedCache = true;
-                }
-            }
-            else if (m_cachedEscaped &&
-                     std::abs(diffX) <= spanX * 0.35 &&
-                     std::abs(diffY) <= cacheSpanY * 0.35 &&
-                     m_cachedSearchZoom > 0.0 &&
-                     clampedZoom >= m_cachedSearchZoom * 0.65 &&
-                     clampedZoom <= m_cachedSearchZoom * 1.50)
-            {
-                // Reuse the best reference orbit already found for this exterior neighborhood across consecutive
-                // zoom frames so we don't re-run the 8x8 search and 1024-bit BigFloat orbits on every frame.
-                refPosX = centerPosX + diffX / stepX;
-                refPosY = centerPosY - diffY / stepY;
-                bestRefLen = std::min(m_cachedRefLen, maxIter);
-                reusedUnescapedCache = true;
-            }
+            return 0.0;
         }
 
-        if (!reusedUnescapedCache)
-        {
-            BigFloat bestRefCx = centerX;
-            BigFloat bestRefCy = centerY;
-            BigFloat bestEndZx(0.0);
-            BigFloat bestEndZy(0.0);
-            bool bestEscaped = false;
-
-            const double cachedDiffX = m_hasCachedOrbit ? (m_cachedRefX - centerX).ToDouble() : 1e300;
-            const double cachedDiffY = m_hasCachedOrbit ? (m_cachedRefY - centerY).ToDouble() : 1e300;
-
-            // Reuse the cached orbit as our starting reference if it is at the current center or still well within the central viewport
-            if (m_hasCachedOrbit &&
-                m_cachedType == type &&
-                m_cachedActiveLimbs >= activeLimbs &&
-                !m_cachedOrbit.empty() &&
-                (type != FractalType::Phoenix || maxIter <= m_cachedMaxIter) &&
-                ((m_cachedRefX == centerX && m_cachedRefY == centerY) ||
-                 (std::abs(cachedDiffX) <= spanX * 0.30 && std::abs(cachedDiffY) <= cacheSpanY * 0.30)))
-            {
-                if (!m_cachedEscaped && maxIter > m_cachedMaxIter)
-                {
-                    const int targetExtendIter = maxIter + 32;
-                    m_cachedRefLen = stepBigFloatOrbit(
-                        m_cachedRefX,
-                        m_cachedRefY,
-                        m_cachedMaxIter,
-                        targetExtendIter,
-                        m_cachedEndZx,
-                        m_cachedEndZy,
-                        m_cachedOrbit,
-                        m_cachedEscaped);
-                    m_cachedMaxIter = targetExtendIter;
-                }
-                bestRefCx = m_cachedRefX;
-                bestRefCy = m_cachedRefY;
-                refPosX = centerPosX + cachedDiffX / stepX;
-                refPosY = centerPosY - cachedDiffY / stepY;
-                bestRefLen = std::min(m_cachedRefLen, maxIter);
-                bestEndZx = m_cachedEndZx;
-                bestEndZy = m_cachedEndZy;
-                bestEscaped = (bestRefLen < maxIter) && m_cachedEscaped;
-            }
-            else
-            {
-                bestEndZx.SetZero();
-                bestEndZy.SetZero();
-                bestRefLen = stepBigFloatOrbit(
-                    centerX,
-                    centerY,
-                    0,
-                    maxIter,
-                    bestEndZx,
-                    bestEndZy,
-                    m_cachedOrbit,
-                    bestEscaped);
-            }
-
-            if (cancelToken && cancelToken->load(std::memory_order_relaxed))
-            {
-                return 0.0;
-            }
-
-            // If the center reference orbit escaped before maxIter, probe an 8x8 sample grid across the viewport
-            // (up to 2 upgrades) to find a reference pixel genuinely inside the |z| < 2 disk (mod2 < 4.0) at m == bestRefLen.
-            if (bestRefLen < maxIter && width >= 4 && height >= 4)
-            {
-                std::vector<ComplexOrbitPt> candidateOrbit(static_cast<size_t>(maxIter) + 1);
-                constexpr int gridN = 8;
-
-                for (int attempt = 0; attempt < 2 && bestRefLen < maxIter; ++attempt)
-                {
-                    int nextCandPx = -1;
-                    int nextCandPy = -1;
-                    double minMod2AtRefEnd = 4.0;
-                    const ComplexOrbitPt* orbitPtr = m_cachedOrbit.data();
-
-                    for (int gy = 0; gy < gridN; ++gy)
-                    {
-                        if (cancelToken && cancelToken->load(std::memory_order_relaxed)) return 0.0;
-                        const int spy = ((2 * gy + 1) * height) / (2 * gridN);
-                        const double dcy = (refPosY - static_cast<double>(spy)) * stepY;
-
-                        for (int gx = 0; gx < gridN; ++gx)
-                        {
-                            const int spx = ((2 * gx + 1) * width) / (2 * gridN);
-                            const double dcx = (static_cast<double>(spx) - refPosX) * stepX;
-                            if (dcx == 0.0 && dcy == 0.0) continue;
-
-                            double dx = (type == FractalType::Phoenix) ? dcy : 0.0;
-                            double dy = (type == FractalType::Phoenix) ? dcx : 0.0;
-                            double prevDx = 0.0;
-                            double prevDy = 0.0;
-                            int m = 0;
-                            int iter = 0;
-
-                            while (iter < maxIter)
-                            {
-                                const double rx = orbitPtr[m].x;
-                                const double ry = orbitPtr[m].y;
-                                const double zx = rx + dx;
-                                const double zy = ry + dy;
-                                const double mod2 = zx * zx + zy * zy;
-
-                                if (mod2 > bailoutRadius2)
-                                {
-                                    break;
-                                }
-
-                                if (m == bestRefLen)
-                                {
-                                    if (mod2 < minMod2AtRefEnd)
-                                    {
-                                        minMod2AtRefEnd = mod2;
-                                        nextCandPx = spx;
-                                        nextCandPy = spy;
-                                    }
-                                    break;
-                                }
-
-                                const double dz2 = dx * dx + dy * dy;
-                                if (type != FractalType::Phoenix && m > 0 && mod2 < dz2)
-                                {
-                                    dx = zx;
-                                    dy = zy;
-                                    m = 0;
-                                    continue;
-                                }
-
-                                const double sx = rx + zx;
-                                const double sy = ry + zy;
-                                if (type == FractalType::Mandelbrot)
-                                {
-                                    const double nextDx = sx * dx - sy * dy + dcx;
-                                    const double nextDy = sx * dy + sy * dx + dcy;
-                                    dx = nextDx;
-                                    dy = nextDy;
-                                }
-                                else if (type == FractalType::BurningShip)
-                                {
-                                    const double daX = DiffAbs(rx, dx);
-                                    const double daY = DiffAbs(ry, dy);
-                                    const double nextDx = sx * dx - sy * dy + dcx;
-                                    const double nextDy = -2.0 * (std::abs(rx) * daY + std::abs(ry) * daX + daX * daY) + dcy;
-                                    dx = nextDx;
-                                    dy = nextDy;
-                                }
-                                else if (type == FractalType::Tricorn)
-                                {
-                                    const double nextDx = sx * dx - sy * dy + dcx;
-                                    const double nextDy = -(sx * dy + sy * dx) + dcy;
-                                    dx = nextDx;
-                                    dy = nextDy;
-                                }
-                                else if (type == FractalType::Celtic)
-                                {
-                                    const double nextDx = DiffAbs(rx * rx - ry * ry, sx * dx - sy * dy) + dcx;
-                                    const double nextDy = sx * dy + sy * dx + dcy;
-                                    dx = nextDx;
-                                    dy = nextDy;
-                                }
-                                else if (type == FractalType::Buffalo)
-                                {
-                                    const double daX = DiffAbs(rx, dx);
-                                    const double daY = DiffAbs(ry, dy);
-                                    const double nextDx = DiffAbs(rx * rx - ry * ry, sx * dx - sy * dy) + dcx;
-                                    const double nextDy = -2.0 * (std::abs(rx) * daY + std::abs(ry) * daX + daX * daY) + dcy;
-                                    dx = nextDx;
-                                    dy = nextDy;
-                                }
-                                else if (type == FractalType::CubicMultibrot)
-                                {
-                                    const double pxTerm = (rx * rx - ry * ry) + (rx * zx - ry * zy) + (zx * zx - zy * zy);
-                                    const double pyTerm = 2.0 * rx * ry + (rx * zy + ry * zx) + 2.0 * zx * zy;
-                                    const double nextDx = pxTerm * dx - pyTerm * dy + dcx;
-                                    const double nextDy = pxTerm * dy + pyTerm * dx + dcy;
-                                    dx = nextDx;
-                                    dy = nextDy;
-                                }
-                                else // FractalType::Phoenix
-                                {
-                                    const double nextDx = sx * dx - sy * dy - 0.5 * prevDx;
-                                    const double nextDy = sx * dy + sy * dx - 0.5 * prevDy;
-                                    prevDx = dx;
-                                    prevDy = dy;
-                                    dx = nextDx;
-                                    dy = nextDy;
-                                }
-
-                                m++;
-                                iter++;
-                            }
-                        }
-                    }
-
-                    if (nextCandPx < 0)
-                    {
-                        break;
-                    }
-
-                    const double candOffsetX = (static_cast<double>(nextCandPx) - centerPosX) * stepX;
-                    const double candOffsetY = (centerPosY - static_cast<double>(nextCandPy)) * stepY;
-                    const BigFloat candCx = centerX + BigFloat(candOffsetX);
-                    const BigFloat candCy = centerY + BigFloat(candOffsetY);
-                    BigFloat candEndZx(0.0);
-                    BigFloat candEndZy(0.0);
-                    bool candEscaped = false;
-
-                    const int candLen = stepBigFloatOrbit(
-                        candCx,
-                        candCy,
-                        0,
-                        maxIter,
-                        candEndZx,
-                        candEndZy,
-                        candidateOrbit,
-                        candEscaped);
-
-                    if (cancelToken && cancelToken->load(std::memory_order_relaxed))
-                    {
-                        return 0.0;
-                    }
-
-                    if (candLen > bestRefLen)
-                    {
-                        m_cachedOrbit.swap(candidateOrbit);
-                        bestRefLen = candLen;
-                        refPosX = static_cast<double>(nextCandPx);
-                        refPosY = static_cast<double>(nextCandPy);
-                        bestRefCx = candCx;
-                        bestRefCy = candCy;
-                        bestEndZx = candEndZx;
-                        bestEndZy = candEndZy;
-                        bestEscaped = candEscaped;
-                    }
-                    else
-                    {
-                        break;
-                    }
-                }
-            }
-
-            m_hasCachedOrbit = true;
-            m_cachedType = type;
-            m_cachedRefX = bestRefCx;
-            m_cachedRefY = bestRefCy;
-            m_cachedEndZx = bestEndZx;
-            m_cachedEndZy = bestEndZy;
-            m_cachedActiveLimbs = activeLimbs;
-            m_cachedRefLen = bestRefLen;
-            m_cachedMaxIter = std::max(maxIter, m_cachedMaxIter);
-            m_cachedSearchZoom = clampedZoom;
-            m_cachedEscaped = bestEscaped;
-        }
-
-        const int refLen = bestRefLen;
         const ComplexOrbitPt* orbitPtr = m_cachedOrbit.data();
         const double refCxDouble = m_cachedRefX.ToDouble();
         const double refCyDouble = m_cachedRefY.ToDouble();
-
-        detail::BlaTable bla;
-        if (m_executionMode == ExecutionMode::Automatic && type == FractalType::Mandelbrot)
-        {
-            // Include the quarter-pixel halo used by optional subpixel refinement.
-            const double maxCx = std::max(std::abs(-.25 - refPosX), std::abs(width - .75 - refPosX)) * stepX;
-            const double maxCy = std::max(std::abs(refPosY + .25), std::abs(refPosY - (height - .75))) * stepY;
-            bla.Build(orbitPtr, refLen, std::hypot(maxCx, maxCy), cancelToken);
-            if (cancelToken && cancelToken->load(std::memory_order_relaxed)) return 0.0;
-        }
+        const detail::BlaTable& bla = m_cachedBla;
 
         auto evalDeepPixel = [&](double px, double py) -> float
         {
@@ -3189,22 +2799,627 @@ namespace Mandelbrot
             return static_cast<float>(iter);
         };
 
-        ExecuteRenderPass(
-            width,
-            height,
-            config.renderStride,
-            config.edgeRefine,
-            smooth,
-            type,
-            outIterations,
-            cancelToken,
-            evalDeepPixel);
+#if defined(_M_ARM64)
+        auto finishMandelbrotDeepResult = [&](const detail::PerturbationResult& res, double dcx, double dcy) noexcept -> float
+        {
+            if (res.iterations >= maxIter) return -1.0f;
+            if (!smooth) return static_cast<float>(res.iterations);
+            const double cxApprox = refCxDouble + dcx;
+            const double cyApprox = refCyDouble + dcy;
+            double zr = res.x;
+            double zi = res.y;
+            double zr2 = zr * zr;
+            double zi2 = zi * zi;
+            int smoothIter = res.iterations;
+            for (int extra = 0; extra < 3 && (zr2 + zi2) < 1e100; ++extra)
+            {
+                zi = 2.0 * zr * zi + cyApprox;
+                zr = zr2 - zi2 + cxApprox;
+                zr2 = zr * zr;
+                zi2 = zi * zi;
+                smoothIter++;
+            }
+            const double mod2 = zr2 + zi2;
+            const double logZn = std::log(mod2) * 0.5;
+            const double nu = smoothIter + 1.0 - std::log(logZn) * invLn2;
+            return static_cast<float>(nu > 0.0 ? nu : 0.0);
+        };
 
-        RefineSubpixels(width, height, smooth, type, outIterations, m_sampleWeights,
-            subpixelSamples, cancelToken, evalDeepPixel);
+        auto evalDeepMandelbrotPair = [&](double px0, double px1, double py, float outSamples[2]) noexcept
+        {
+            if (cancelToken && cancelToken->load(std::memory_order_relaxed))
+            {
+                outSamples[0] = -1.0f;
+                outSamples[1] = -1.0f;
+                return;
+            }
+            const double dcy = (refPosY - py) * stepY;
+            const double dcx0 = (px0 - refPosX) * stepX;
+            const double dcx1 = (px1 - refPosX) * stepX;
+            detail::PerturbationResult res0, res1;
+            if (bla.Enabled())
+            {
+                detail::EvalMandelbrotPerturbationPair<true>(orbitPtr, refLen, maxIter, dcx0, dcx1, dcy, bla, res0, res1);
+                if (res0.replay != detail::ReplayReason::None && res1.replay != detail::ReplayReason::None)
+                {
+                    detail::EvalMandelbrotPerturbationPair<false>(orbitPtr, refLen, maxIter, dcx0, dcx1, dcy, bla, res0, res1);
+                }
+                else
+                {
+                    if (res0.replay != detail::ReplayReason::None)
+                        res0 = detail::EvalMandelbrotPerturbation<false>(orbitPtr, refLen, maxIter, dcx0, dcy, bla);
+                    if (res1.replay != detail::ReplayReason::None)
+                        res1 = detail::EvalMandelbrotPerturbation<false>(orbitPtr, refLen, maxIter, dcx1, dcy, bla);
+                }
+            }
+            else
+            {
+                detail::EvalMandelbrotPerturbationPair<false>(orbitPtr, refLen, maxIter, dcx0, dcx1, dcy, bla, res0, res1);
+            }
+            outSamples[0] = finishMandelbrotDeepResult(res0, dcx0, dcy);
+            outSamples[1] = finishMandelbrotDeepResult(res1, dcx1, dcy);
+        };
+
+        if (m_executionMode == ExecutionMode::Automatic &&
+            type == FractalType::Mandelbrot &&
+            (config.renderStride <= 1 || width < 8 || height < 8))
+        {
+            constexpr int kSegmentWidth = 64;
+            const int segmentsPerRow = std::max(1, (width + kSegmentWidth - 1) / kSegmentWidth);
+            const int totalSegments = height * segmentsPerRow;
+            #pragma omp parallel for schedule(dynamic, 1)
+            for (int seg = 0; seg < totalSegments; ++seg)
+            {
+                if (cancelToken && cancelToken->load(std::memory_order_relaxed)) continue;
+                const int py = seg / segmentsPerRow;
+                const int pxStart = (seg % segmentsPerRow) * kSegmentWidth;
+                const int pxEnd = std::min(width, pxStart + kSegmentWidth);
+                float* row = outIterations.data() + static_cast<size_t>(py) * width;
+                int px = pxStart;
+                for (; px + 1 < pxEnd; px += 2)
+                {
+                    if (cancelToken && cancelToken->load(std::memory_order_relaxed)) break;
+                    evalDeepMandelbrotPair(static_cast<double>(px), static_cast<double>(px + 1), static_cast<double>(py), row + px);
+                }
+                if (px < pxEnd) row[px] = evalDeepPixel(px, py);
+            }
+        }
+        else
+#endif
+        {
+            ExecuteRenderPass(
+                width,
+                height,
+                config.renderStride,
+                config.edgeRefine,
+                smooth,
+                type,
+                outIterations,
+                cancelToken,
+                evalDeepPixel);
+        }
+
+#if defined(_M_ARM64)
+        if (m_executionMode == ExecutionMode::Automatic && type == FractalType::Mandelbrot)
+        {
+            RefineSubpixelsPairs(width, height, smooth, type, outIterations, m_sampleWeights,
+                subpixelSamples, cancelToken, evalDeepMandelbrotPair);
+        }
+        else
+#endif
+        {
+            RefineSubpixels(width, height, smooth, type, outIterations, m_sampleWeights,
+                subpixelSamples, cancelToken, evalDeepPixel);
+        }
 
         const auto endTime = std::chrono::high_resolution_clock::now();
         const std::chrono::duration<double, std::milli> elapsed = endTime - startTime;
         return elapsed.count();
+    }
+
+    void MandelbrotEngine::PrepareDeepReference(
+        const MandelbrotConfig& config,
+        const std::atomic<bool>* cancelToken)
+    {
+        if (config.width <= 0 || config.height <= 0 || config.juliaSet ||
+            config.zoom < DeepZoomThreshold || config.fractalType == FractalType::Newton)
+        {
+            return;
+        }
+        BigFloat hpX = config.hpCenterX;
+        BigFloat hpY = config.hpCenterY;
+        if (std::abs(hpX.ToDouble() - config.centerX) > 1e-14 ||
+            std::abs(hpY.ToDouble() - config.centerY) > 1e-14)
+        {
+            hpX = BigFloat(config.centerX);
+            hpY = BigFloat(config.centerY);
+        }
+        double refPosX = 0.0;
+        double refPosY = 0.0;
+        int refLen = 0;
+        EnsureDeepReference(config, hpX, hpY, refPosX, refPosY, refLen, cancelToken);
+    }
+
+    bool MandelbrotEngine::EnsureDeepReference(
+        const MandelbrotConfig& config,
+        const BigFloat& centerX,
+        const BigFloat& centerY,
+        double& outRefPosX,
+        double& outRefPosY,
+        int& outRefLen,
+        const std::atomic<bool>* cancelToken)
+    {
+        const int width = config.width;
+        const int height = config.height;
+        const int maxIter = config.maxIterations;
+        const FractalType type = config.fractalType;
+
+        const double aspect = static_cast<double>(height) / static_cast<double>(width);
+        const double clampedZoom = std::clamp(config.zoom, MinZoom, MaxZoom);
+        const double spanX = 3.0 / clampedZoom;
+        const double spanY = spanX * aspect;
+        const double stepX = spanX / static_cast<double>(width);
+        const double stepY = spanY / static_cast<double>(height);
+
+        const int rawLimbs = static_cast<int>(std::ceil((std::log2(clampedZoom) + 96.0) / 32.0));
+        const int activeLimbs = std::clamp((rawLimbs + 1) & ~1, 4, BigFloat::N);
+
+        constexpr double bailoutRadius2 = 16.0;
+        const double centerPosX = (static_cast<double>(width) - 1.0) * 0.5;
+        const double centerPosY = (static_cast<double>(height) - 1.0) * 0.5;
+
+        auto stepBigFloatOrbit = [&](const BigFloat& cRefX,
+                                     const BigFloat& cRefY,
+                                     int startM,
+                                     int targetMaxIter,
+                                     BigFloat& ioZx,
+                                     BigFloat& ioZy,
+                                     std::vector<ComplexOrbitPt>& outOrbit,
+                                     bool& outEscaped) -> int
+        {
+            if (static_cast<int>(outOrbit.size()) <= targetMaxIter)
+            {
+                outOrbit.resize(static_cast<size_t>(targetMaxIter) + 1);
+            }
+
+            int len = startM;
+            outEscaped = false;
+            BigFloat prevZx(0.0);
+            BigFloat prevZy(0.0);
+            const BigFloat phoenixC(0.5667);
+            const BigFloat phoenixHalf(0.5);
+            if (type == FractalType::Phoenix && startM == 0)
+            {
+                ioZx = cRefY;
+                ioZy = cRefX;
+            }
+
+            for (int m = startM; m <= targetMaxIter; ++m)
+            {
+                if (cancelToken && cancelToken->load(std::memory_order_relaxed))
+                {
+                    return len;
+                }
+
+                const double rx = ioZx.ToDouble();
+                const double ry = ioZy.ToDouble();
+                outOrbit[m] = { rx, ry };
+                len = m;
+
+                if (rx * rx + ry * ry > bailoutRadius2)
+                {
+                    outEscaped = true;
+                    break;
+                }
+                if (m == targetMaxIter)
+                {
+                    break;
+                }
+
+                const BigFloat Zx2 = ioZx.Sqr(activeLimbs);
+                const BigFloat Zy2 = ioZy.Sqr(activeLimbs);
+                const BigFloat Zxy = ioZx.Mul(ioZy, activeLimbs);
+                const BigFloat twoZxy = Zxy + Zxy;
+
+                if (type == FractalType::Mandelbrot)
+                {
+                    ioZy = twoZxy + cRefY;
+                    ioZx = Zx2 - Zy2 + cRefX;
+                }
+                else if (type == FractalType::BurningShip)
+                {
+                    ioZy = -twoZxy.Abs() + cRefY;
+                    ioZx = Zx2 - Zy2 + cRefX;
+                }
+                else if (type == FractalType::Tricorn)
+                {
+                    ioZy = -twoZxy + cRefY;
+                    ioZx = Zx2 - Zy2 + cRefX;
+                }
+                else if (type == FractalType::Celtic)
+                {
+                    ioZy = twoZxy + cRefY;
+                    ioZx = (Zx2 - Zy2).Abs() + cRefX;
+                }
+                else if (type == FractalType::Buffalo)
+                {
+                    ioZy = -twoZxy.Abs() + cRefY;
+                    ioZx = (Zx2 - Zy2).Abs() + cRefX;
+                }
+                else if (type == FractalType::CubicMultibrot)
+                {
+                    const BigFloat threeZx2 = Zx2 + Zx2 + Zx2;
+                    const BigFloat threeZy2 = Zy2 + Zy2 + Zy2;
+                    const BigFloat nextZx = ioZx.Mul(Zx2 - threeZy2, activeLimbs) + cRefX;
+                    const BigFloat nextZy = ioZy.Mul(threeZx2 - Zy2, activeLimbs) + cRefY;
+                    ioZx = nextZx;
+                    ioZy = nextZy;
+                }
+                else // FractalType::Phoenix
+                {
+                    const BigFloat nextZx = Zx2 - Zy2 + phoenixC - prevZx.Mul(phoenixHalf, activeLimbs);
+                    const BigFloat nextZy = twoZxy - prevZy.Mul(phoenixHalf, activeLimbs);
+                    prevZx = ioZx;
+                    prevZy = ioZy;
+                    ioZx = nextZx;
+                    ioZy = nextZy;
+                }
+            }
+            return len;
+        };
+
+        double refPosX = centerPosX;
+        double refPosY = centerPosY;
+        int bestRefLen = 0;
+        bool reusedUnescapedCache = false;
+        // Include full-frame vertical span and 8x8 search candidate margin (+/- 0.4375 * span)
+        // so reference orbits selected near the outer grid columns/rows are reused across all bands.
+        const double cacheSpanY = std::max(spanY * 2.0, spanX * 2.0);
+
+        // Check if we can reuse or incrementally extend the cached reference orbit from the previous frame/band
+        if (m_hasCachedOrbit &&
+            m_cachedType == type &&
+            m_cachedActiveLimbs >= activeLimbs &&
+            !m_cachedOrbit.empty())
+        {
+            const double diffX = (m_cachedRefX - centerX).ToDouble();
+            const double diffY = (m_cachedRefY - centerY).ToDouble();
+
+            if (!m_cachedEscaped &&
+                std::abs(diffX) <= spanX * 0.48 &&
+                std::abs(diffY) <= cacheSpanY * 0.48 &&
+                (type != FractalType::Phoenix || maxIter <= m_cachedMaxIter))
+            {
+                if (maxIter > m_cachedMaxIter)
+                {
+                    const int targetExtendIter = maxIter + 32;
+                    bool escapedNow = false;
+                    m_cachedRefLen = stepBigFloatOrbit(
+                        m_cachedRefX,
+                        m_cachedRefY,
+                        m_cachedMaxIter,
+                        targetExtendIter,
+                        m_cachedEndZx,
+                        m_cachedEndZy,
+                        m_cachedOrbit,
+                        escapedNow);
+                    m_cachedMaxIter = targetExtendIter;
+                    m_cachedEscaped = escapedNow;
+                    ++m_cachedOrbitVersion;
+                }
+
+                if (!m_cachedEscaped || m_cachedRefLen >= maxIter)
+                {
+                    refPosX = centerPosX + diffX / stepX;
+                    refPosY = centerPosY - diffY / stepY;
+                    bestRefLen = maxIter;
+                    reusedUnescapedCache = true;
+                }
+            }
+            else if (m_cachedEscaped &&
+                     std::abs(diffX) <= spanX * 0.45 &&
+                     std::abs(diffY) <= cacheSpanY * 0.45 &&
+                     m_cachedSearchZoom > 0.0 &&
+                     clampedZoom >= m_cachedSearchZoom * 0.65 &&
+                     clampedZoom <= m_cachedSearchZoom * 1.50)
+            {
+                // Reuse the best reference orbit already found for this exterior neighborhood across consecutive
+                // zoom frames and bands so we don't re-run the 8x8 search and 1024-bit BigFloat orbits.
+                refPosX = centerPosX + diffX / stepX;
+                refPosY = centerPosY - diffY / stepY;
+                bestRefLen = std::min(m_cachedRefLen, maxIter);
+                reusedUnescapedCache = true;
+            }
+        }
+
+        if (!reusedUnescapedCache)
+        {
+            BigFloat bestRefCx = centerX;
+            BigFloat bestRefCy = centerY;
+            BigFloat bestEndZx(0.0);
+            BigFloat bestEndZy(0.0);
+            bool bestEscaped = false;
+
+            const double cachedDiffX = m_hasCachedOrbit ? (m_cachedRefX - centerX).ToDouble() : 1e300;
+            const double cachedDiffY = m_hasCachedOrbit ? (m_cachedRefY - centerY).ToDouble() : 1e300;
+
+            // Reuse the cached orbit as our starting reference if it is at the current center or still well within the central viewport
+            if (m_hasCachedOrbit &&
+                m_cachedType == type &&
+                m_cachedActiveLimbs >= activeLimbs &&
+                !m_cachedOrbit.empty() &&
+                (type != FractalType::Phoenix || maxIter <= m_cachedMaxIter) &&
+                ((m_cachedRefX == centerX && m_cachedRefY == centerY) ||
+                 (std::abs(cachedDiffX) <= spanX * 0.45 && std::abs(cachedDiffY) <= cacheSpanY * 0.45)))
+            {
+                if (!m_cachedEscaped && maxIter > m_cachedMaxIter)
+                {
+                    const int targetExtendIter = maxIter + 32;
+                    m_cachedRefLen = stepBigFloatOrbit(
+                        m_cachedRefX,
+                        m_cachedRefY,
+                        m_cachedMaxIter,
+                        targetExtendIter,
+                        m_cachedEndZx,
+                        m_cachedEndZy,
+                        m_cachedOrbit,
+                        m_cachedEscaped);
+                    m_cachedMaxIter = targetExtendIter;
+                    ++m_cachedOrbitVersion;
+                }
+                bestRefCx = m_cachedRefX;
+                bestRefCy = m_cachedRefY;
+                refPosX = centerPosX + cachedDiffX / stepX;
+                refPosY = centerPosY - cachedDiffY / stepY;
+                bestRefLen = std::min(m_cachedRefLen, maxIter);
+                bestEndZx = m_cachedEndZx;
+                bestEndZy = m_cachedEndZy;
+                bestEscaped = (bestRefLen < maxIter) && m_cachedEscaped;
+            }
+            else
+            {
+                bestEndZx.SetZero();
+                bestEndZy.SetZero();
+                bestRefLen = stepBigFloatOrbit(
+                    centerX,
+                    centerY,
+                    0,
+                    maxIter,
+                    bestEndZx,
+                    bestEndZy,
+                    m_cachedOrbit,
+                    bestEscaped);
+                ++m_cachedOrbitVersion;
+            }
+
+            if (cancelToken && cancelToken->load(std::memory_order_relaxed))
+            {
+                return false;
+            }
+
+            // If the center reference orbit escaped before maxIter, probe an 8x8 sample grid across the viewport
+            // (up to 2 upgrades) to find a reference pixel genuinely inside the |z| < 2 disk (mod2 < 4.0) at m == bestRefLen.
+            if (bestRefLen < maxIter && width >= 4 && height >= 4)
+            {
+                std::vector<ComplexOrbitPt> candidateOrbit(static_cast<size_t>(maxIter) + 1);
+                constexpr int gridN = 8;
+
+                for (int attempt = 0; attempt < 2 && bestRefLen < maxIter; ++attempt)
+                {
+                    int nextCandPx = -1;
+                    int nextCandPy = -1;
+                    double minMod2AtRefEnd = 4.0;
+                    const ComplexOrbitPt* orbitPtr = m_cachedOrbit.data();
+
+                    for (int gy = 0; gy < gridN; ++gy)
+                    {
+                        if (cancelToken && cancelToken->load(std::memory_order_relaxed)) return false;
+                        const int spy = ((2 * gy + 1) * height) / (2 * gridN);
+                        const double dcy = (refPosY - static_cast<double>(spy)) * stepY;
+
+                        for (int gx = 0; gx < gridN; ++gx)
+                        {
+                            const int spx = ((2 * gx + 1) * width) / (2 * gridN);
+                            const double dcx = (static_cast<double>(spx) - refPosX) * stepX;
+                            if (dcx == 0.0 && dcy == 0.0) continue;
+
+                            double dx = (type == FractalType::Phoenix) ? dcy : 0.0;
+                            double dy = (type == FractalType::Phoenix) ? dcx : 0.0;
+                            double prevDx = 0.0;
+                            double prevDy = 0.0;
+                            int m = 0;
+                            int iter = 0;
+
+                            while (iter < maxIter)
+                            {
+                                const double rx = orbitPtr[m].x;
+                                const double ry = orbitPtr[m].y;
+                                const double zx = rx + dx;
+                                const double zy = ry + dy;
+                                const double mod2 = zx * zx + zy * zy;
+
+                                if (mod2 > bailoutRadius2)
+                                {
+                                    break;
+                                }
+
+                                if (m == bestRefLen)
+                                {
+                                    if (mod2 < minMod2AtRefEnd)
+                                    {
+                                        minMod2AtRefEnd = mod2;
+                                        nextCandPx = spx;
+                                        nextCandPy = spy;
+                                    }
+                                    break;
+                                }
+
+                                const double dz2 = dx * dx + dy * dy;
+                                if (type != FractalType::Phoenix && m > 0 && mod2 < dz2)
+                                {
+                                    dx = zx;
+                                    dy = zy;
+                                    m = 0;
+                                    continue;
+                                }
+
+                                const double sx = rx + zx;
+                                const double sy = ry + zy;
+                                if (type == FractalType::Mandelbrot)
+                                {
+                                    const double nextDx = sx * dx - sy * dy + dcx;
+                                    const double nextDy = sx * dy + sy * dx + dcy;
+                                    dx = nextDx;
+                                    dy = nextDy;
+                                }
+                                else if (type == FractalType::BurningShip)
+                                {
+                                    const double daX = DiffAbs(rx, dx);
+                                    const double daY = DiffAbs(ry, dy);
+                                    const double nextDx = sx * dx - sy * dy + dcx;
+                                    const double nextDy = -2.0 * (std::abs(rx) * daY + std::abs(ry) * daX + daX * daY) + dcy;
+                                    dx = nextDx;
+                                    dy = nextDy;
+                                }
+                                else if (type == FractalType::Tricorn)
+                                {
+                                    const double nextDx = sx * dx - sy * dy + dcx;
+                                    const double nextDy = -(sx * dy + sy * dx) + dcy;
+                                    dx = nextDx;
+                                    dy = nextDy;
+                                }
+                                else if (type == FractalType::Celtic)
+                                {
+                                    const double nextDx = DiffAbs(rx * rx - ry * ry, sx * dx - sy * dy) + dcx;
+                                    const double nextDy = sx * dy + sy * dx + dcy;
+                                    dx = nextDx;
+                                    dy = nextDy;
+                                }
+                                else if (type == FractalType::Buffalo)
+                                {
+                                    const double daX = DiffAbs(rx, dx);
+                                    const double daY = DiffAbs(ry, dy);
+                                    const double nextDx = DiffAbs(rx * rx - ry * ry, sx * dx - sy * dy) + dcx;
+                                    const double nextDy = -2.0 * (std::abs(rx) * daY + std::abs(ry) * daX + daX * daY) + dcy;
+                                    dx = nextDx;
+                                    dy = nextDy;
+                                }
+                                else if (type == FractalType::CubicMultibrot)
+                                {
+                                    const double pxTerm = (rx * rx - ry * ry) + (rx * zx - ry * zy) + (zx * zx - zy * zy);
+                                    const double pyTerm = 2.0 * rx * ry + (rx * zy + ry * zx) + 2.0 * zx * zy;
+                                    const double nextDx = pxTerm * dx - pyTerm * dy + dcx;
+                                    const double nextDy = pxTerm * dy + pyTerm * dx + dcy;
+                                    dx = nextDx;
+                                    dy = nextDy;
+                                }
+                                else // FractalType::Phoenix
+                                {
+                                    const double nextDx = sx * dx - sy * dy - 0.5 * prevDx;
+                                    const double nextDy = sx * dy + sy * dx - 0.5 * prevDy;
+                                    prevDx = dx;
+                                    prevDy = dy;
+                                    dx = nextDx;
+                                    dy = nextDy;
+                                }
+
+                                m++;
+                                iter++;
+                            }
+                        }
+                    }
+
+                    if (nextCandPx < 0)
+                    {
+                        break;
+                    }
+
+                    const double candOffsetX = (static_cast<double>(nextCandPx) - centerPosX) * stepX;
+                    const double candOffsetY = (centerPosY - static_cast<double>(nextCandPy)) * stepY;
+                    const BigFloat candCx = centerX + BigFloat(candOffsetX);
+                    const BigFloat candCy = centerY + BigFloat(candOffsetY);
+                    BigFloat candEndZx(0.0);
+                    BigFloat candEndZy(0.0);
+                    bool candEscaped = false;
+
+                    const int candLen = stepBigFloatOrbit(
+                        candCx,
+                        candCy,
+                        0,
+                        maxIter,
+                        candEndZx,
+                        candEndZy,
+                        candidateOrbit,
+                        candEscaped);
+
+                    if (cancelToken && cancelToken->load(std::memory_order_relaxed))
+                    {
+                        return false;
+                    }
+
+                    if (candLen > bestRefLen)
+                    {
+                        m_cachedOrbit.swap(candidateOrbit);
+                        ++m_cachedOrbitVersion;
+                        bestRefLen = candLen;
+                        refPosX = static_cast<double>(nextCandPx);
+                        refPosY = static_cast<double>(nextCandPy);
+                        bestRefCx = candCx;
+                        bestRefCy = candCy;
+                        bestEndZx = candEndZx;
+                        bestEndZy = candEndZy;
+                        bestEscaped = candEscaped;
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+            }
+
+            m_hasCachedOrbit = true;
+            m_cachedType = type;
+            m_cachedRefX = bestRefCx;
+            m_cachedRefY = bestRefCy;
+            m_cachedEndZx = bestEndZx;
+            m_cachedEndZy = bestEndZy;
+            m_cachedActiveLimbs = activeLimbs;
+            m_cachedRefLen = bestRefLen;
+            m_cachedMaxIter = std::max(maxIter, m_cachedMaxIter);
+            m_cachedSearchZoom = clampedZoom;
+            m_cachedEscaped = bestEscaped;
+        }
+
+        outRefPosX = refPosX;
+        outRefPosY = refPosY;
+        outRefLen = bestRefLen;
+
+        if (m_executionMode == ExecutionMode::Automatic && type == FractalType::Mandelbrot)
+        {
+            // Include the quarter-pixel halo used by optional subpixel refinement.
+            const double maxCx = std::max(std::abs(-.25 - refPosX), std::abs(width - .75 - refPosX)) * stepX;
+            const double maxCy = std::max(std::abs(refPosY + .25), std::abs(refPosY - (height - .75))) * stepY;
+            const double cMax = std::hypot(maxCx, maxCy);
+            if (m_cachedBlaVersion != m_cachedOrbitVersion ||
+                m_cachedBlaRefLen != bestRefLen ||
+                cMax > m_cachedBlaCMax * (1.0 + 1e-12) ||
+                cMax < m_cachedBlaCMax * 0.25)
+            {
+                m_cachedBla.Build(m_cachedOrbit.data(), bestRefLen, cMax, cancelToken);
+                if (cancelToken && cancelToken->load(std::memory_order_relaxed)) return false;
+                m_cachedBlaVersion = m_cachedOrbitVersion;
+                m_cachedBlaRefLen = bestRefLen;
+                m_cachedBlaCMax = cMax;
+            }
+        }
+        else
+        {
+            m_cachedBla = {};
+            m_cachedBlaVersion = 0;
+            m_cachedBlaRefLen = 0;
+            m_cachedBlaCMax = 0.0;
+        }
+
+        return true;
     }
 }

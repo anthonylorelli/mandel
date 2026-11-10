@@ -3,6 +3,7 @@
 #include "MandelbrotEngine.h"
 #include "MandelbrotBla.h"
 #include "MoviePlan.h"
+#include "MovieExport.h"
 #include <bit>
 
 using namespace Mandelbrot;
@@ -238,4 +239,40 @@ TEST_CASE(Bla, JuliaAndOtherFormulasKeepTheirReferenceArithmetic)
             AssertSameFrame(scalar, automatic, c, true);
         }
     }
+}
+
+TEST_CASE(Bla, PairPerturbationAndPreparedBandSlicesMatchReference)
+{
+#if defined(_M_ARM64)
+    const auto orbit = ReferenceAtI(1000);
+    detail::BlaTable table;
+    table.Build(orbit.data(), 1000, 4e-100);
+    ASSERT_TRUE(table.Enabled());
+    for (int y = -4; y <= 4; ++y)
+        for (int x = -4; x <= 4; ++x)
+        {
+            const double dcx0 = (x + .125) * 1e-101, dcx1 = (x + .625) * 1e-101, dcy = (y + .375) * 1e-101;
+            const auto s0 = detail::EvalMandelbrotPerturbation<false>(orbit.data(), 1000, 1000, dcx0, dcy, table);
+            const auto s1 = detail::EvalMandelbrotPerturbation<false>(orbit.data(), 1000, 1000, dcx1, dcy, table);
+            detail::PerturbationResult p0{}, p1{};
+            detail::EvalMandelbrotPerturbationPair<false>(orbit.data(), 1000, 1000, dcx0, dcx1, dcy, table, p0, p1);
+            ASSERT_EQ(s0.iterations, p0.iterations);
+            ASSERT_EQ(s1.iterations, p1.iterations);
+            ASSERT_EQ(std::bit_cast<uint64_t>(s0.x), std::bit_cast<uint64_t>(p0.x));
+            ASSERT_EQ(std::bit_cast<uint64_t>(s0.y), std::bit_cast<uint64_t>(p0.y));
+            ASSERT_EQ(std::bit_cast<uint64_t>(s1.x), std::bit_cast<uint64_t>(p1.x));
+            ASSERT_EQ(std::bit_cast<uint64_t>(s1.y), std::bit_cast<uint64_t>(p1.y));
+        }
+#endif
+    MoviePlan p; p.width = 64; p.height = 48; p.seconds = 1; p.fps = 24;
+    const auto root = ParameterRoot(-.12256, .74486, 1);
+    p.start.SetCenter(root.x, root.y); p.start.zoom = 1e100; p.start.maxIterations = 1200;
+    p.endZoom = 2e100; p.targetX = root.x; p.targetY = root.y;
+    std::atomic<bool> cancel{};
+    MandelbrotEngine bandedEngine, wholeEngine;
+    const auto banded = RenderMovieFrame(p, 0, cancel, {}, 8, &bandedEngine);
+    const auto whole = RenderMovieFrame(p, 0, cancel, {}, p.height, &wholeEngine);
+    ASSERT_EQ(banded.size(), whole.size());
+    for (size_t i = 0; i < banded.size(); ++i)
+        ASSERT_EQ(banded[i], whole[i]);
 }
