@@ -679,11 +679,11 @@ namespace Mandelbrot
 
     namespace
     {
-        template <typename EvalPairFn>
-        void RefineSubpixelsPairs(int width, int height, bool smooth, FractalType type,
+        template <typename EvalQuadFn>
+        void RefineSubpixelsQuads(int width, int height, bool smooth, FractalType type,
             const std::vector<float>& centers, std::vector<float>& weights,
             std::vector<SubpixelSamples>* samples, const std::atomic<bool>* cancelToken,
-            EvalPairFn&& evalPair)
+            EvalQuadFn&& evalQuad)
         {
             if (!samples) return;
             samples->clear();
@@ -720,16 +720,17 @@ namespace Mandelbrot
                     }
                     float variation = 0.0f;
                     bool boundary = false;
+                    const float a = type == FractalType::Newton ? std::fmod(center, 1000000.0f) : center;
                     for (int ny = y0; ny <= y1; ++ny)
                     {
                         const float* nRow = centers.data() + static_cast<size_t>(ny) * width;
                         for (int nx = x0; nx <= x1; ++nx)
                         {
+                            if (nx == x && ny == y) continue;
                             const float neighbor = nRow[nx];
                             if (neighbor < 0.0f) { boundary = true; continue; }
                             if (!SameBasin(center, neighbor, type) || (!smooth && center != neighbor))
                                 boundary = true;
-                            const float a = type == FractalType::Newton ? std::fmod(center, 1000000.0f) : center;
                             const float b = type == FractalType::Newton ? std::fmod(neighbor, 1000000.0f) : neighbor;
                             variation = std::max(variation, std::abs(a - b) / (10.0f + std::min(a, b)));
                         }
@@ -771,8 +772,7 @@ namespace Mandelbrot
                 auto& sample = (*samples)[i];
                 const int y = static_cast<int>(sample.pixelIndex / static_cast<uint32_t>(width));
                 const int x = static_cast<int>(sample.pixelIndex % static_cast<uint32_t>(width));
-                evalPair(x - 0.25, x + 0.25, y - 0.25, sample.iterations.data());
-                evalPair(x - 0.25, x + 0.25, y + 0.25, sample.iterations.data() + 2);
+                evalQuad(x - 0.25, x + 0.25, y - 0.25, y + 0.25, sample.iterations.data());
             }
             if (canceled()) samples->clear();
         }
@@ -783,11 +783,13 @@ namespace Mandelbrot
             std::vector<SubpixelSamples>* samples, const std::atomic<bool>* cancelToken,
             EvalPixelFn&& evalPixel)
         {
-            RefineSubpixelsPairs(width, height, smooth, type, centers, weights, samples, cancelToken,
-                [&](double x0, double x1, double y, float* out)
+            RefineSubpixelsQuads(width, height, smooth, type, centers, weights, samples, cancelToken,
+                [&](double x0, double x1, double y0, double y1, float* out)
                 {
-                    out[0] = evalPixel(x0, y);
-                    out[1] = evalPixel(x1, y);
+                    out[0] = evalPixel(x0, y0);
+                    out[1] = evalPixel(x1, y0);
+                    out[2] = evalPixel(x0, y1);
+                    out[3] = evalPixel(x1, y1);
                 });
         }
 
@@ -1224,22 +1226,39 @@ namespace Mandelbrot
             return static_cast<float>(nu > 0.0 ? nu : 0.0);
         }
 
-        inline void EvalMandelbrotPair(double cx0, double cx1, double cy,
-            int maxIter, bool smooth, float* out) noexcept
+        inline bool CertifyMandelbrotStandardInteriorStrip(double cxMid, double cy,
+            double halfSpanX, int maxIter) noexcept
         {
-            if (IsInMainCardioidOrBulb(cx0, cy) || IsInMainCardioidOrBulb(cx1, cy) || maxIter < 1)
-            {
-                out[0] = EvalStandardPoint(FractalType::Mandelbrot, cx0, cy, maxIter, smooth);
-                out[1] = EvalStandardPoint(FractalType::Mandelbrot, cx1, cy, maxIter, smooth);
-                return;
-            }
+            if (maxIter < 1 || !(halfSpanX >= 0.0)) return false;
+            constexpr double eps = std::numeric_limits<double>::epsilon();
+            const double cRadius = halfSpanX * (1.0 + 8.0 * eps) + 8.0 * eps * (std::abs(cxMid) + std::abs(cy));
+            if (!std::isfinite(cRadius)) return false;
 
+            double zr = 0.0, zi = 0.0, zr2 = 0.0, zi2 = 0.0, rho = 0.0;
+            for (int iter = 0; iter < maxIter; ++iter)
+            {
+                const double zNorm = std::sqrt(zr2 + zi2);
+                if (!(zNorm + rho <= 3.999999)) return false;
+                zi = 2.0 * zr * zi + cy;
+                zr = zr2 - zi2 + cxMid;
+                zr2 = zr * zr;
+                zi2 = zi * zi;
+                rho = (2.0 * zNorm + rho) * rho + cRadius + 64.0 * eps;
+            }
+            return std::isfinite(rho);
+        }
+
+        inline int ResumeMandelbrotPair(double cx0, double cx1, double cy,
+            int maxIter, bool smooth, float64x2_t zr, float64x2_t zi,
+            float64x2_t zr2, float64x2_t zi2, int iter,
+            float64x2_t checkR, float64x2_t checkI, int checkPeriod, int steps,
+            float* out) noexcept
+        {
             const double coordinates[]{ cx0, cx1 };
             const float64x2_t cx = vld1q_f64(coordinates);
             const float64x2_t y = vdupq_n_f64(cy), two = vdupq_n_f64(2.0), limit = vdupq_n_f64(16.0);
-            float64x2_t zr = vdupq_n_f64(0.0), zi = zr, zr2 = zr, zi2 = zr, checkR = zr, checkI = zr;
             uint64x2_t periodic = vdupq_n_u64(0);
-            int iter = 0, checkPeriod = 8, steps = 0;
+            const int startIter = iter;
             while (iter < maxIter)
             {
                 // Separate multiply/add operations match /fp:precise scalar results;
@@ -1274,6 +1293,131 @@ namespace Mandelbrot
                 out[lane] = cycle[lane] || iter >= maxIter ? -1.0f :
                     FinishMandelbrotLane(coordinates[lane], cy, maxIter, smooth,
                         r[lane], i[lane], r2[lane], i2[lane], iter, cr[lane], ci[lane], checkPeriod, steps);
+            return iter - startIter;
+        }
+
+        inline void EvalMandelbrotPair(double cx0, double cx1, double cy,
+            int maxIter, bool smooth, float* out) noexcept
+        {
+            if (IsInMainCardioidOrBulb(cx0, cy) || IsInMainCardioidOrBulb(cx1, cy) || maxIter < 1)
+            {
+                out[0] = EvalStandardPoint(FractalType::Mandelbrot, cx0, cy, maxIter, smooth);
+                out[1] = EvalStandardPoint(FractalType::Mandelbrot, cx1, cy, maxIter, smooth);
+                return;
+            }
+
+            const float64x2_t zero = vdupq_n_f64(0.0);
+            ResumeMandelbrotPair(cx0, cx1, cy, maxIter, smooth,
+                zero, zero, zero, zero, 0, zero, zero, 8, 0, out);
+        }
+
+        inline int EvalMandelbrotQuad(const double cxCoords[4], double cy01, double cy23,
+            int maxIter, bool smooth, float* out) noexcept
+        {
+            if (maxIter < 1)
+            {
+                out[0] = out[1] = out[2] = out[3] = -1.0f;
+                return 0;
+            }
+            const bool in0 = IsInMainCardioidOrBulb(cxCoords[0], cy01);
+            const bool in1 = IsInMainCardioidOrBulb(cxCoords[1], cy01);
+            const bool in2 = IsInMainCardioidOrBulb(cxCoords[2], cy23);
+            const bool in3 = IsInMainCardioidOrBulb(cxCoords[3], cy23);
+            if (in0 && in1 && in2 && in3)
+            {
+                out[0] = out[1] = out[2] = out[3] = -1.0f;
+                return 0;
+            }
+            if (in0 || in1 || in2 || in3)
+            {
+                EvalMandelbrotPair(cxCoords[0], cxCoords[1], cy01, maxIter, smooth, out);
+                EvalMandelbrotPair(cxCoords[2], cxCoords[3], cy23, maxIter, smooth, out + 2);
+                return 0;
+            }
+
+            const float64x2_t cx01 = vld1q_f64(cxCoords);
+            const float64x2_t cx23 = vld1q_f64(cxCoords + 2);
+            const float64x2_t y01 = vdupq_n_f64(cy01), y23 = vdupq_n_f64(cy23);
+            const float64x2_t two = vdupq_n_f64(2.0), limit = vdupq_n_f64(16.0);
+            const uint64x2_t allOnes = vdupq_n_u64(~uint64_t(0));
+            float64x2_t zr01 = vdupq_n_f64(0.0), zi01 = zr01, zr2_01 = zr01, zi2_01 = zr01, checkR01 = zr01, checkI01 = zr01;
+            float64x2_t zr23 = zr01, zi23 = zr01, zr2_23 = zr01, zi2_23 = zr01, checkR23 = zr01, checkI23 = zr01;
+            uint64x2_t periodic01 = vdupq_n_u64(0), periodic23 = periodic01;
+            uint64x2_t stopped01 = periodic01, stopped23 = periodic01;
+            int iter = 0, checkPeriod = 8, steps = 0;
+
+            while (iter < maxIter)
+            {
+                zi01 = vaddq_f64(vmulq_f64(vmulq_f64(two, zr01), zi01), y01);
+                zi23 = vaddq_f64(vmulq_f64(vmulq_f64(two, zr23), zi23), y23);
+                zr01 = vaddq_f64(vsubq_f64(zr2_01, zi2_01), cx01);
+                zr23 = vaddq_f64(vsubq_f64(zr2_23, zi2_23), cx23);
+                zr2_01 = vmulq_f64(zr01, zr01);
+                zr2_23 = vmulq_f64(zr23, zr23);
+                zi2_01 = vmulq_f64(zi01, zi01);
+                zi2_23 = vmulq_f64(zi23, zi23);
+                ++iter;
+                periodic01 = vandq_u64(vceqq_f64(zr01, checkR01), vceqq_f64(zi01, checkI01));
+                periodic23 = vandq_u64(vceqq_f64(zr23, checkR23), vceqq_f64(zi23, checkI23));
+                if (++steps == checkPeriod)
+                {
+                    checkR01 = zr01; checkI01 = zi01;
+                    checkR23 = zr23; checkI23 = zi23;
+                    steps = 0;
+                    if (checkPeriod < 1024) checkPeriod <<= 1;
+                }
+                const uint64x2_t bounded01 = vcleq_f64(vaddq_f64(zr2_01, zi2_01), limit);
+                const uint64x2_t bounded23 = vcleq_f64(vaddq_f64(zr2_23, zi2_23), limit);
+                stopped01 = vorrq_u64(periodic01, veorq_u64(bounded01, allOnes));
+                stopped23 = vorrq_u64(periodic23, veorq_u64(bounded23, allOnes));
+                if (vmaxvq_u32(vreinterpretq_u32_u64(vorrq_u64(stopped01, stopped23)))) break;
+            }
+
+            if (iter >= maxIter)
+            {
+                out[0] = out[1] = out[2] = out[3] = -1.0f;
+                return iter;
+            }
+
+            int extra01 = 0, extra23 = 0;
+            if (vmaxvq_u32(vreinterpretq_u32_u64(stopped01)))
+            {
+                double r[2], i[2], r2[2], i2[2], cr[2], ci[2];
+                uint64_t cycle[2];
+                vst1q_f64(r, zr01); vst1q_f64(i, zi01);
+                vst1q_f64(r2, zr2_01); vst1q_f64(i2, zi2_01);
+                vst1q_f64(cr, checkR01); vst1q_f64(ci, checkI01);
+                vst1q_u64(cycle, periodic01);
+                for (int lane = 0; lane < 2; ++lane)
+                    out[lane] = cycle[lane] ? -1.0f :
+                        FinishMandelbrotLane(cxCoords[lane], cy01, maxIter, smooth,
+                            r[lane], i[lane], r2[lane], i2[lane], iter, cr[lane], ci[lane], checkPeriod, steps);
+            }
+            else
+            {
+                extra01 = ResumeMandelbrotPair(cxCoords[0], cxCoords[1], cy01, maxIter, smooth,
+                    zr01, zi01, zr2_01, zi2_01, iter, checkR01, checkI01, checkPeriod, steps, out);
+            }
+
+            if (vmaxvq_u32(vreinterpretq_u32_u64(stopped23)))
+            {
+                double r[2], i[2], r2[2], i2[2], cr[2], ci[2];
+                uint64_t cycle[2];
+                vst1q_f64(r, zr23); vst1q_f64(i, zi23);
+                vst1q_f64(r2, zr2_23); vst1q_f64(i2, zi2_23);
+                vst1q_f64(cr, checkR23); vst1q_f64(ci, checkI23);
+                vst1q_u64(cycle, periodic23);
+                for (int lane = 0; lane < 2; ++lane)
+                    out[2 + lane] = cycle[lane] ? -1.0f :
+                        FinishMandelbrotLane(cxCoords[2 + lane], cy23, maxIter, smooth,
+                            r[lane], i[lane], r2[lane], i2[lane], iter, cr[lane], ci[lane], checkPeriod, steps);
+            }
+            else
+            {
+                extra23 = ResumeMandelbrotPair(cxCoords[2], cxCoords[3], cy23, maxIter, smooth,
+                    zr23, zi23, zr2_23, zi2_23, iter, checkR23, checkI23, checkPeriod, steps, out + 2);
+            }
+            return iter + std::max(extra01, extra23);
         }
 #endif
 
@@ -1962,6 +2106,37 @@ namespace Mandelbrot
                 float* row = outIterations.data() + static_cast<size_t>(py) * width;
                 const double cy = config.centerY + (halfH - (static_cast<double>(py) + 0.5)) * dy;
                 int px = pxStart;
+                while (px + 3 < pxEnd)
+                {
+                    if (cancelToken && cancelToken->load(std::memory_order_relaxed)) break;
+                    const double cxCoords[4]{
+                        config.centerX + ((static_cast<double>(px) + 0.5) - halfW) * dx,
+                        config.centerX + ((static_cast<double>(px + 1) + 0.5) - halfW) * dx,
+                        config.centerX + ((static_cast<double>(px + 2) + 0.5) - halfW) * dx,
+                        config.centerX + ((static_cast<double>(px + 3) + 0.5) - halfW) * dx
+                    };
+                    const int quadSteps = EvalMandelbrotQuad(cxCoords, cy, cy, maxIter, smooth, row + px);
+                    const bool allInterior = row[px] < 0.0f && row[px + 1] < 0.0f &&
+                        row[px + 2] < 0.0f && row[px + 3] < 0.0f;
+                    px += 4;
+                    if (allInterior && px + 8 <= pxEnd && quadSteps * ((pxEnd - px) / 4) >= maxIter * 2)
+                    {
+                        auto tryCertify = [&](int count) noexcept -> bool
+                        {
+                            const int firstP = px, lastP = px + count - 1;
+                            const double midCx = config.centerX + ((0.5 * (firstP + lastP) + 0.5) - halfW) * dx;
+                            const double halfSpan = 0.5 * static_cast<double>(lastP - firstP) * dx;
+                            if (!CertifyMandelbrotStandardInteriorStrip(midCx, cy, halfSpan, maxIter)) return false;
+                            std::fill(row + firstP, row + lastP + 1, -1.0f);
+                            px += count;
+                            return true;
+                        };
+                        if (tryCertify(std::min(16, pxEnd - px)) && px + 8 <= pxEnd)
+                        {
+                            tryCertify(pxEnd - px);
+                        }
+                    }
+                }
                 for (; px + 1 < pxEnd; px += 2)
                 {
                     if (cancelToken && cancelToken->load(std::memory_order_relaxed)) break;
@@ -1990,14 +2165,16 @@ namespace Mandelbrot
 #if defined(_M_ARM64)
         if (m_executionMode == ExecutionMode::Automatic && type == FractalType::Mandelbrot)
         {
-            RefineSubpixelsPairs(width, height, smooth, type, outIterations, m_sampleWeights,
+            RefineSubpixelsQuads(width, height, smooth, type, outIterations, m_sampleWeights,
                 subpixelSamples, cancelToken,
-                [&](double px0, double px1, double py, float outSamples[2])
+                [&](double px0, double px1, double py0, double py1, float outSamples[4])
                 {
-                    const double cy = config.centerY + (halfH - (py + 0.5)) * dy;
+                    const double cy0 = config.centerY + (halfH - (py0 + 0.5)) * dy;
+                    const double cy1 = config.centerY + (halfH - (py1 + 0.5)) * dy;
                     const double x0 = config.centerX + ((px0 + 0.5) - halfW) * dx;
                     const double x1 = config.centerX + ((px1 + 0.5) - halfW) * dx;
-                    EvalMandelbrotPair(x0, x1, cy, maxIter, smooth, outSamples);
+                    const double cxCoords[4]{ x0, x1, x0, x1 };
+                    EvalMandelbrotQuad(cxCoords, cy0, cy1, maxIter, smooth, outSamples);
                 });
         }
         else
@@ -2860,6 +3037,72 @@ namespace Mandelbrot
             outSamples[1] = finishMandelbrotDeepResult(res1, dcx1, dcy);
         };
 
+        auto evalDeepMandelbrotQuad = [&](const double pxCoords[4], double py01, double py23, float outSamples[4]) noexcept -> int
+        {
+            if (cancelToken && cancelToken->load(std::memory_order_relaxed))
+            {
+                outSamples[0] = outSamples[1] = outSamples[2] = outSamples[3] = -1.0f;
+                return 0;
+            }
+            const double dcy01 = (refPosY - py01) * stepY;
+            const double dcy23 = (refPosY - py23) * stepY;
+            const double dcxCoords[4]{
+                (pxCoords[0] - refPosX) * stepX,
+                (pxCoords[1] - refPosX) * stepX,
+                (pxCoords[2] - refPosX) * stepX,
+                (pxCoords[3] - refPosX) * stepX
+            };
+            detail::PerturbationResult res[4];
+            int quadSteps = 0;
+            if (bla.Enabled())
+            {
+                quadSteps = detail::EvalMandelbrotPerturbationQuad<true>(
+                    orbitPtr, refLen, maxIter, dcxCoords, dcy01, dcy23, bla, res);
+                const bool r0 = res[0].replay != detail::ReplayReason::None;
+                const bool r1 = res[1].replay != detail::ReplayReason::None;
+                const bool r2 = res[2].replay != detail::ReplayReason::None;
+                const bool r3 = res[3].replay != detail::ReplayReason::None;
+                if (r0 && r1 && r2 && r3)
+                {
+                    quadSteps += detail::EvalMandelbrotPerturbationQuad<false>(
+                        orbitPtr, refLen, maxIter, dcxCoords, dcy01, dcy23, bla, res);
+                }
+                else
+                {
+                    if (r0 && r1)
+                    {
+                        detail::EvalMandelbrotPerturbationPair<false>(
+                            orbitPtr, refLen, maxIter, dcxCoords[0], dcxCoords[1], dcy01, bla, res[0], res[1]);
+                    }
+                    else
+                    {
+                        if (r0) res[0] = detail::EvalMandelbrotPerturbation<false>(orbitPtr, refLen, maxIter, dcxCoords[0], dcy01, bla);
+                        if (r1) res[1] = detail::EvalMandelbrotPerturbation<false>(orbitPtr, refLen, maxIter, dcxCoords[1], dcy01, bla);
+                    }
+                    if (r2 && r3)
+                    {
+                        detail::EvalMandelbrotPerturbationPair<false>(
+                            orbitPtr, refLen, maxIter, dcxCoords[2], dcxCoords[3], dcy23, bla, res[2], res[3]);
+                    }
+                    else
+                    {
+                        if (r2) res[2] = detail::EvalMandelbrotPerturbation<false>(orbitPtr, refLen, maxIter, dcxCoords[2], dcy23, bla);
+                        if (r3) res[3] = detail::EvalMandelbrotPerturbation<false>(orbitPtr, refLen, maxIter, dcxCoords[3], dcy23, bla);
+                    }
+                }
+            }
+            else
+            {
+                quadSteps = detail::EvalMandelbrotPerturbationQuad<false>(
+                    orbitPtr, refLen, maxIter, dcxCoords, dcy01, dcy23, bla, res);
+            }
+            outSamples[0] = finishMandelbrotDeepResult(res[0], dcxCoords[0], dcy01);
+            outSamples[1] = finishMandelbrotDeepResult(res[1], dcxCoords[1], dcy01);
+            outSamples[2] = finishMandelbrotDeepResult(res[2], dcxCoords[2], dcy23);
+            outSamples[3] = finishMandelbrotDeepResult(res[3], dcxCoords[3], dcy23);
+            return quadSteps;
+        };
+
         if (m_executionMode == ExecutionMode::Automatic &&
             type == FractalType::Mandelbrot &&
             (config.renderStride <= 1 || width < 8 || height < 8))
@@ -2875,11 +3118,45 @@ namespace Mandelbrot
                 const int pxStart = (seg % segmentsPerRow) * kSegmentWidth;
                 const int pxEnd = std::min(width, pxStart + kSegmentWidth);
                 float* row = outIterations.data() + static_cast<size_t>(py) * width;
+                const double pyDouble = static_cast<double>(py);
+                const double dcy = (refPosY - pyDouble) * stepY;
                 int px = pxStart;
+                while (px + 3 < pxEnd)
+                {
+                    if (cancelToken && cancelToken->load(std::memory_order_relaxed)) break;
+                    const double pxCoords[4]{
+                        static_cast<double>(px),
+                        static_cast<double>(px + 1),
+                        static_cast<double>(px + 2),
+                        static_cast<double>(px + 3)
+                    };
+                    const int quadSteps = evalDeepMandelbrotQuad(pxCoords, pyDouble, pyDouble, row + px);
+                    const bool allInterior = row[px] < 0.0f && row[px + 1] < 0.0f &&
+                        row[px + 2] < 0.0f && row[px + 3] < 0.0f;
+                    px += 4;
+                    if (allInterior && px + 8 <= pxEnd && quadSteps * ((pxEnd - px) / 4) >= maxIter * 2)
+                    {
+                        auto tryCertify = [&](int count) noexcept -> bool
+                        {
+                            const int firstP = px, lastP = px + count - 1;
+                            const double dcxMid = (0.5 * (firstP + lastP) - refPosX) * stepX;
+                            const double halfSpan = 0.5 * static_cast<double>(lastP - firstP) * stepX;
+                            if (!detail::CertifyMandelbrotDeepInteriorStrip(
+                                orbitPtr, refLen, maxIter, dcxMid, dcy, halfSpan)) return false;
+                            std::fill(row + firstP, row + lastP + 1, -1.0f);
+                            px += count;
+                            return true;
+                        };
+                        if (tryCertify(std::min(16, pxEnd - px)) && px + 8 <= pxEnd)
+                        {
+                            tryCertify(pxEnd - px);
+                        }
+                    }
+                }
                 for (; px + 1 < pxEnd; px += 2)
                 {
                     if (cancelToken && cancelToken->load(std::memory_order_relaxed)) break;
-                    evalDeepMandelbrotPair(static_cast<double>(px), static_cast<double>(px + 1), static_cast<double>(py), row + px);
+                    evalDeepMandelbrotPair(static_cast<double>(px), static_cast<double>(px + 1), pyDouble, row + px);
                 }
                 if (px < pxEnd) row[px] = evalDeepPixel(px, py);
             }
@@ -2902,8 +3179,13 @@ namespace Mandelbrot
 #if defined(_M_ARM64)
         if (m_executionMode == ExecutionMode::Automatic && type == FractalType::Mandelbrot)
         {
-            RefineSubpixelsPairs(width, height, smooth, type, outIterations, m_sampleWeights,
-                subpixelSamples, cancelToken, evalDeepMandelbrotPair);
+            RefineSubpixelsQuads(width, height, smooth, type, outIterations, m_sampleWeights,
+                subpixelSamples, cancelToken,
+                [&](double px0, double px1, double py0, double py1, float outSamples[4])
+                {
+                    const double pxCoords[4]{ px0, px1, px0, px1 };
+                    evalDeepMandelbrotQuad(pxCoords, py0, py1, outSamples);
+                });
         }
         else
 #endif

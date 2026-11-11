@@ -276,3 +276,49 @@ TEST_CASE(Bla, PairPerturbationAndPreparedBandSlicesMatchReference)
     for (size_t i = 0; i < banded.size(); ++i)
         ASSERT_EQ(banded[i], whole[i]);
 }
+
+TEST_CASE(Bla, QuadPerturbationEarlierBlaAndInteriorStripCertifierMatchReference)
+{
+    const auto orbit = ReferenceAtI(1000);
+    detail::BlaTable earlyTable;
+    earlyTable.Build(orbit.data(), 1000, 2e-25, nullptr, 8);
+    ASSERT_TRUE(earlyTable.Enabled());
+
+#if defined(_M_ARM64)
+    detail::BlaTable deepTable;
+    deepTable.Build(orbit.data(), 1000, 4e-100);
+    ASSERT_TRUE(deepTable.Enabled());
+    for (int y = -3; y <= 3; ++y)
+        for (int x = -3; x <= 3; ++x)
+        {
+            const double dcxCoords[4]{
+                (x + .125) * 1e-101, (x + .375) * 1e-101,
+                (x + .625) * 1e-101, (x + .875) * 1e-101
+            };
+            const double dcy01 = (y + .125) * 1e-101, dcy23 = (y + .625) * 1e-101;
+            detail::PerturbationResult qPlain[4]{}, qBla[4]{};
+            detail::EvalMandelbrotPerturbationQuad<false>(orbit.data(), 1000, 1000, dcxCoords, dcy01, dcy23, deepTable, qPlain);
+            detail::EvalMandelbrotPerturbationQuad<true>(orbit.data(), 1000, 1000, dcxCoords, dcy01, dcy23, deepTable, qBla);
+            for (int k = 0; k < 4; ++k)
+            {
+                const double dcy = k < 2 ? dcy01 : dcy23;
+                const auto sPlain = detail::EvalMandelbrotPerturbation<false>(orbit.data(), 1000, 1000, dcxCoords[k], dcy, deepTable);
+                ASSERT_EQ(sPlain.iterations, qPlain[k].iterations);
+                ASSERT_EQ(std::bit_cast<uint64_t>(sPlain.x), std::bit_cast<uint64_t>(qPlain[k].x));
+                ASSERT_EQ(std::bit_cast<uint64_t>(sPlain.y), std::bit_cast<uint64_t>(qPlain[k].y));
+                if (qBla[k].replay != detail::ReplayReason::None)
+                {
+                    qBla[k] = detail::EvalMandelbrotPerturbation<false>(orbit.data(), 1000, 1000, dcxCoords[k], dcy, deepTable);
+                }
+                ASSERT_EQ(sPlain.iterations, qBla[k].iterations);
+            }
+        }
+#endif
+
+    // Period-3 nucleus interior strip certifies true; dendritic escaping strip certifies false.
+    const auto nucleus = ParameterRoot(-.12256, .74486, 1);
+    const auto nucleusOrbit = HighReference(nucleus, 600);
+    const int nucleusLen = static_cast<int>(nucleusOrbit.size()) - 1;
+    ASSERT_TRUE(detail::CertifyMandelbrotDeepInteriorStrip(nucleusOrbit.data(), nucleusLen, 600, 1e-20, -1e-20, 5e-21));
+    ASSERT_FALSE(detail::CertifyMandelbrotDeepInteriorStrip(orbit.data(), 1000, 1000, 1e-16, 1e-16, 1e-15));
+}
