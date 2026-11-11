@@ -102,6 +102,16 @@
     <ClInclude Include="pch.h" />
     <ClInclude Include="TestHarness.h" />
     <ClInclude Include="..\MandelbrotViewer\HighPrecision.h" />
+    <ClInclude Include="..\MandelbrotViewer\FractalCatalog.h" />
+    <ClInclude Include="..\MandelbrotViewer\FractalConfig.h" />
+    <ClInclude Include="..\MandelbrotViewer\FractalFormulas.h" />
+    <ClInclude Include="..\MandelbrotViewer\ViewportNavigation.h" />
+    <ClInclude Include="..\MandelbrotViewer\RenderPass.h" />
+    <ClInclude Include="..\MandelbrotViewer\AutoExplore.h" />
+    <ClInclude Include="..\MandelbrotViewer\JuliaSolver.h" />
+    <ClInclude Include="..\MandelbrotViewer\DeepReferenceCache.h" />
+    <ClInclude Include="..\MandelbrotViewer\DeepZoomSolver.h" />
+    <ClInclude Include="..\MandelbrotViewer\MandelbrotSimd.h" />
     <ClInclude Include="..\MandelbrotViewer\MandelbrotEngine.h" />
     <ClInclude Include="..\MandelbrotViewer\MandelbrotBla.h" />
     <ClInclude Include="..\MandelbrotViewer\ColorTheme.h" />
@@ -137,6 +147,12 @@
     <ClCompile Include="..\MandelbrotViewer\MovieWriter.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\MandelbrotViewer\MovieExport.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\MandelbrotViewer\BackgroundRenderer.cpp" />
+    <ClCompile Include="..\MandelbrotViewer\FractalCatalog.cpp" />
+    <ClCompile Include="..\MandelbrotViewer\ViewportNavigation.cpp" />
+    <ClCompile Include="..\MandelbrotViewer\AutoExplore.cpp" />
+    <ClCompile Include="..\MandelbrotViewer\JuliaSolver.cpp" />
+    <ClCompile Include="..\MandelbrotViewer\DeepReferenceCache.cpp" />
+    <ClCompile Include="..\MandelbrotViewer\DeepZoomSolver.cpp" />
     <ClCompile Include="..\MandelbrotViewer\MandelbrotEngine.cpp" />
     <ClCompile Include="..\MandelbrotViewer\ColorTheme.cpp" />
   </ItemGroup>
