@@ -11,6 +11,9 @@
 #include <sstream>
 #include <algorithm>
 #include <cmath>
+#if defined(_M_ARM64)
+#include <arm64_neon.h>
+#endif
 
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "ole32.lib")
@@ -48,6 +51,7 @@ namespace Mandelbrot
         bool finished{};
         struct Entry { uint64_t offset; uint32_t bytes; };
         std::vector<Entry> entries;
+        std::vector<uint8_t> lumaPlane, cbPlane, crPlane;
 
         uint64_t Pos() { return static_cast<uint64_t>(file.tellp()); }
         void Bytes(const void* data, size_t n) { file.write(static_cast<const char*>(data), static_cast<std::streamsize>(n)); }
@@ -103,33 +107,112 @@ namespace Mandelbrot
             if (format != GUID_WICPixelFormat24bppBGR) throw std::runtime_error("JPEG encoder does not support full-color movie frames.");
             ComPtr<IWICPlanarBitmapFrameEncode> planar; Check(frame.As(&planar));
             const int chromaWidth = (width + 1) / 2;
-            std::vector<uint8_t> luma(width), cb(chromaWidth), cr(chromaWidth);
+            const size_t lumaSize = static_cast<size_t>(width) * height;
+            const size_t chromaSize = static_cast<size_t>(chromaWidth) * height;
+            if (lumaPlane.size() != lumaSize) lumaPlane.resize(lumaSize);
+            if (cbPlane.size() != chromaSize) cbPlane.resize(chromaSize);
+            if (crPlane.size() != chromaSize) crPlane.resize(chromaSize);
+
             const double kr = HD() ? .2126 : .299, kb = HD() ? .0722 : .114;
-            const auto byte = [](double value) { return static_cast<uint8_t>(std::clamp(std::lround(value), 0l, 255l)); };
+            constexpr int32_t kOne = 1 << 20;
+            constexpr int32_t kHalf = 1 << 19;
+            constexpr int32_t kChromaPos = 1 << 18; // Exact 0.25 in Q20
+            const int32_t yR = static_cast<int32_t>(std::lround(kr * kOne));
+            const int32_t yB = static_cast<int32_t>(std::lround(kb * kOne));
+            const int32_t yG = kOne - yR - yB;
+            const int32_t cbR = static_cast<int32_t>(std::lround((kr / (4.0 * (1.0 - kb))) * kOne));
+            const int32_t cbG = kChromaPos - cbR;
+            const int32_t crB = static_cast<int32_t>(std::lround((kb / (4.0 * (1.0 - kr))) * kOne));
+            const int32_t crG = kChromaPos - crB;
+            constexpr int32_t kChromaBias = (128 << 20) + kHalf;
+
             for (int y = 0; y < height; ++y)
             {
-                for (int x = 0; x < width; x += 2)
+                const uint32_t* row = pixels.data() + static_cast<size_t>(y) * width;
+                uint8_t* yOut = lumaPlane.data() + static_cast<size_t>(y) * width;
+                uint8_t* cbOut = cbPlane.data() + static_cast<size_t>(y) * chromaWidth;
+                uint8_t* crOut = crPlane.data() + static_cast<size_t>(y) * chromaWidth;
+                int x = 0;
+#if defined(_M_ARM64)
+                auto computeY4 = [&](uint16x4_t r4, uint16x4_t g4, uint16x4_t b4) noexcept -> uint16x4_t
                 {
-                    double blueDifference = 0, redDifference = 0;
-                    for (int j = 0; j < 2; ++j)
-                    {
-                        const int sampleX = std::min(x + j, width - 1);
-                        const auto color = pixels[static_cast<size_t>(y) * width + sampleX];
-                        const double b = color & 255, g = (color >> 8) & 255, r = (color >> 16) & 255;
-                        const double value = kr * r + (1 - kr - kb) * g + kb * b;
-                        luma[sampleX] = byte(value);
-                        blueDifference += (b - value) / (2 * (1 - kb));
-                        redDifference += (r - value) / (2 * (1 - kr));
-                    }
-                    cb[x / 2] = byte(128 + blueDifference / 2);
-                    cr[x / 2] = byte(128 + redDifference / 2);
+                    uint32x4_t acc = vdupq_n_u32(static_cast<uint32_t>(kHalf));
+                    acc = vmlaq_n_u32(acc, vmovl_u16(r4), static_cast<uint32_t>(yR));
+                    acc = vmlaq_n_u32(acc, vmovl_u16(g4), static_cast<uint32_t>(yG));
+                    acc = vmlaq_n_u32(acc, vmovl_u16(b4), static_cast<uint32_t>(yB));
+                    return vqmovn_u32(vshrq_n_u32(acc, 20));
+                };
+                auto computeCb4 = [&](uint16x4_t rs4, uint16x4_t gs4, uint16x4_t bs4) noexcept -> uint16x4_t
+                {
+                    int32x4_t acc = vdupq_n_s32(kChromaBias);
+                    acc = vmlaq_n_s32(acc, vreinterpretq_s32_u32(vmovl_u16(bs4)), kChromaPos);
+                    acc = vmlsq_n_s32(acc, vreinterpretq_s32_u32(vmovl_u16(rs4)), cbR);
+                    acc = vmlsq_n_s32(acc, vreinterpretq_s32_u32(vmovl_u16(gs4)), cbG);
+                    return vqmovun_s32(vshrq_n_s32(acc, 20));
+                };
+                auto computeCr4 = [&](uint16x4_t rs4, uint16x4_t gs4, uint16x4_t bs4) noexcept -> uint16x4_t
+                {
+                    int32x4_t acc = vdupq_n_s32(kChromaBias);
+                    acc = vmlaq_n_s32(acc, vreinterpretq_s32_u32(vmovl_u16(rs4)), kChromaPos);
+                    acc = vmlsq_n_s32(acc, vreinterpretq_s32_u32(vmovl_u16(gs4)), crG);
+                    acc = vmlsq_n_s32(acc, vreinterpretq_s32_u32(vmovl_u16(bs4)), crB);
+                    return vqmovun_s32(vshrq_n_s32(acc, 20));
+                };
+                for (; x + 16 <= width; x += 16)
+                {
+                    const uint8x16x4_t bgra = vld4q_u8(reinterpret_cast<const uint8_t*>(row + x));
+                    const uint16x8_t bLo = vmovl_u8(vget_low_u8(bgra.val[0]));
+                    const uint16x8_t bHi = vmovl_u8(vget_high_u8(bgra.val[0]));
+                    const uint16x8_t gLo = vmovl_u8(vget_low_u8(bgra.val[1]));
+                    const uint16x8_t gHi = vmovl_u8(vget_high_u8(bgra.val[1]));
+                    const uint16x8_t rLo = vmovl_u8(vget_low_u8(bgra.val[2]));
+                    const uint16x8_t rHi = vmovl_u8(vget_high_u8(bgra.val[2]));
+                    const uint16x8_t yLo16 = vcombine_u16(
+                        computeY4(vget_low_u16(rLo), vget_low_u16(gLo), vget_low_u16(bLo)),
+                        computeY4(vget_high_u16(rLo), vget_high_u16(gLo), vget_high_u16(bLo)));
+                    const uint16x8_t yHi16 = vcombine_u16(
+                        computeY4(vget_low_u16(rHi), vget_low_u16(gHi), vget_low_u16(bHi)),
+                        computeY4(vget_high_u16(rHi), vget_high_u16(gHi), vget_high_u16(bHi)));
+                    vst1q_u8(yOut + x, vcombine_u8(vqmovn_u16(yLo16), vqmovn_u16(yHi16)));
+
+                    const uint16x8_t rSum = vpaddlq_u8(bgra.val[2]);
+                    const uint16x8_t gSum = vpaddlq_u8(bgra.val[1]);
+                    const uint16x8_t bSum = vpaddlq_u8(bgra.val[0]);
+                    const uint16x8_t cb16 = vcombine_u16(
+                        computeCb4(vget_low_u16(rSum), vget_low_u16(gSum), vget_low_u16(bSum)),
+                        computeCb4(vget_high_u16(rSum), vget_high_u16(gSum), vget_high_u16(bSum)));
+                    const uint16x8_t cr16 = vcombine_u16(
+                        computeCr4(vget_low_u16(rSum), vget_low_u16(gSum), vget_low_u16(bSum)),
+                        computeCr4(vget_high_u16(rSum), vget_high_u16(gSum), vget_high_u16(bSum)));
+                    vst1_u8(cbOut + x / 2, vqmovn_u16(cb16));
+                    vst1_u8(crOut + x / 2, vqmovn_u16(cr16));
                 }
-                WICBitmapPlane planes[]{
-                    {GUID_WICPixelFormat8bppY, luma.data(), static_cast<UINT>(width), static_cast<UINT>(luma.size())},
-                    {GUID_WICPixelFormat8bppCb, cb.data(), static_cast<UINT>(chromaWidth), static_cast<UINT>(cb.size())},
-                    {GUID_WICPixelFormat8bppCr, cr.data(), static_cast<UINT>(chromaWidth), static_cast<UINT>(cr.size())}};
-                Check(planar->WritePixels(1, planes, 3));
+#endif
+                for (; x < width; x += 2)
+                {
+                    const uint32_t c0 = row[x];
+                    const int x1 = std::min(x + 1, width - 1);
+                    const uint32_t c1 = row[x1];
+                    const int32_t b0 = static_cast<int32_t>(c0 & 255);
+                    const int32_t g0 = static_cast<int32_t>((c0 >> 8) & 255);
+                    const int32_t r0 = static_cast<int32_t>((c0 >> 16) & 255);
+                    const int32_t b1 = static_cast<int32_t>(c1 & 255);
+                    const int32_t g1 = static_cast<int32_t>((c1 >> 8) & 255);
+                    const int32_t r1 = static_cast<int32_t>((c1 >> 16) & 255);
+                    yOut[x] = static_cast<uint8_t>((yR * r0 + yG * g0 + yB * b0 + kHalf) >> 20);
+                    yOut[x1] = static_cast<uint8_t>((yR * r1 + yG * g1 + yB * b1 + kHalf) >> 20);
+                    const int32_t rs = r0 + r1, gs = g0 + g1, bs = b0 + b1;
+                    const int32_t cbVal = (kChromaBias + kChromaPos * bs - cbR * rs - cbG * gs) >> 20;
+                    const int32_t crVal = (kChromaBias + kChromaPos * rs - crG * gs - crB * bs) >> 20;
+                    cbOut[x / 2] = static_cast<uint8_t>(std::clamp(cbVal, 0, 255));
+                    crOut[x / 2] = static_cast<uint8_t>(std::clamp(crVal, 0, 255));
+                }
             }
+            WICBitmapPlane planes[]{
+                {GUID_WICPixelFormat8bppY, lumaPlane.data(), static_cast<UINT>(width), static_cast<UINT>(lumaPlane.size())},
+                {GUID_WICPixelFormat8bppCb, cbPlane.data(), static_cast<UINT>(chromaWidth), static_cast<UINT>(cbPlane.size())},
+                {GUID_WICPixelFormat8bppCr, crPlane.data(), static_cast<UINT>(chromaWidth), static_cast<UINT>(crPlane.size())}};
+            Check(planar->WritePixels(static_cast<UINT>(height), planes, 3));
             Check(frame->Commit()); Check(encoder->Commit());
             STATSTG stat{}; Check(stream->Stat(&stat, STATFLAG_NONAME));
             if (stat.cbSize.QuadPart >= 0x80000000ull) throw std::runtime_error("Encoded movie frame is too large.");

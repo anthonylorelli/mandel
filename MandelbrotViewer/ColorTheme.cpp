@@ -289,8 +289,9 @@ namespace Mandelbrot
             const float iter = value - root * 1000000.0f;
             const float rootBase = static_cast<float>(root % 3) / 3.0f;
             const float compressedIter = 12.0f * std::log(1.0f + iter * (1.0f / 12.0f));
-            float ring = std::fmod(compressedIter * 0.06f * frequency + phaseOffset, 1.0f);
-            if (ring < 0.0f) ring += 1.0f;
+            const float rawRing = compressedIter * 0.06f * frequency + phaseOffset;
+            float ring = rawRing - std::floor(rawRing);
+            if (ring >= 1.0f) ring = 0.0f;
             float u = rootBase + ring * (1.0f / 3.0f);
             if (u >= 1.0f) u -= 1.0f;
             if (invert) u = 1.0f - u;
@@ -314,13 +315,14 @@ namespace Mandelbrot
     uint32_t ColorTheme::ColorAtPhase(float basePhase, float phaseOffset, bool invert, float deltaU) const
     {
         const float lutMax = static_cast<float>(LUT_SIZE - 1);
+        const uint32_t* lutData = m_lut.data();
         const float uCenter = basePhase + phaseOffset;
         auto sampleLut = [&](float phase) noexcept -> uint32_t
         {
-            float u = std::fmod(phase, 1.0f);
-            if (u < 0.0f) u += 1.0f;
+            float u = phase - std::floor(phase);
+            if (u >= 1.0f) u = 0.0f;
             if (invert) u = 1.0f - u;
-            return m_lut[static_cast<size_t>(u * lutMax) & (LUT_SIZE - 1)];
+            return lutData[static_cast<size_t>(u * lutMax) & (LUT_SIZE - 1)];
         };
         if (deltaU <= 0.04f) return sampleLut(uCenter);
         const float span = std::min(deltaU, 1.0f);
@@ -384,6 +386,8 @@ namespace Mandelbrot
         if (!pDestPixels || iterationBuffer.size() < count || m_lut.empty()) return;
 
         const float* iterData = iterationBuffer.data();
+        const uint32_t* lutData = m_lut.data();
+        const float lutMax = static_cast<float>(LUT_SIZE - 1);
         const intptr_t totalCount = static_cast<intptr_t>(count);
         const intptr_t rowStride = (width > 0)
             ? static_cast<intptr_t>(width)
@@ -396,6 +400,24 @@ namespace Mandelbrot
             {
                 pDestPixels[idx] = ColorIteration(iterData[idx], frequency, phaseOffset, invert,
                     interiorColor, fractalType);
+            }
+        }
+        else if (!filterPalette || totalCount < 64)
+        {
+            #pragma omp parallel for schedule(static, 4096)
+            for (intptr_t idx = 0; idx < totalCount; ++idx)
+            {
+                const float iter = iterData[idx];
+                if (iter < 0.0f)
+                {
+                    pDestPixels[idx] = interiorColor;
+                    continue;
+                }
+                const float phase = MapIterationToPhase(iter, frequency) + phaseOffset;
+                float u = phase - std::floor(phase);
+                if (u >= 1.0f) u = 0.0f;
+                if (invert) u = 1.0f - u;
+                pDestPixels[idx] = lutData[static_cast<size_t>(u * lutMax) & (LUT_SIZE - 1)];
             }
         }
         else
@@ -415,31 +437,28 @@ namespace Mandelbrot
 
                 // Estimate 2D screen-space phase gradient max(|dU/dx|, |dU/dy|) for band-limited anti-aliasing
                 float deltaU = 0.0f;
-                if (filterPalette && totalCount >= 64)
+                // Horizontal neighbors must stay in the same scanline, including partial final rows.
+                const bool hasLeft = idx > 0 && (rowStride <= 0 || idx % rowStride != 0);
+                const bool hasRight = idx + 1 < totalCount &&
+                    (rowStride <= 0 || (idx + 1) % rowStride != 0);
+                if (hasRight && iterData[idx + 1] >= 0.0f)
                 {
-                    // Horizontal neighbors must stay in the same scanline, including partial final rows.
-                    const bool hasLeft = idx > 0 && (rowStride <= 0 || idx % rowStride != 0);
-                    const bool hasRight = idx + 1 < totalCount &&
-                        (rowStride <= 0 || (idx + 1) % rowStride != 0);
-                    if (hasRight && iterData[idx + 1] >= 0.0f)
-                    {
-                        deltaU = std::max(deltaU, std::abs(MapIterationToPhase(iterData[idx + 1], frequency) - basePhase));
-                    }
-                    else if (hasLeft && iterData[idx - 1] >= 0.0f)
-                    {
-                        deltaU = std::max(deltaU, std::abs(basePhase - MapIterationToPhase(iterData[idx - 1], frequency)));
-                    }
+                    deltaU = std::max(deltaU, std::abs(MapIterationToPhase(iterData[idx + 1], frequency) - basePhase));
+                }
+                else if (hasLeft && iterData[idx - 1] >= 0.0f)
+                {
+                    deltaU = std::max(deltaU, std::abs(basePhase - MapIterationToPhase(iterData[idx - 1], frequency)));
+                }
 
-                    if (rowStride > 0)
+                if (rowStride > 0)
+                {
+                    const intptr_t ny = (idx + rowStride < totalCount) ? (idx + rowStride) : (idx - rowStride);
+                    if (ny >= 0 && ny < totalCount)
                     {
-                        const intptr_t ny = (idx + rowStride < totalCount) ? (idx + rowStride) : (idx - rowStride);
-                        if (ny >= 0 && ny < totalCount)
+                        const float iterY = iterData[ny];
+                        if (iterY >= 0.0f)
                         {
-                            const float iterY = iterData[ny];
-                            if (iterY >= 0.0f)
-                            {
-                                deltaU = std::max(deltaU, std::abs(MapIterationToPhase(iterY, frequency) - basePhase));
-                            }
+                            deltaU = std::max(deltaU, std::abs(MapIterationToPhase(iterY, frequency) - basePhase));
                         }
                     }
                 }
@@ -456,7 +475,15 @@ namespace Mandelbrot
         {
             const auto& sample = (*subpixelSamples)[i];
             if (sample.pixelIndex >= count || !(sample.weight > 0.0f)) continue;
+            const uint32_t center = pDestPixels[sample.pixelIndex];
             const float weight = std::min(sample.weight, 1.0f);
+            if (sample.iterations[0] < 0.0f && sample.iterations[1] < 0.0f &&
+                sample.iterations[2] < 0.0f && sample.iterations[3] < 0.0f &&
+                (center == interiorColor || weight >= 1.0f))
+            {
+                pDestPixels[sample.pixelIndex] = interiorColor;
+                continue;
+            }
             uint32_t colors[4];
             float phases[4]{};
             if (fractalType != FractalType::Newton)
@@ -476,20 +503,31 @@ namespace Mandelbrot
                     ? ColorAtPhase(phases[s], phaseOffset, invert, deltaU)
                     : ColorIteration(sample.iterations[s], frequency, phaseOffset, invert, interiorColor, fractalType);
             }
-            const uint32_t center = pDestPixels[sample.pixelIndex];
+            if (colors[0] == colors[1] && colors[0] == colors[2] && colors[0] == colors[3] &&
+                (colors[0] == center || weight >= 1.0f))
+            {
+                pDestPixels[sample.pixelIndex] = colors[0];
+                continue;
+            }
             uint32_t output = 0;
             for (int channel = 0; channel < 3; ++channel)
             {
                 const int shift = channel * 8;
-                float average = 0.0f;
-                for (auto color : colors) average += colorSpace.decode[(color >> shift) & 0xFF] * 0.25f;
-                const float linear = average * weight + colorSpace.decode[(center >> shift) & 0xFF] * (1.0f - weight);
+                const float average = (colorSpace.decode[(colors[0] >> shift) & 0xFF] +
+                    colorSpace.decode[(colors[1] >> shift) & 0xFF] +
+                    colorSpace.decode[(colors[2] >> shift) & 0xFF] +
+                    colorSpace.decode[(colors[3] >> shift) & 0xFF]) * 0.25f;
+                const float linear = weight >= 1.0f
+                    ? average
+                    : (average * weight + colorSpace.decode[(center >> shift) & 0xFF] * (1.0f - weight));
                 const size_t index = static_cast<size_t>(std::clamp(linear * 4096.0f + 0.5f, 0.0f, 4096.0f));
                 output |= static_cast<uint32_t>(colorSpace.encode[index]) << shift;
             }
-            float alpha = 0.0f;
-            for (auto color : colors) alpha += static_cast<float>(color >> 24) * 0.25f;
-            alpha = alpha * weight + static_cast<float>(center >> 24) * (1.0f - weight);
+            const float alphaAvg = static_cast<float>((colors[0] >> 24) + (colors[1] >> 24) +
+                (colors[2] >> 24) + (colors[3] >> 24)) * 0.25f;
+            const float alpha = weight >= 1.0f
+                ? alphaAvg
+                : (alphaAvg * weight + static_cast<float>(center >> 24) * (1.0f - weight));
             pDestPixels[sample.pixelIndex] = output | (static_cast<uint32_t>(alpha + 0.5f) << 24);
         }
     }
