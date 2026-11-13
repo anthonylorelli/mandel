@@ -135,6 +135,65 @@ namespace Mandelbrot
             steps[time] = BigFloat(3.0 / cameras[time].zoom / plan.width);
         }
 
+        if (effectiveMode == ExecutionMode::Gpu &&
+            engine.CanUseGpu(cameras[0]) &&
+            (temporal == 1 || engine.CanUseGpu(cameras[1])) &&
+            engine.BeginGpuMovieFrame(plan.width, plan.height))
+        {
+            const int maxStripByMem = std::max(
+                1,
+                static_cast<int>((4ULL * 1024 * 1024) / static_cast<size_t>(plan.width)) - 2);
+            const int maxStripByTdr = std::max(
+                16,
+                static_cast<int>(12'000'000'000ULL /
+                    (static_cast<uint64_t>(plan.width) * static_cast<uint64_t>(std::max(1, plan.start.maxIterations)))));
+            const int gpuBandRows = std::min({ bandRows, maxStripByMem, maxStripByTdr });
+
+            bool gpuOk = true;
+            for (int time = 0; time < temporal && gpuOk; ++time)
+            {
+                if (cancel.load(std::memory_order_relaxed)) return {};
+                const auto& camera = cameras[time];
+                engine.PrepareDeepReference(camera, &cancel);
+                if (cancel.load(std::memory_order_relaxed)) return {};
+
+                for (int row = 0; row < plan.height && gpuOk; row += gpuBandRows)
+                {
+                    if (cancel.load(std::memory_order_relaxed)) return {};
+                    const int rows = std::min(gpuBandRows, plan.height - row);
+                    const int topHalo = row > 0 ? 1 : 0;
+                    const int bottomHalo = (row + rows < plan.height) ? 1 : 0;
+                    const int firstRow = row - topHalo;
+                    const int bandHeight = rows + topHalo + bottomHalo;
+                    const BigFloat rowOffset((plan.height - bandHeight) * .5 - firstRow);
+
+                    auto band = camera;
+                    band.height = bandHeight;
+                    band.SetCenter(camera.hpCenterX,
+                        camera.hpCenterY + steps[time].Mul(rowOffset));
+
+                    uint32_t* outBand = output.data() + static_cast<size_t>(row) * plan.width;
+                    gpuOk = engine.RenderGpuMovieBand(
+                        band, topHalo, rows, row, time,
+                        plan.theme, plan.frequency, plan.phase, plan.invert, plan.interior,
+                        outBand, &cancel);
+                    if (cancel.load(std::memory_order_relaxed)) return {};
+
+                    if (gpuOk && progress)
+                    {
+                        const double completedRows = static_cast<double>(time) * plan.height + (row + rows);
+                        progress(static_cast<float>(completedRows / (static_cast<double>(temporal) * plan.height)));
+                    }
+                }
+            }
+
+            if (cancel.load(std::memory_order_relaxed)) return {};
+            if (gpuOk && engine.FinishGpuMovieFrame(plan.width, plan.height, output.data()))
+            {
+                return output;
+            }
+        }
+
         for (int time = 0; time < temporal; ++time)
         {
             if (cancel.load(std::memory_order_relaxed)) return {};
