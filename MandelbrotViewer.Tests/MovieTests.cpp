@@ -286,13 +286,28 @@ TEST_CASE(Movie, Mp4SampleTablesPreserveFramesAndTiming)
     const auto media = U32(bytes, 0);
     ASSERT_EQ(1u, U32(bytes, media)); // 64-bit mdat size, even for small movies.
     ASSERT_TRUE(std::memcmp(bytes.data() + media + 4, "mdat", 4) == 0);
+    const auto sizes = std::search(bytes.begin(), bytes.end(), "stsz", "stsz" + 4);
+    ASSERT_TRUE(sizes != bytes.end()); const auto sizesAt = static_cast<size_t>(sizes - bytes.begin());
+    ASSERT_EQ(3u, U32(bytes, sizesAt + 12));
     const auto table = std::search(bytes.begin(), bytes.end(), "co64", "co64" + 4);
     ASSERT_TRUE(table != bytes.end()); const auto at = static_cast<size_t>(table - bytes.begin());
     ASSERT_EQ(3u, U32(bytes, at + 8));
     for (int i = 0; i < 3; ++i)
     {
+        const uint32_t sampleBytes = U32(bytes, sizesAt + 16 + i * 4);
         const uint64_t offset = (static_cast<uint64_t>(U32(bytes, at + 12 + i * 8)) << 32) | U32(bytes, at + 16 + i * 8);
-        ASSERT_LT(offset + 2, bytes.size()); ASSERT_EQ(255, bytes[offset]); ASSERT_EQ(216, bytes[offset + 1]);
+        ASSERT_GT(sampleBytes, 4u);
+        size_t pos = static_cast<size_t>(offset);
+        const size_t end = pos + sampleBytes;
+        ASSERT_LE(end, bytes.size());
+        while (pos < end)
+        {
+            ASSERT_LE(pos + 4, end);
+            const uint32_t nalBytes = U32(bytes, pos);
+            ASSERT_GT(nalBytes, 0u);
+            pos += 4 + static_cast<size_t>(nalBytes);
+        }
+        ASSERT_EQ(end, pos);
     }
     // Independent Windows media reader verifies frame count, timing, and decodability.
     const auto apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED); ASSERT_TRUE(SUCCEEDED(apartment));
@@ -334,10 +349,14 @@ TEST_CASE(Movie, PlaybackPreservesFractalGeometryAndColors)
         DumpBitmap(L"expected.bmp", p.width, p.height, expected);
         DumpBitmap(L"playback.bmp", p.width, p.height, playback);
     }
-    // 4:2:2 averages neighboring chroma samples. Compare the image after a small
+    // 4:2:0 averages neighboring chroma samples. Compare the image after a small
     // footprint filter so normal color-edge reconstruction is allowed, while broad
     // ghost shapes, hue/range errors, and displaced fractal geometry still fail.
     ASSERT_LT(error, 5.0);
+
+    File hevcFile; { MovieWriter writer(hevcFile.path.wstring(), p.width, p.height, p.fps, MovieCodec::Hevc); writer.WriteFrame(expected); writer.Finish(); }
+    const auto hevcPlayback = DecodePlayerFrame(hevcFile.path, p.width, p.height);
+    ASSERT_LT(FilteredPixelError(expected, hevcPlayback, p.width, p.height), 5.0);
 }
 
 TEST_CASE(Movie, PlaybackPreservesColorPatchesThroughEightK)
@@ -369,24 +388,57 @@ TEST_CASE(Movie, PlaybackPreservesColorPatchesThroughEightK)
     }
 }
 
-TEST_CASE(Movie, JpegWriterSupportsEightKFrames)
+TEST_CASE(Movie, VideoWriterSupportsBothCodecsAndEightKFrames)
 {
-    File file; std::vector<uint32_t> pixels(static_cast<size_t>(7680) * 4320, 0xFF27496D);
-    { MovieWriter writer(file.path.wstring(), 7680, 4320, 60); writer.WriteFrame(pixels); writer.Finish(); }
-    const auto bytes = Read(file.path);
-    // Decode the JPEG payload independently of the MP4 writer (the first JPEG SOI).
-    const std::array<uint8_t, 3> soi{255, 216, 255};
-    const auto jpeg = std::search(bytes.begin(), bytes.end(), soi.begin(), soi.end()); ASSERT_TRUE(jpeg != bytes.end());
-    ASSERT_TRUE(SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED)));
+    const std::array<uint32_t, 8> colors{0xFF000000, 0xFFFFFFFF, 0xFFFF2020, 0xFF20FF20,
+        0xFF2020FF, 0xFF808080, 0xFF65A0D0, 0xFFCE5448};
+    std::vector<uint32_t> hdExpected(static_cast<size_t>(1920) * 1080);
+    for (int y = 0; y < 1080; ++y) for (int x = 0; x < 1920; ++x)
+        hdExpected[static_cast<size_t>(y) * 1920 + x] = colors[(x * 8 / 1920 + (y >= 540 ? 4 : 0)) % 8];
+
+    for (MovieCodec codec : {MovieCodec::H264, MovieCodec::Hevc})
     {
-        ComPtr<IWICImagingFactory> factory; ASSERT_TRUE(SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))));
-        ComPtr<IWICStream> stream; factory->CreateStream(&stream);
-        ASSERT_TRUE(SUCCEEDED(stream->InitializeFromMemory(const_cast<BYTE*>(&*jpeg), static_cast<DWORD>(bytes.end() - jpeg))));
-        ComPtr<IWICBitmapDecoder> decoder; ASSERT_TRUE(SUCCEEDED(factory->CreateDecoderFromStream(stream.Get(), nullptr, WICDecodeMetadataCacheOnDemand, &decoder)));
-        ComPtr<IWICBitmapFrameDecode> frame; ASSERT_TRUE(SUCCEEDED(decoder->GetFrame(0, &frame)));
-        UINT width{}, height{}; frame->GetSize(&width, &height); ASSERT_EQ(7680u, width); ASSERT_EQ(4320u, height);
+        File hdFile;
+        MovieCodec active = codec;
+        {
+            MovieWriter writer(hdFile.path.wstring(), 1920, 1080, 30, codec);
+            active = writer.ActiveCodec();
+            writer.WriteFrame(hdExpected);
+            writer.Finish();
+        }
+        const auto hdBytes = Read(hdFile.path);
+        const char* configTag = (active == MovieCodec::Hevc) ? "hvcC" : "avcC";
+        ASSERT_TRUE(std::search(hdBytes.begin(), hdBytes.end(), configTag, configTag + 4) != hdBytes.end());
+        const auto playback = DecodePlayerFrame(hdFile.path, 1920, 1080);
+        for (int y : {270, 810}) for (int patch = 0; patch < 8; ++patch)
+        {
+            const size_t i = static_cast<size_t>(y) * 1920 + (2 * patch + 1) * 1920 / 16;
+            for (int shift : {0, 8, 16}) ASSERT_NEAR((hdExpected[i] >> shift) & 255, (playback[i] >> shift) & 255, 4);
+        }
     }
-    CoUninitialize();
+
+    File file; std::vector<uint32_t> pixels(static_cast<size_t>(7680) * 4320, 0xFF27496D);
+    { MovieWriter writer(file.path.wstring(), 7680, 4320, 60, MovieCodec::Hevc); writer.WriteFrame(pixels); writer.Finish(); }
+    const auto apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    ASSERT_TRUE(SUCCEEDED(apartment) || apartment == RPC_E_CHANGED_MODE);
+    ASSERT_TRUE(SUCCEEDED(MFStartup(MF_VERSION)));
+    {
+        ComPtr<IMFSourceReader> reader;
+        ComPtr<IMFAttributes> attributes; MFCreateAttributes(&attributes, 1);
+        attributes->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
+        ASSERT_TRUE(SUCCEEDED(MFCreateSourceReaderFromURL(file.path.c_str(), attributes.Get(), &reader)));
+        const DWORD videoStream = static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
+        ComPtr<IMFMediaType> mediaType;
+        ASSERT_TRUE(SUCCEEDED(reader->GetCurrentMediaType(videoStream, &mediaType)));
+        UINT32 width{}, height{};
+        ASSERT_TRUE(SUCCEEDED(MFGetAttributeSize(mediaType.Get(), MF_MT_FRAME_SIZE, &width, &height)));
+        ASSERT_EQ(7680u, width); ASSERT_EQ(4320u, height);
+        DWORD flags{}; LONGLONG timestamp{}; ComPtr<IMFSample> sample;
+        ASSERT_TRUE(SUCCEEDED(reader->ReadSample(videoStream, 0, nullptr, &flags, &timestamp, &sample)));
+        ASSERT_TRUE(sample != nullptr);
+    }
+    MFShutdown();
+    if (SUCCEEDED(apartment)) CoUninitialize();
 }
 
 TEST_CASE(Movie, FullEightKRenderAndPreviewPreserveUniformRegions)

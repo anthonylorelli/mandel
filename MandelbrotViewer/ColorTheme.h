@@ -52,6 +52,12 @@ namespace Mandelbrot
 
         void RebuildLut();
         const std::vector<uint32_t>& Lut() const { return m_lut; }
+        uint32_t AverageRgb() const noexcept
+        {
+            return (static_cast<uint32_t>(m_avgR) << 16) |
+                   (static_cast<uint32_t>(m_avgG) << 8) |
+                   static_cast<uint32_t>(m_avgB);
+        }
 
         void Recolor(
             const std::vector<float>& iterationBuffer,

@@ -13,6 +13,7 @@
 
 namespace Mandelbrot
 {
+    class ColorTheme;
     class GpuFractalSolver;
     using MandelbrotConfig = FractalConfig;
 
@@ -61,6 +62,25 @@ namespace Mandelbrot
         void PrepareDeepReference(
             const FractalConfig& config,
             const std::atomic<bool>* cancelToken = nullptr);
+
+        // Fused GPU movie frame rendering helpers (boundary detection, DispatchIndirect 4x
+        // subpixels, supersampled palette coloring, and linear-light temporal blending on GPU).
+        bool CanUseGpu(const FractalConfig& config);
+        bool BeginGpuMovieFrame(int width, int height);
+        bool RenderGpuMovieBand(
+            const FractalConfig& bandConfig,
+            int topHalo,
+            int visibleRows,
+            int destRowOffset,
+            int temporalStep,
+            const ColorTheme& theme,
+            float frequency,
+            float phaseOffset,
+            bool invert,
+            uint32_t interiorColor,
+            uint32_t* ioBandPixels,
+            const std::atomic<bool>* cancelToken = nullptr);
+        bool FinishGpuMovieFrame(int width, int height, uint32_t* outPixels);
 
         static void ZoomViewport(
             FractalConfig& config,

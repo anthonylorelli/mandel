@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "MandelbrotEngine.h"
+#include "ColorTheme.h"
 #include "DeepZoomSolver.h"
 #include "FractalFormulas.h"
 #include "GpuFractalSolver.h"
@@ -284,6 +285,71 @@ namespace Mandelbrot
         [[maybe_unused]] const ExecutionMode cpuMode =
             (m_executionMode == ExecutionMode::Scalar) ? ExecutionMode::Scalar : ExecutionMode::Automatic;
         m_deepCache.Prepare(config, cpuMode, cancelToken);
+    }
+
+    bool MandelbrotEngine::CanUseGpu(const FractalConfig& config)
+    {
+        return m_executionMode == ExecutionMode::Gpu && EnsureGpuSolver().CanSupportConfig(config);
+    }
+
+    bool MandelbrotEngine::BeginGpuMovieFrame(int width, int height)
+    {
+        return m_executionMode == ExecutionMode::Gpu && EnsureGpuSolver().BeginMovieFrame(width, height);
+    }
+
+    bool MandelbrotEngine::RenderGpuMovieBand(
+        const FractalConfig& bandConfig,
+        int topHalo,
+        int visibleRows,
+        int destRowOffset,
+        int temporalStep,
+        const ColorTheme& theme,
+        float frequency,
+        float phaseOffset,
+        bool invert,
+        uint32_t interiorColor,
+        uint32_t* ioBandPixels,
+        const std::atomic<bool>* cancelToken)
+    {
+        if (m_executionMode != ExecutionMode::Gpu || theme.Lut().size() != ColorTheme::LUT_SIZE)
+        {
+            return false;
+        }
+
+        BigFloat hpX = bandConfig.hpCenterX;
+        BigFloat hpY = bandConfig.hpCenterY;
+        if (std::abs(hpX.ToDouble() - bandConfig.centerX) > 1e-14 ||
+            std::abs(hpY.ToDouble() - bandConfig.centerY) > 1e-14)
+        {
+            hpX = BigFloat(bandConfig.centerX);
+            hpY = BigFloat(bandConfig.centerY);
+        }
+
+        GpuMovieColorParams colorParams{};
+        colorParams.lutData = theme.Lut().data();
+        colorParams.avgRgb = theme.AverageRgb();
+        colorParams.frequency = frequency;
+        colorParams.phaseOffset = phaseOffset;
+        colorParams.invert = invert;
+        colorParams.interiorColor = interiorColor;
+
+        return EnsureGpuSolver().RenderMovieBand(
+            bandConfig,
+            hpX,
+            hpY,
+            m_deepCache,
+            topHalo,
+            visibleRows,
+            destRowOffset,
+            temporalStep,
+            colorParams,
+            ioBandPixels,
+            cancelToken);
+    }
+
+    bool MandelbrotEngine::FinishGpuMovieFrame(int width, int height, uint32_t* outPixels)
+    {
+        return m_executionMode == ExecutionMode::Gpu && EnsureGpuSolver().EndMovieFrame(width, height, outPixels);
     }
 
     void MandelbrotEngine::ZoomViewport(

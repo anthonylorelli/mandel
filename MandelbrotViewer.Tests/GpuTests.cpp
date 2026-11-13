@@ -282,3 +282,155 @@ TEST_CASE(Gpu, MovieRenderMatchesCpuAndRemainsBandIndependent)
         ASSERT_LT(err, 4.5);
     }
 }
+
+TEST_CASE(Gpu, FusedMoviePostProcessCoversThemesNewtonDeepExpAndNoSmoothing)
+{
+    std::atomic<bool> cancel{};
+    MandelbrotEngine sharedGpu(ExecutionMode::Gpu, true);
+    MandelbrotEngine sharedCpu(ExecutionMode::Automatic);
+    ASSERT_TRUE(sharedGpu.IsGpuAvailable());
+
+    auto verifyMoviePlan = [&](MoviePlan gpuPlan, double frame, double maxErr = 4.5)
+    {
+        MoviePlan cpuPlan = gpuPlan;
+        cpuPlan.useGpu = false;
+
+        const auto gpuWhole = RenderMovieFrame(gpuPlan, frame, cancel, {}, gpuPlan.height, &sharedGpu);
+        const auto gpuBanded = RenderMovieFrame(gpuPlan, frame, cancel, {}, 7, &sharedGpu);
+        const auto cpuWhole = RenderMovieFrame(cpuPlan, frame, cancel, {}, cpuPlan.height, &sharedCpu);
+
+        ASSERT_EQ(static_cast<size_t>(gpuPlan.width) * static_cast<size_t>(gpuPlan.height), gpuWhole.size());
+        ASSERT_EQ(gpuWhole.size(), gpuBanded.size());
+        for (size_t i = 0; i < gpuWhole.size(); ++i)
+        {
+            for (int shift : { 0, 8, 16 })
+            {
+                ASSERT_NEAR((gpuWhole[i] >> shift) & 255, (gpuBanded[i] >> shift) & 255, 1);
+            }
+        }
+
+        const double err = FilteredPixelError(cpuWhole, gpuWhole, gpuPlan.width, gpuPlan.height);
+        ASSERT_LT(err, maxErr);
+    };
+
+    // 1. Custom theme (Inferno), invert=true, custom frequency/phase/interior, motionSmoothing=false & true
+    for (bool smoothMotion : { false, true })
+    {
+        MoviePlan plan;
+        plan.width = 97;
+        plan.height = 65;
+        plan.fps = 24;
+        plan.seconds = 1;
+        plan.motionSmoothing = smoothMotion;
+        plan.useGpu = true;
+        plan.theme = ColorTheme(PresetTheme::Inferno);
+        plan.frequency = 2.3f;
+        plan.phase = 0.37f;
+        plan.invert = true;
+        plan.interior = 0xFF123456;
+        plan.start.SetCenter(
+            BigFloat("-0.743643887037158704752191506114774"),
+            BigFloat("0.131825904205311970493132056385139"));
+        plan.targetX = plan.start.hpCenterX;
+        plan.targetY = plan.start.hpCenterY;
+        plan.start.zoom = 50.0;
+        plan.endZoom = 1e14;
+        plan.start.maxIterations = 900;
+        verifyMoviePlan(plan, 12.0, 4.5);
+    }
+
+    // 2. Shallow Newton root shading + SameBasin boundary detection + GPU 4x subpixels
+    {
+        MoviePlan newtonPlan;
+        newtonPlan.width = 96;
+        newtonPlan.height = 64;
+        newtonPlan.fps = 24;
+        newtonPlan.seconds = 1;
+        newtonPlan.motionSmoothing = true;
+        newtonPlan.useGpu = true;
+        newtonPlan.theme = ColorTheme(PresetTheme::Psychedelic);
+        newtonPlan.frequency = 1.7f;
+        newtonPlan.phase = 0.21f;
+        newtonPlan.start.fractalType = FractalType::Newton;
+        newtonPlan.start.SetCenter(0.0, 0.0);
+        newtonPlan.targetX = BigFloat(0.0);
+        newtonPlan.targetY = BigFloat(0.0);
+        newtonPlan.start.zoom = 1.0;
+        newtonPlan.endZoom = 8.0;
+        newtonPlan.start.maxIterations = 256;
+        verifyMoviePlan(newtonPlan, 10.0, 4.5);
+    }
+
+    // 3. Burning Ship perturbation + Viridis theme + fused GPU resolve
+    {
+        const auto& bm = GetBookmarks(FractalType::BurningShip);
+        const auto& loc = (bm.size() > 1) ? bm[1] : bm.front();
+        MoviePlan shipPlan;
+        shipPlan.width = 96;
+        shipPlan.height = 64;
+        shipPlan.fps = 24;
+        shipPlan.seconds = 1;
+        shipPlan.motionSmoothing = true;
+        shipPlan.useGpu = true;
+        shipPlan.theme = ColorTheme(PresetTheme::Viridis);
+        shipPlan.start.fractalType = FractalType::BurningShip;
+        shipPlan.start.SetCenter(loc.centerX, loc.centerY);
+        shipPlan.targetX = shipPlan.start.hpCenterX;
+        shipPlan.targetY = shipPlan.start.hpCenterY;
+        shipPlan.start.zoom = 100.0;
+        shipPlan.endZoom = 5e4;
+        shipPlan.start.maxIterations = 600;
+        verifyMoviePlan(shipPlan, 14.0, 4.5);
+    }
+
+    // 4. Ultra-deep FloatExp + FloatExp BLA (1e45) + fused GPU resolve
+    {
+        MoviePlan deepPlan;
+        deepPlan.width = 81;
+        deepPlan.height = 57;
+        deepPlan.fps = 24;
+        deepPlan.seconds = 1;
+        deepPlan.motionSmoothing = true;
+        deepPlan.useGpu = true;
+        deepPlan.theme = ColorTheme(PresetTheme::Cyberpunk);
+        deepPlan.start.SetCenter(
+            BigFloat("-1.74975914513036651613063305841522638950626266680180909383610018508190914266589615"),
+            BigFloat("0.00000000368513794929231850000185950626266680180909383610018508190914266589615"));
+        deepPlan.targetX = deepPlan.start.hpCenterX;
+        deepPlan.targetY = deepPlan.start.hpCenterY;
+        deepPlan.start.zoom = 1e35;
+        deepPlan.endZoom = 1e50;
+        deepPlan.start.maxIterations = 1500;
+        verifyMoviePlan(deepPlan, 12.0, 4.5);
+    }
+
+    // 5. >16M-pixel strip-based temporal accumulation path (!movieFullFrameAccum, temporalMode=2)
+    {
+        MoviePlan stripPlan;
+        stripPlan.width = 4096;
+        stripPlan.height = 4097; // 16,781,312 pixels > kMaxFullFrameAccumPixels (16,777,216)
+        stripPlan.fps = 24;
+        stripPlan.seconds = 1;
+        stripPlan.motionSmoothing = true;
+        stripPlan.useGpu = true;
+        stripPlan.theme = ColorTheme(PresetTheme::Inferno);
+        stripPlan.start.SetCenter(-0.75, 0.1);
+        stripPlan.targetX = BigFloat(-0.75);
+        stripPlan.targetY = BigFloat(0.1);
+        stripPlan.start.zoom = 2.0;
+        stripPlan.endZoom = 8.0;
+        stripPlan.start.maxIterations = 64;
+
+        const auto stripDefault = RenderMovieFrame(stripPlan, 6.0, cancel, {}, stripPlan.height, &sharedGpu);
+        const auto stripFine = RenderMovieFrame(stripPlan, 6.0, cancel, {}, 512, &sharedGpu);
+        ASSERT_EQ(static_cast<size_t>(stripPlan.width) * static_cast<size_t>(stripPlan.height), stripDefault.size());
+        ASSERT_EQ(stripDefault.size(), stripFine.size());
+        for (size_t i = 0; i < stripDefault.size(); i += 997)
+        {
+            for (int shift : { 0, 8, 16 })
+            {
+                ASSERT_NEAR((stripDefault[i] >> shift) & 255, (stripFine[i] >> shift) & 255, 1);
+            }
+        }
+    }
+}
