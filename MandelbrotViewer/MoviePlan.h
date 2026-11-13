@@ -1,6 +1,7 @@
 #pragma once
 #include "MandelbrotEngine.h"
 #include "ColorTheme.h"
+#include "MovieWriter.h"
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -14,6 +15,10 @@ namespace Mandelbrot
         {1280, 720, L"720p - 1280 x 720"}, {1920, 1080, L"1080p - 1920 x 1080"},
         {2560, 1440, L"1440p - 2560 x 1440"}, {3840, 2160, L"4K UHD - 3840 x 2160"},
         {7680, 4320, L"8K UHD - 7680 x 4320"} }};
+    struct MovieCodecOption { MovieCodec codec; const wchar_t* label; };
+    inline constexpr std::array<MovieCodecOption, 2> MovieCodecs{{
+        {MovieCodec::H264, L"H.264 / AVC (Hardware MP4)"},
+        {MovieCodec::Hevc, L"HEVC / H.265 (Hardware MP4)"} }};
     inline constexpr std::array<int, 6> MovieFrameRates{24, 25, 30, 48, 50, 60};
     inline constexpr double MinMovieZoomSpeed = 0.2;
     inline constexpr double MaxMovieZoomSpeed = 5.0;
@@ -24,6 +29,7 @@ namespace Mandelbrot
         BigFloat targetX, targetY;
         double endZoom{1000.0};
         int width{1920}, height{1080}, fps{30}, seconds{30};
+        MovieCodec codec{MovieCodec::H264};
         ColorTheme theme;
         float frequency{1.0f}, phase{};
         bool invert{}, motionSmoothing{true};

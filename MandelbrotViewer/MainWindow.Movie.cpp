@@ -63,6 +63,9 @@ namespace winrt::MandelbrotViewer::implementation
             ComboBox fps; fps.Header(box_value(L"Frames per second")); fps.HorizontalAlignment(HorizontalAlignment::Stretch);
             for (auto value : Mandelbrot::MovieFrameRates) fps.Items().Append(box_value(to_hstring(value)));
             fps.SelectedIndex(2); settings.Children().Append(fps);
+            ComboBox codec; codec.Header(box_value(L"Video codec")); codec.HorizontalAlignment(HorizontalAlignment::Stretch);
+            for (const auto& item : Mandelbrot::MovieCodecs) codec.Items().Append(box_value(item.label));
+            codec.SelectedIndex(0); settings.Children().Append(codec);
             NumberBox duration; duration.Header(box_value(L"Duration (seconds)")); duration.Minimum(1); duration.Maximum(3600);
             duration.Value(30); duration.SmallChange(1); duration.SpinButtonPlacementMode(NumberBoxSpinButtonPlacementMode::Inline);
             settings.Children().Append(duration);
@@ -121,6 +124,7 @@ namespace winrt::MandelbrotViewer::implementation
                     plan.width = Mandelbrot::MovieResolutions.at(resolution.SelectedIndex()).width;
                     plan.height = Mandelbrot::MovieResolutions.at(resolution.SelectedIndex()).height;
                     plan.fps = Mandelbrot::MovieFrameRates.at(fps.SelectedIndex());
+                    plan.codec = Mandelbrot::MovieCodecs.at(codec.SelectedIndex()).codec;
                     if (!std::isfinite(duration.Value()) || duration.Value() < 1 || duration.Value() > 3600 ||
                         duration.Value() != std::floor(duration.Value()))
                         throw std::invalid_argument("Enter a whole number of seconds.");

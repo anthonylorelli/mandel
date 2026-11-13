@@ -323,7 +323,7 @@ namespace Mandelbrot
                 staging.clear();
             }
             {
-                MovieWriter writer(staging.wstring(), plan.width, plan.height, plan.fps);
+                MovieWriter writer(staging.wstring(), plan.width, plan.height, plan.fps, plan.codec);
                 MandelbrotEngine engine(plan.useGpu ? ExecutionMode::Gpu : ExecutionMode::Automatic);
                 struct PendingFrame { uint32_t frame{}; std::vector<uint32_t> pixels; };
                 std::mutex queueMutex;
