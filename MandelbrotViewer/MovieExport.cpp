@@ -106,8 +106,23 @@ namespace Mandelbrot
         if (bandRows < 1) throw std::invalid_argument("Invalid movie render band size.");
         if (cancel.load(std::memory_order_relaxed)) return {};
         static const ColorSpace colors;
-        MandelbrotEngine localEngine;
-        MandelbrotEngine& engine = sharedEngine ? *sharedEngine : localEngine;
+        const ExecutionMode requestedMode = plan.useGpu ? ExecutionMode::Gpu : ExecutionMode::Automatic;
+        std::optional<MandelbrotEngine> localEngine;
+        if (!sharedEngine)
+        {
+            localEngine.emplace(requestedMode);
+        }
+        MandelbrotEngine& engine = sharedEngine ? *sharedEngine : *localEngine;
+        const ExecutionMode previousMode = engine.GetExecutionMode();
+        const ExecutionMode effectiveMode = (previousMode == ExecutionMode::Scalar) ? ExecutionMode::Scalar : requestedMode;
+        struct ModeGuard
+        {
+            MandelbrotEngine& eng;
+            ExecutionMode prev;
+            ~ModeGuard() { eng.SetExecutionMode(prev); }
+        } modeGuard{ engine, previousMode };
+        engine.SetExecutionMode(effectiveMode);
+
         std::vector<uint32_t> output(static_cast<size_t>(plan.width) * plan.height), painted;
         std::vector<float> iterations;
         std::vector<SubpixelSamples> subpixels;
@@ -119,24 +134,27 @@ namespace Mandelbrot
             cameras[time] = plan.CameraAt(frameIndex + (temporal == 2 ? (time == 0 ? -.25 : .25) : 0));
             steps[time] = BigFloat(3.0 / cameras[time].zoom / plan.width);
         }
-        engine.PrepareDeepReference(cameras[0], &cancel);
-        if (cancel.load(std::memory_order_relaxed)) return {};
 
-        for (int row = 0; row < plan.height; row += bandRows)
+        for (int time = 0; time < temporal; ++time)
         {
-            const int rows = std::min(bandRows, plan.height - row);
-            const int topHalo = row > 0 ? 1 : 0;
-            const int bottomHalo = (row + rows < plan.height) ? 1 : 0;
-            const int firstRow = row - topHalo;
-            const int bandHeight = rows + topHalo + bottomHalo;
-            const size_t count = static_cast<size_t>(plan.width) * rows;
-            const size_t bandCount = static_cast<size_t>(plan.width) * bandHeight;
-            painted.resize(bandCount);
-            const BigFloat rowOffset((plan.height - bandHeight) * .5 - firstRow);
-            for (int time = 0; time < temporal; ++time)
+            if (cancel.load(std::memory_order_relaxed)) return {};
+            const auto& camera = cameras[time];
+            engine.PrepareDeepReference(camera, &cancel);
+            if (cancel.load(std::memory_order_relaxed)) return {};
+
+            for (int row = 0; row < plan.height; row += bandRows)
             {
                 if (cancel.load(std::memory_order_relaxed)) return {};
-                const auto& camera = cameras[time];
+                const int rows = std::min(bandRows, plan.height - row);
+                const int topHalo = row > 0 ? 1 : 0;
+                const int bottomHalo = (row + rows < plan.height) ? 1 : 0;
+                const int firstRow = row - topHalo;
+                const int bandHeight = rows + topHalo + bottomHalo;
+                const size_t count = static_cast<size_t>(plan.width) * rows;
+                const size_t bandCount = static_cast<size_t>(plan.width) * bandHeight;
+                painted.resize(bandCount);
+                const BigFloat rowOffset((plan.height - bandHeight) * .5 - firstRow);
+
                 auto band = camera;
                 band.height = bandHeight;
                 band.SetCenter(camera.hpCenterX,
@@ -171,7 +189,11 @@ namespace Mandelbrot
                         outBand[i] = color;
                     }
                 }
-                if (progress) progress(static_cast<float>(row + rows * ((time + 1.0) / temporal)) / plan.height);
+                if (progress)
+                {
+                    const double completedRows = static_cast<double>(time) * plan.height + (row + rows);
+                    progress(static_cast<float>(completedRows / (static_cast<double>(temporal) * plan.height)));
+                }
             }
         }
         return output;
@@ -243,7 +265,7 @@ namespace Mandelbrot
             }
             {
                 MovieWriter writer(staging.wstring(), plan.width, plan.height, plan.fps);
-                MandelbrotEngine engine;
+                MandelbrotEngine engine(plan.useGpu ? ExecutionMode::Gpu : ExecutionMode::Automatic);
                 struct PendingFrame { uint32_t frame{}; std::vector<uint32_t> pixels; };
                 std::mutex queueMutex;
                 std::condition_variable queueCv;
@@ -311,7 +333,8 @@ namespace Mandelbrot
                     }
                 } guard{queueMutex, queueCv, renderDone, encoderThread};
 
-                const int exportBandRows = std::clamp((1920 * 270) / std::max(1, plan.width), 64, plan.height);
+                const int bandBudgetPixels = (plan.useGpu && engine.IsGpuAvailable()) ? (3840 * 1080) : (1920 * 270);
+                const int exportBandRows = std::clamp(bandBudgetPixels / std::max(1, plan.width), 64, plan.height);
                 for (uint32_t frame = 0; frame < m_total; ++frame)
                 {
                     ThrowIfCanceled(m_cancel);

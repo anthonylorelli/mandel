@@ -10,10 +10,12 @@ namespace Mandelbrot
 
     // Automatic selects supported CPU optimizations, including guarded deep-zoom
     // iteration skipping. Scalar retains unaccelerated reference arithmetic.
+    // Gpu uses DirectCompute shaders with automatic CPU fallback when needed.
     enum class ExecutionMode
     {
         Automatic,
-        Scalar
+        Scalar,
+        Gpu
     };
 
     struct ComplexOrbitPoint

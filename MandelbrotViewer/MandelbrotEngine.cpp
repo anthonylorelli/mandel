@@ -2,6 +2,7 @@
 #include "MandelbrotEngine.h"
 #include "DeepZoomSolver.h"
 #include "FractalFormulas.h"
+#include "GpuFractalSolver.h"
 #include "JuliaSolver.h"
 #include "MandelbrotSimd.h"
 #include "RenderPass.h"
@@ -11,6 +12,54 @@
 
 namespace Mandelbrot
 {
+    MandelbrotEngine::MandelbrotEngine() = default;
+
+    MandelbrotEngine::MandelbrotEngine(ExecutionMode mode, bool allowSoftwareGpu)
+        : m_executionMode(mode)
+        , m_allowSoftwareGpu(allowSoftwareGpu)
+    {
+    }
+
+    MandelbrotEngine::~MandelbrotEngine() = default;
+
+    MandelbrotEngine::MandelbrotEngine(const MandelbrotEngine& other)
+        : m_executionMode(other.m_executionMode)
+        , m_allowSoftwareGpu(other.m_allowSoftwareGpu)
+        , m_sampleWeights(other.m_sampleWeights)
+        , m_deepCache(other.m_deepCache)
+    {
+    }
+
+    MandelbrotEngine& MandelbrotEngine::operator=(const MandelbrotEngine& other)
+    {
+        if (this != &other)
+        {
+            m_executionMode = other.m_executionMode;
+            m_allowSoftwareGpu = other.m_allowSoftwareGpu;
+            m_sampleWeights = other.m_sampleWeights;
+            m_deepCache = other.m_deepCache;
+            m_gpuSolver.reset();
+        }
+        return *this;
+    }
+
+    MandelbrotEngine::MandelbrotEngine(MandelbrotEngine&& other) noexcept = default;
+    MandelbrotEngine& MandelbrotEngine::operator=(MandelbrotEngine&& other) noexcept = default;
+
+    GpuFractalSolver& MandelbrotEngine::EnsureGpuSolver()
+    {
+        if (!m_gpuSolver)
+        {
+            m_gpuSolver = std::make_unique<GpuFractalSolver>(m_allowSoftwareGpu);
+        }
+        return *m_gpuSolver;
+    }
+
+    bool MandelbrotEngine::IsGpuAvailable()
+    {
+        return EnsureGpuSolver().IsAvailable();
+    }
+
     double MandelbrotEngine::Compute(
         const FractalConfig& config,
         std::vector<float>& outIterations,
@@ -20,6 +69,29 @@ namespace Mandelbrot
         if (subpixelSamples) subpixelSamples->clear();
         if (config.width <= 0 || config.height <= 0) return 0.0;
         detail::EnsureOpenMpAllCores();
+
+        if (m_executionMode == ExecutionMode::Gpu)
+        {
+            BigFloat hpX = config.hpCenterX;
+            BigFloat hpY = config.hpCenterY;
+            if (std::abs(hpX.ToDouble() - config.centerX) > 1e-14 ||
+                std::abs(hpY.ToDouble() - config.centerY) > 1e-14)
+            {
+                hpX = BigFloat(config.centerX);
+                hpY = BigFloat(config.centerY);
+            }
+            double gpuElapsedMs = 0.0;
+            if (EnsureGpuSolver().TryCompute(
+                config, hpX, hpY, m_deepCache, m_sampleWeights,
+                outIterations, cancelToken, subpixelSamples, gpuElapsedMs))
+            {
+                return gpuElapsedMs;
+            }
+        }
+
+        [[maybe_unused]] const ExecutionMode cpuMode =
+            (m_executionMode == ExecutionMode::Scalar) ? ExecutionMode::Scalar : ExecutionMode::Automatic;
+
         if (config.juliaSet)
         {
             return ComputeJuliaSet(config, outIterations, m_sampleWeights, cancelToken, subpixelSamples);
@@ -71,7 +143,7 @@ namespace Mandelbrot
         };
 
 #if defined(_M_ARM64)
-        if (m_executionMode == ExecutionMode::Automatic &&
+        if (cpuMode == ExecutionMode::Automatic &&
             type == FractalType::Mandelbrot && config.renderStride <= 1)
         {
             constexpr int kSegmentWidth = 64;
@@ -144,7 +216,7 @@ namespace Mandelbrot
         }
 
 #if defined(_M_ARM64)
-        if (m_executionMode == ExecutionMode::Automatic && type == FractalType::Mandelbrot)
+        if (cpuMode == ExecutionMode::Automatic && type == FractalType::Mandelbrot)
         {
             detail::RefineSubpixelsQuads(width, height, smooth, type, outIterations, m_sampleWeights,
                 subpixelSamples, cancelToken,
@@ -179,8 +251,20 @@ namespace Mandelbrot
         std::vector<SubpixelSamples>* subpixelSamples)
     {
         detail::EnsureOpenMpAllCores();
+        if (m_executionMode == ExecutionMode::Gpu)
+        {
+            double gpuElapsedMs = 0.0;
+            if (EnsureGpuSolver().TryCompute(
+                config, centerX, centerY, m_deepCache, m_sampleWeights,
+                outIterations, cancelToken, subpixelSamples, gpuElapsedMs))
+            {
+                return gpuElapsedMs;
+            }
+        }
+        [[maybe_unused]] const ExecutionMode cpuMode =
+            (m_executionMode == ExecutionMode::Scalar) ? ExecutionMode::Scalar : ExecutionMode::Automatic;
         return ComputeDeepZoomFrame(
-            config, centerX, centerY, m_executionMode, m_deepCache,
+            config, centerX, centerY, cpuMode, m_deepCache,
             m_sampleWeights, outIterations, cancelToken, subpixelSamples);
     }
 
@@ -188,7 +272,18 @@ namespace Mandelbrot
         const FractalConfig& config,
         const std::atomic<bool>* cancelToken)
     {
-        m_deepCache.Prepare(config, m_executionMode, cancelToken);
+        if (m_executionMode == ExecutionMode::Gpu)
+        {
+            auto& solver = EnsureGpuSolver();
+            if (solver.IsAvailable())
+            {
+                solver.PrepareReference(config, m_deepCache, cancelToken);
+                return;
+            }
+        }
+        [[maybe_unused]] const ExecutionMode cpuMode =
+            (m_executionMode == ExecutionMode::Scalar) ? ExecutionMode::Scalar : ExecutionMode::Automatic;
+        m_deepCache.Prepare(config, cpuMode, cancelToken);
     }
 
     void MandelbrotEngine::ZoomViewport(

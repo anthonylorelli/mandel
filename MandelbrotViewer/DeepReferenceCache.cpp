@@ -11,8 +11,14 @@ namespace Mandelbrot
         ExecutionMode executionMode,
         const std::atomic<bool>* cancelToken)
     {
+        const bool gpuEarlyPerturb = (executionMode == ExecutionMode::Gpu) &&
+            (config.fractalType == FractalType::Mandelbrot ||
+             config.fractalType == FractalType::Tricorn ||
+             config.fractalType == FractalType::BurningShip ||
+             config.fractalType == FractalType::Buffalo);
+        const double minZoom = gpuEarlyPerturb ? 16.0 : DeepZoomThreshold;
         if (config.width <= 0 || config.height <= 0 || config.juliaSet ||
-            config.zoom < DeepZoomThreshold || config.fractalType == FractalType::Newton)
+            config.zoom < minZoom || config.fractalType == FractalType::Newton)
         {
             return;
         }
@@ -453,6 +459,7 @@ namespace Mandelbrot
         outState.refLen = bestRefLen;
         outState.refCxDouble = m_cachedRefX.ToDouble();
         outState.refCyDouble = m_cachedRefY.ToDouble();
+        outState.orbitVersion = m_cachedOrbitVersion;
         outState.orbit = m_cachedOrbit.data();
         outState.mandelbrotBla = &m_cachedMandelbrotBla;
         return true;
