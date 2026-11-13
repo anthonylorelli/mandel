@@ -14,6 +14,7 @@ namespace Mandelbrot
         int refLen{ 0 };
         double refCxDouble{ 0.0 };
         double refCyDouble{ 0.0 };
+        uint64_t orbitVersion{ 0 };
         const ComplexOrbitPoint* orbit{ nullptr };
         const detail::BlaTable* mandelbrotBla{ nullptr };
     };

@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 #include "AutoExplore.h"
@@ -12,6 +13,7 @@
 
 namespace Mandelbrot
 {
+    class GpuFractalSolver;
     using MandelbrotConfig = FractalConfig;
 
     class MandelbrotEngine
@@ -24,8 +26,17 @@ namespace Mandelbrot
         using ExecutionMode = Mandelbrot::ExecutionMode;
         using ComplexOrbitPt = ComplexOrbitPoint;
 
-        MandelbrotEngine() = default;
-        explicit MandelbrotEngine(ExecutionMode mode) noexcept : m_executionMode(mode) {}
+        MandelbrotEngine();
+        explicit MandelbrotEngine(ExecutionMode mode, bool allowSoftwareGpu = false);
+        ~MandelbrotEngine();
+        MandelbrotEngine(const MandelbrotEngine& other);
+        MandelbrotEngine& operator=(const MandelbrotEngine& other);
+        MandelbrotEngine(MandelbrotEngine&& other) noexcept;
+        MandelbrotEngine& operator=(MandelbrotEngine&& other) noexcept;
+
+        ExecutionMode GetExecutionMode() const noexcept { return m_executionMode; }
+        void SetExecutionMode(ExecutionMode mode) noexcept { m_executionMode = mode; }
+        bool IsGpuAvailable();
 
         // Computes fractional iteration values into outIterations (size: width * height)
         // Optional sparse subpixel samples refine boundaries and detailed regions. Center
@@ -102,8 +113,12 @@ namespace Mandelbrot
             double& outPx, double& outPy);
 
     private:
+        GpuFractalSolver& EnsureGpuSolver();
+
         ExecutionMode m_executionMode{ ExecutionMode::Automatic };
+        bool m_allowSoftwareGpu{ false };
         std::vector<float> m_sampleWeights;
         DeepReferenceCache m_deepCache;
+        std::unique_ptr<GpuFractalSolver> m_gpuSolver;
     };
 }

@@ -28,6 +28,7 @@ namespace Mandelbrot
         float frequency{1.0f}, phase{};
         bool invert{}, motionSmoothing{true};
         bool autoRetarget{};
+        bool useGpu{true};
         uint64_t targetSeed{1};
         uint32_t interior{0xFF000000};
 

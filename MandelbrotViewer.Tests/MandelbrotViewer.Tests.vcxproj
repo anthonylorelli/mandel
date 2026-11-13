@@ -111,6 +111,7 @@
     <ClInclude Include="..\MandelbrotViewer\JuliaSolver.h" />
     <ClInclude Include="..\MandelbrotViewer\DeepReferenceCache.h" />
     <ClInclude Include="..\MandelbrotViewer\DeepZoomSolver.h" />
+    <ClInclude Include="..\MandelbrotViewer\GpuFractalSolver.h" />
     <ClInclude Include="..\MandelbrotViewer\MandelbrotSimd.h" />
     <ClInclude Include="..\MandelbrotViewer\MandelbrotEngine.h" />
     <ClInclude Include="..\MandelbrotViewer\MandelbrotBla.h" />
@@ -141,6 +142,7 @@
     <ClCompile Include="SubpixelSamplingTests.cpp" />
     <ClCompile Include="SimdTests.cpp" />
     <ClCompile Include="BlaTests.cpp" />
+    <ClCompile Include="GpuTests.cpp" />
     <ClCompile Include="JuliaTests.cpp" />
     <ClCompile Include="JuliaTourTests.cpp" />
     <ClCompile Include="MovieTests.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
@@ -153,6 +155,7 @@
     <ClCompile Include="..\MandelbrotViewer\JuliaSolver.cpp" />
     <ClCompile Include="..\MandelbrotViewer\DeepReferenceCache.cpp" />
     <ClCompile Include="..\MandelbrotViewer\DeepZoomSolver.cpp" />
+    <ClCompile Include="..\MandelbrotViewer\GpuFractalSolver.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\MandelbrotViewer\MandelbrotEngine.cpp" />
     <ClCompile Include="..\MandelbrotViewer\ColorTheme.cpp" />
   </ItemGroup>
