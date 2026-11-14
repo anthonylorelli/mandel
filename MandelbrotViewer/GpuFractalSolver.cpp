@@ -1,3031 +1,469 @@
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#include <d3d11.h>
-#include <dxgi1_6.h>
-#include <d3dcompiler.h>
-#include <wrl/client.h>
-
-#include "GpuFractalSolver.h"
+#include "GpuFractalSolverImpl.h"
 #include "RenderPass.h"
 
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstring>
 #include <limits>
-#include <mutex>
 #include <omp.h>
 #include <stdexcept>
 #include <vector>
 
-#pragma comment(lib, "d3d11.lib")
-#pragma comment(lib, "dxgi.lib")
-#pragma comment(lib, "d3dcompiler.lib")
-
 namespace Mandelbrot
 {
-    namespace
+    using namespace detail;
+
+    bool GpuFractalSolver::Impl::SyncReferenceAndBla(
+        const FractalConfig& config,
+        const DeepReferenceState& refState,
+        double cMax,
+        const std::atomic<bool>* cancelToken,
+        bool& outRunDeepExp)
     {
-        using Microsoft::WRL::ComPtr;
-
-        constexpr double kGpuDeepExpThreshold = 1e32;
-        constexpr double kGpuTricornMaxZoom = 1e20;
-        constexpr size_t kMaxPrimaryChunkPixels = 16ULL * 1024 * 1024;
-        constexpr uint64_t kMaxPrimaryIterBudget = 6'000'000'000ULL;
-        constexpr size_t kMaxSubpixelBatchPixels = 2ULL * 1024 * 1024;
-        constexpr size_t kMaxFullFrameAccumPixels = 16ULL * 1024 * 1024;
-        constexpr size_t kD3D11SafeMaxBufferBytes = 128ULL * 1024 * 1024;
-        constexpr uint32_t kIndirectSubpixelSentinel = 0xFFFFFFFFu;
-        constexpr size_t kPaletteLutSize = 4096;
-        constexpr int kZeroExpSentinel = -1073741824;
-
-        enum class ShaderMode
-        {
-            Shallow,
-            PerturbLds,
-            PerturbLdsBla,
-            PerturbDeepExp
-        };
-
-        struct GpuPixelSubInfo
-        {
-            uint32_t slot;
-            float weight;
-        };
-        static_assert(sizeof(GpuPixelSubInfo) == 8);
-
-        struct GpuBlaBlockF32
-        {
-            float ar, ai;
-            float br, bi;
-            float radius;
-            float pad0, pad1, pad2;
-        };
-        static_assert(sizeof(GpuBlaBlockF32) == 32);
-
-        struct GpuBlaBlockExp
-        {
-            float ar, ai;
-            float br, bi;
-            float radMant;
-            int32_t aExp, bExp, radExp;
-        };
-        static_assert(sizeof(GpuBlaBlockExp) == 32);
-
-        struct GpuOrbitPointExp
-        {
-            float rx, ry;
-            float rmx, rmy;
-            int32_t rExp;
-            int32_t pad0, pad1, pad2;
-        };
-        static_assert(sizeof(GpuOrbitPointExp) == 32);
-
-        struct GpuCoordExp
-        {
-            float mant;
-            int32_t exp;
-        };
-        static_assert(sizeof(GpuCoordExp) == 8);
-
-        struct alignas(16) ShallowCb
-        {
-            uint32_t width, height, maxIter, smoothFlag;
-            uint32_t fractalType, juliaFlag, rowOffset, subpixelTotal;
-            float juliaCx, juliaCy, bailout2, pad0;
-            uint32_t outRowOffset, pad2, pad3, pad4;
-        };
-        static_assert(sizeof(ShallowCb) == 64);
-
-        struct alignas(16) PerturbLdsCb
-        {
-            uint32_t width, height, maxIter, refLen;
-            uint32_t fractalType, smoothFlag, checkCardioid, needScaleCheck;
-            uint32_t rowOffset, subpixelTotal;
-            float refCx, refCy;
-            uint32_t outRowOffset, pad1, pad2, pad3;
-        };
-        static_assert(sizeof(PerturbLdsCb) == 64);
-
-        struct alignas(16) PerturbLdsBlaCb
-        {
-            uint32_t width, height, maxIter, refLen;
-            uint32_t smoothFlag, blaNumLevels, rowOffset, subpixelTotal;
-            float blaMaxRadius, refCx, refCy, pad0;
-            uint32_t checkCardioid, outRowOffset, pad3, pad4;
-        };
-        static_assert(sizeof(PerturbLdsBlaCb) == 64);
-
-        struct alignas(16) PerturbDeepExpCb
-        {
-            uint32_t width, height, maxIter, refLen;
-            uint32_t smoothFlag, useBla, blaNumLevels, rowOffset;
-            uint32_t subpixelTotal;
-            float blaMaxRadMant;
-            int32_t blaMaxRadExp;
-            float refCx;
-            float refCy;
-            uint32_t outRowOffset;
-            float pad1, pad2;
-        };
-        static_assert(sizeof(PerturbDeepExpCb) == 64);
-
-        struct alignas(16) PostProcessCb
-        {
-            uint32_t width, bandHeight, visibleRows, topHalo;
-            uint32_t destRowOffset, fractalType, smoothFlag, invertFlag;
-            float frequency, phaseOffset;
-            uint32_t interiorColor, avgRgb;
-            uint32_t temporalMode, subGroupThreads, pad0, pad1;
-        };
-        static_assert(sizeof(PostProcessCb) == 64);
-
-        inline void SplitFrexpSigned(double v, int extraExp, float& mOut, int32_t& expOut) noexcept
-        {
-            if (v == 0.0 || !std::isfinite(v))
-            {
-                mOut = 0.0f;
-                expOut = kZeroExpSentinel;
-                return;
-            }
-            int e = 0;
-            float m = static_cast<float>(std::frexp(v, &e));
-            if (std::abs(m) >= 1.0f)
-            {
-                m *= 0.5f;
-                ++e;
-            }
-            mOut = m;
-            expOut = static_cast<int32_t>(e + extraExp);
-        }
-
-        inline void SplitFrexpPositive(double r, float& mOut, int32_t& expOut) noexcept
-        {
-            if (!(r > 0.0) || !std::isfinite(r))
-            {
-                mOut = 0.0f;
-                expOut = kZeroExpSentinel;
-                return;
-            }
-            int e = 0;
-            float m = static_cast<float>(std::frexp(r, &e));
-            if (m >= 1.0f)
-            {
-                m *= 0.5f;
-                ++e;
-            }
-            mOut = m;
-            expOut = static_cast<int32_t>(e);
-        }
-
-        inline void SplitFrexp2(double x, double y, float& mxOut, float& myOut, int32_t& expOut) noexcept
-        {
-            const double maxAbs = std::max(std::abs(x), std::abs(y));
-            if (!(maxAbs > 0.0) || !std::isfinite(maxAbs))
-            {
-                mxOut = 0.0f;
-                myOut = 0.0f;
-                expOut = kZeroExpSentinel;
-                return;
-            }
-            int e = 0;
-            std::frexp(maxAbs, &e);
-            float mx = static_cast<float>(std::ldexp(x, -e));
-            float my = static_cast<float>(std::ldexp(y, -e));
-            if (std::max(std::abs(mx), std::abs(my)) >= 1.0f)
-            {
-                mx *= 0.5f;
-                my *= 0.5f;
-                ++e;
-            }
-            mxOut = mx;
-            myOut = my;
-            expOut = static_cast<int32_t>(e);
-        }
-
-        class GpuBlaBuilder
-        {
-        public:
-            struct BlockD
-            {
-                double ar{}, ai{}, br{}, bi{}, radius{};
-            };
-
-            std::vector<GpuBlaBlockF32> blocksF32;
-            std::vector<GpuBlaBlockExp> blocksExp;
-            std::array<uint32_t, 64> levelMeta{};
-            uint32_t numLevels{ 0 };
-            double maxRadD{ 0.0 };
-            float maxRadMant{ 0.0f };
-            int32_t maxRadExp{ kZeroExpSentinel };
-            bool fitsFloat32{ true };
-
-            void Clear() noexcept
-            {
-                blocksF32.clear();
-                blocksExp.clear();
-                levelMeta.fill(0);
-                numLevels = 0;
-                maxRadD = 0.0;
-                maxRadMant = 0.0f;
-                maxRadExp = kZeroExpSentinel;
-                fitsFloat32 = true;
-            }
-
-            void Build(const ComplexOrbitPoint* orbit, int refLength, double cMax, const std::atomic<bool>* cancel)
-            {
-                Clear();
-                if (!orbit || refLength <= 8 || !(cMax > 0.0) || !std::isfinite(cMax))
-                {
-                    return;
-                }
-                auto canceled = [&] { return cancel && cancel->load(std::memory_order_relaxed); };
-                if (canceled()) return;
-
-                constexpr double epsTol = 1e-8;
-                auto single = [&](double x, double y) noexcept -> BlockD
-                {
-                    const double zAbs = std::hypot(x, y);
-                    BlockD b;
-                    b.ar = 2.0 * x;
-                    b.ai = 2.0 * y;
-                    b.br = 1.0;
-                    b.bi = 0.0;
-                    b.radius = std::max(0.0, std::min({ epsTol * 2.0 * zAbs, zAbs * 0.125, (4.0 - zAbs) * 0.125 }));
-                    return b;
-                };
-                auto merge = [&](const BlockD& x, const BlockD& y) noexcept -> BlockD
-                {
-                    BlockD m{};
-                    const double ax = std::hypot(x.ar, x.ai);
-                    const double bx = std::hypot(x.br, x.bi);
-                    if (!(x.radius > 0.0 && y.radius > 0.0 && ax > 0.0) || !std::isfinite(ax + bx))
-                    {
-                        return m;
-                    }
-                    m.ar = y.ar * x.ar - y.ai * x.ai;
-                    m.ai = y.ar * x.ai + y.ai * x.ar;
-                    m.br = (y.ar * x.br - y.ai * x.bi) + y.br;
-                    m.bi = (y.ar * x.bi + y.ai * x.br) + y.bi;
-                    const double allowance = y.radius - bx * cMax;
-                    if (allowance > 0.0 &&
-                        std::isfinite(m.ar) && std::isfinite(m.ai) &&
-                        std::isfinite(m.br) && std::isfinite(m.bi))
-                    {
-                        m.radius = 0.5 * std::min(x.radius, allowance / ax);
-                    }
-                    return m;
-                };
-
-                BlockD init[8];
-                for (int i = 0; i < 8; ++i)
-                {
-                    init[i] = single(orbit[i + 1].x, orbit[i + 1].y);
-                }
-                for (int cnt = 8; cnt > 1; cnt >>= 1)
-                {
-                    for (int i = 0; i < cnt / 2; ++i)
-                    {
-                        init[i] = merge(init[2 * i], init[2 * i + 1]);
-                    }
-                }
-                if (!(init[0].radius > cMax))
-                {
-                    return;
-                }
-
-                const size_t l2Count = static_cast<size_t>(refLength - 1) / 4;
-                if (l2Count == 0) return;
-
-                std::vector<std::vector<BlockD>> levels(3);
-                levels[2].resize(l2Count);
-                double localMaxRad = 0.0;
-                for (size_t i = 0; i < l2Count; ++i)
-                {
-                    if ((i & 255) == 0 && canceled()) return;
-                    const int m = static_cast<int>(i * 4) + 1;
-                    const BlockD b0 = merge(single(orbit[m].x, orbit[m].y), single(orbit[m + 1].x, orbit[m + 1].y));
-                    const BlockD b1 = merge(single(orbit[m + 2].x, orbit[m + 2].y), single(orbit[m + 3].x, orbit[m + 3].y));
-                    levels[2][i] = merge(b0, b1);
-                    localMaxRad = std::max(localMaxRad, levels[2][i].radius);
-                }
-
-                while (levels.back().size() >= 2 && levels.size() < 31)
-                {
-                    if (canceled()) return;
-                    const auto& prev = levels.back();
-                    std::vector<BlockD> next(prev.size() / 2);
-                    for (size_t i = 0; i < next.size(); ++i)
-                    {
-                        next[i] = merge(prev[2 * i], prev[2 * i + 1]);
-                        localMaxRad = std::max(localMaxRad, next[i].radius);
-                    }
-                    levels.push_back(std::move(next));
-                }
-                if (canceled() || !(localMaxRad > 0.0)) return;
-
-                maxRadD = localMaxRad;
-                SplitFrexpPositive(maxRadD, maxRadMant, maxRadExp);
-                numLevels = static_cast<uint32_t>(levels.size());
-
-                size_t totalBlocks = 0;
-                for (uint32_t lv = 2; lv < numLevels; ++lv)
-                {
-                    totalBlocks += levels[lv].size();
-                }
-                blocksF32.reserve(totalBlocks);
-                blocksExp.reserve(totalBlocks);
-
-                for (uint32_t lv = 2; lv < numLevels; ++lv)
-                {
-                    levelMeta[lv * 2 + 0] = static_cast<uint32_t>(blocksExp.size());
-                    levelMeta[lv * 2 + 1] = static_cast<uint32_t>(levels[lv].size());
-                    for (const auto& b : levels[lv])
-                    {
-                        const double maxCoeff = std::max({ std::abs(b.ar), std::abs(b.ai), std::abs(b.br), std::abs(b.bi) });
-                        if (maxCoeff > 1e34 || (b.radius > 0.0 && b.radius < 1e-35))
-                        {
-                            fitsFloat32 = false;
-                        }
-
-                        GpuBlaBlockF32 bf{};
-                        bf.ar = static_cast<float>(b.ar);
-                        bf.ai = static_cast<float>(b.ai);
-                        bf.br = static_cast<float>(b.br);
-                        bf.bi = static_cast<float>(b.bi);
-                        bf.radius = (maxCoeff <= 1e34 && b.radius >= 1e-35) ? static_cast<float>(b.radius) : 0.0f;
-                        blocksF32.push_back(bf);
-
-                        GpuBlaBlockExp be{};
-                        SplitFrexp2(b.ar, b.ai, be.ar, be.ai, be.aExp);
-                        SplitFrexp2(b.br, b.bi, be.br, be.bi, be.bExp);
-                        SplitFrexpPositive(b.radius, be.radMant, be.radExp);
-                        blocksExp.push_back(be);
-                    }
-                }
-            }
-        };
-
-        // Shader 1: Direct FP32 evaluation for shallow zooms (zoom < 16.0), all 8 FractalTypes + Julia.
-        static const char* kShallowShaderSrc = R"(
-cbuffer Params : register(b0)
-{
-    uint width;
-    uint height;
-    uint maxIter;
-    uint smoothFlag;
-    uint fractalType;
-    uint juliaFlag;
-    uint rowOffset;
-    uint subpixelTotal;
-    float juliaCx;
-    float juliaCy;
-    float bailout2;
-    float pad0;
-    uint outRowOffset, pad2, pad3, pad4;
-};
-
-Buffer<float> ColCoords : register(t0);
-Buffer<float> RowCoords : register(t1);
-Buffer<uint> SubpixelIndices : register(t4);
-Buffer<uint> SubpixelCountSrv : register(t7);
-RWStructuredBuffer<float> OutIters : register(u0);
-RWStructuredBuffer<float> OutSubpixelsFlat : register(u1);
-
-float FinishSmoothEscape(uint fType, uint iter, float zr, float zi, float prevZr, float prevZi, float cx, float cy)
-{
-    float zr2 = zr * zr;
-    float zi2 = zi * zi;
-    uint sIter = iter;
-    float maxExtraMod2 = (fType == 5u) ? 1e11f : 1e18f;
-
-    [loop]
-    for (uint extra = 0u; extra < 3u && (zr2 + zi2) < maxExtraMod2; ++extra)
-    {
-        if (fType == 0u)
-        {
-            zi = 2.0f * zr * zi + cy;
-            zr = zr2 - zi2 + cx;
-        }
-        else if (fType == 1u)
-        {
-            zi = -2.0f * abs(zr * zi) + cy;
-            zr = zr2 - zi2 + cx;
-        }
-        else if (fType == 2u)
-        {
-            zi = -2.0f * zr * zi + cy;
-            zr = zr2 - zi2 + cx;
-        }
-        else if (fType == 3u)
-        {
-            zi = 2.0f * zr * zi + cy;
-            zr = abs(zr2 - zi2) + cx;
-        }
-        else if (fType == 4u)
-        {
-            zi = -2.0f * abs(zr * zi) + cy;
-            zr = abs(zr2 - zi2) + cx;
-        }
-        else if (fType == 5u)
-        {
-            float nextZr = zr * (zr2 - 3.0f * zi2) + cx;
-            zi = zi * (3.0f * zr2 - zi2) + cy;
-            zr = nextZr;
-        }
-        else
-        {
-            float nextZr = zr2 - zi2 + 0.5667f - 0.5f * prevZr;
-            float nextZi = 2.0f * zr * zi - 0.5f * prevZi;
-            prevZr = zr;
-            prevZi = zi;
-            zr = nextZr;
-            zi = nextZi;
-        }
-        zr2 = zr * zr;
-        zi2 = zi * zi;
-        ++sIter;
-    }
-
-    float logZn = log(zr2 + zi2) * 0.5f;
-    float nu = (fType == 5u)
-        ? (float(sIter) + 1.0f - log(logZn) * 0.9102392266f)
-        : (float(sIter) + 1.0f - log2(logZn));
-    return max(0.0f, nu);
-}
-
-float EvalShallowSample(float xCoord, float yCoord)
-{
-    if (juliaFlag != 0u)
-    {
-        float zr = xCoord;
-        float zi = yCoord;
-        float jcx = juliaCx;
-        float jcy = juliaCy;
-        if (jcx == 0.0f && jcy == 0.0f && (zr * zr + zi * zi) <= 1.0f)
-            return -1.0f;
-
-        float chkZr = zr, chkZi = zi;
-        uint chkPeriod = 8u, stepsSince = 0u;
-        [loop]
-        for (uint iter = 0u; iter < maxIter; ++iter)
-        {
-            float zr2 = zr * zr;
-            float zi2 = zi * zi;
-            if (zr2 + zi2 > bailout2)
-            {
-                if (smoothFlag == 0u) return float(iter);
-                return FinishSmoothEscape(fractalType, iter, zr, zi, 0.0f, 0.0f, jcx, jcy);
-            }
-            float nextR = zr2 - zi2 + jcx;
-            zi = (fractalType == 1u) ? (-2.0f * abs(zr * zi) + jcy) : (2.0f * zr * zi + jcy);
-            zr = nextR;
-            if (zr == chkZr && zi == chkZi) return -1.0f;
-            if (++stepsSince == chkPeriod)
-            {
-                chkZr = zr; chkZi = zi; stepsSince = 0u;
-                if (chkPeriod < 1024u) chkPeriod <<= 1u;
-            }
-        }
-        return -1.0f;
-    }
-
-    float cx = xCoord;
-    float cy = yCoord;
-
-    if (fractalType == 0u)
-    {
-        float xm = cx - 0.25f;
-        float y2 = cy * cy;
-        float q = xm * xm + y2;
-        if (q * (q + xm) <= 0.25f * y2 || ((cx + 1.0f) * (cx + 1.0f) + y2) <= 0.0625f)
-            return -1.0f;
-    }
-    else if (fractalType == 7u)
-    {
-        float zr = cx;
-        float zi = cy;
-        uint iter = 0u;
-        int rootIndex = -1;
-        float distSq = 0.0f;
-        const float ROOT1_Y = 0.8660254038f;
-        const float TOL_SQ = 1e-8f;
-
-        [loop]
-        while (iter < maxIter)
-        {
-            float zr2 = zr * zr;
-            float zi2 = zi * zi;
-            float r2 = zr2 + zi2;
-            if (r2 < 1e-36f) break;
-
-            float d0 = (zr - 1.0f) * (zr - 1.0f) + zi2;
-            if (d0 < TOL_SQ) { rootIndex = 0; distSq = d0; break; }
-
-            float d1 = (zr + 0.5f) * (zr + 0.5f) + (zi - ROOT1_Y) * (zi - ROOT1_Y);
-            if (d1 < TOL_SQ) { rootIndex = 1; distSq = d1; break; }
-
-            float d2 = (zr + 0.5f) * (zr + 0.5f) + (zi + ROOT1_Y) * (zi + ROOT1_Y);
-            if (d2 < TOL_SQ) { rootIndex = 2; distSq = d2; break; }
-
-            float invR2 = 1.0f / r2;
-            float nextZr = (2.0f / 3.0f) * zr + (1.0f / 3.0f) * ((zr2 - zi2) * invR2) * invR2;
-            float nextZi = (2.0f / 3.0f) * zi - (1.0f / 3.0f) * ((2.0f * zr * zi) * invR2) * invR2;
-            zr = nextZr;
-            zi = nextZi;
-            ++iter;
-        }
-        if (rootIndex < 0 || iter >= maxIter) return -1.0f;
-        float smoothVal = float(iter);
-        if (smoothFlag != 0u)
-        {
-            float dist = max(sqrt(distSq), 1e-12f);
-            float ratio = log(dist) / (-9.21034037f);
-            if (ratio > 1.0f)
-            {
-                smoothVal = max(0.0f, float(iter) - log2(ratio));
-            }
-        }
-        return float(rootIndex) * 1000000.0f + smoothVal;
-    }
-
-    if (fractalType == 0u)
-    {
-        float zr = 0.0f, zi = 0.0f, zr2 = 0.0f, zi2 = 0.0f;
-        float chkZr = 0.0f, chkZi = 0.0f;
-        uint chkPeriod = 8u, stepsSince = 0u, iter = 0u;
-
-        [loop]
-        while (iter < maxIter && (zr2 + zi2) <= 16.0f)
-        {
-            zi = 2.0f * zr * zi + cy;
-            zr = zr2 - zi2 + cx;
-            zr2 = zr * zr;
-            zi2 = zi * zi;
-            ++iter;
-            if (zr == chkZr && zi == chkZi)
-            {
-                return -1.0f;
-            }
-            if (++stepsSince == chkPeriod)
-            {
-                chkZr = zr; chkZi = zi;
-                stepsSince = 0u;
-                if (chkPeriod < 1024u) chkPeriod <<= 1u;
-            }
-        }
-        if (iter >= maxIter) return -1.0f;
-        if (smoothFlag == 0u) return float(iter);
-        return FinishSmoothEscape(0u, iter, zr, zi, 0.0f, 0.0f, cx, cy);
-    }
-
-    float zr = (fractalType == 6u) ? cy : 0.0f;
-    float zi = (fractalType == 6u) ? cx : 0.0f;
-    float zr2 = zr * zr;
-    float zi2 = zi * zi;
-    float prevZr = 0.0f, prevZi = 0.0f;
-    float chkZr = 0.0f, chkZi = 0.0f, chkPrevZr = 0.0f, chkPrevZi = 0.0f;
-    uint chkPeriod = 8u, stepsSince = 0u, iter = 0u;
-
-    [loop]
-    while (iter < maxIter && (zr2 + zi2) <= 16.0f)
-    {
-        if (fractalType == 1u)
-        {
-            zi = -2.0f * abs(zr * zi) + cy;
-            zr = zr2 - zi2 + cx;
-        }
-        else if (fractalType == 2u)
-        {
-            zi = -2.0f * zr * zi + cy;
-            zr = zr2 - zi2 + cx;
-        }
-        else if (fractalType == 3u)
-        {
-            zi = 2.0f * zr * zi + cy;
-            zr = abs(zr2 - zi2) + cx;
-        }
-        else if (fractalType == 4u)
-        {
-            zi = -2.0f * abs(zr * zi) + cy;
-            zr = abs(zr2 - zi2) + cx;
-        }
-        else if (fractalType == 5u)
-        {
-            float nextZr = zr * (zr2 - 3.0f * zi2) + cx;
-            zi = zi * (3.0f * zr2 - zi2) + cy;
-            zr = nextZr;
-        }
-        else
-        {
-            float nextZr = zr2 - zi2 + 0.5667f - 0.5f * prevZr;
-            float nextZi = 2.0f * zr * zi - 0.5f * prevZi;
-            prevZr = zr;
-            prevZi = zi;
-            zr = nextZr;
-            zi = nextZi;
-        }
-        zr2 = zr * zr;
-        zi2 = zi * zi;
-        ++iter;
-        if (zr == chkZr && zi == chkZi && (fractalType != 6u || (prevZr == chkPrevZr && prevZi == chkPrevZi)))
-        {
-            iter = maxIter;
-            break;
-        }
-        if (++stepsSince == chkPeriod)
-        {
-            chkZr = zr; chkZi = zi;
-            chkPrevZr = prevZr; chkPrevZi = prevZi;
-            stepsSince = 0u;
-            if (chkPeriod < 1024u) chkPeriod <<= 1u;
-        }
-    }
-
-    if (iter >= maxIter) return -1.0f;
-    if (smoothFlag == 0u) return float(iter);
-    return FinishSmoothEscape(fractalType, iter, zr, zi, prevZr, prevZi, cx, cy);
-}
-
-[numthreads(16, 16, 1)]
-void CSPrimary(uint3 tid : SV_DispatchThreadID)
-{
-    uint py = tid.y + rowOffset;
-    if (tid.x >= width || py >= height) return;
-    float xc = ColCoords[tid.x * 3u + 1u];
-    float yc = RowCoords[py * 3u + 1u];
-    OutIters[(tid.y + outRowOffset) * width + tid.x] = EvalShallowSample(xc, yc);
-}
-
-[numthreads(256, 1, 1)]
-void CSSubpixels(uint3 tid : SV_DispatchThreadID)
-{
-    uint activeTotal = (subpixelTotal == 0xFFFFFFFFu) ? (SubpixelCountSrv[0] * 4u) : subpixelTotal;
-    uint sIdx = tid.x;
-    if (sIdx >= activeTotal) return;
-    uint pix = SubpixelIndices[sIdx >> 2];
-    uint corner = sIdx & 3u;
-    uint py = pix / width;
-    uint px = pix - py * width;
-    uint kx = (corner & 1u) ? 2u : 0u;
-    uint ky = (corner & 2u) ? 2u : 0u;
-    OutSubpixelsFlat[sIdx] = EvalShallowSample(ColCoords[px * 3u + kx], RowCoords[py * 3u + ky]);
-}
-)";
-
-        // Shader 2: High-occupancy 512-thread LDS Perturbation (16.0 <= zoom < 1e32, without BLA).
-        static const char* kPerturbLdsShaderSrc = R"(
-#define LDS_ORBIT_SIZE 2048u
-
-cbuffer Params : register(b0)
-{
-    uint width;
-    uint height;
-    uint maxIter;
-    uint refLen;
-    uint fractalType;
-    uint smoothFlag;
-    uint checkCardioid;
-    uint needScaleCheck;
-    uint rowOffset;
-    uint subpixelTotal;
-    float refCx;
-    float refCy;
-    uint outRowOffset, pad1, pad2, pad3;
-};
-
-Buffer<float2> OrbitFast : register(t0);
-Buffer<float> ColCoords : register(t1);
-Buffer<float> RowCoords : register(t2);
-Buffer<uint> SubpixelIndices : register(t4);
-Buffer<uint> SubpixelCountSrv : register(t7);
-RWStructuredBuffer<float> OutIters : register(u0);
-RWStructuredBuffer<float> OutSubpixelsFlat : register(u1);
-
-groupshared float2 s_orbit[LDS_ORBIT_SIZE];
-
-float DiffAbsF(float A, float a)
-{
-    float sum = A + a;
-    if ((A >= 0.0f && sum >= 0.0f) || (A < 0.0f && sum < 0.0f))
-        return (A >= 0.0f) ? a : -a;
-    return abs(sum) - abs(A);
-}
-
-bool ShouldRebaseScaled(float rx, float ry, float dx, float dy)
-{
-    float maxD = max(abs(dx), abs(dy));
-    if (!(maxD > 0.0f) || max(abs(rx), abs(ry)) >= 3.0f * maxD)
-        return false;
-    float s = (maxD < 1e-15f) ? 1.0842022e19f : 1.0f;
-    float szx = rx * s + dx * s;
-    float szy = ry * s + dy * s;
-    float sdx = dx * s;
-    float sdy = dy * s;
-    return (szx * szx + szy * szy) < (sdx * sdx + sdy * sdy);
-}
-
-float FinishPerturbSmooth(uint fType, uint iter, float zr, float zi, float cxApprox, float cyApprox)
-{
-    float zr2 = zr * zr;
-    float zi2 = zi * zi;
-    uint sIter = iter;
-
-    [loop]
-    for (uint extra = 0u; extra < 3u && (zr2 + zi2) < 1e18f; ++extra)
-    {
-        if (fType == 0u)
-        {
-            zi = 2.0f * zr * zi + cyApprox;
-            zr = zr2 - zi2 + cxApprox;
-        }
-        else if (fType == 1u)
-        {
-            zi = -2.0f * abs(zr * zi) + cyApprox;
-            zr = zr2 - zi2 + cxApprox;
-        }
-        else if (fType == 2u)
-        {
-            zi = -2.0f * zr * zi + cyApprox;
-            zr = zr2 - zi2 + cxApprox;
-        }
-        else
-        {
-            zi = -2.0f * abs(zr * zi) + cyApprox;
-            zr = abs(zr2 - zi2) + cxApprox;
-        }
-        zr2 = zr * zr;
-        zi2 = zi * zi;
-        ++sIter;
-    }
-
-    float logZn = log(zr2 + zi2) * 0.5f;
-    return max(0.0f, float(sIter) + 1.0f - log2(logZn));
-}
-
-float EvalPerturbLds(float dcx, float dcy, uint sharedLim)
-{
-    if (checkCardioid != 0u)
-    {
-        float cx = refCx + dcx;
-        float cy = refCy + dcy;
-        float xm = cx - 0.25f;
-        float y2 = cy * cy;
-        float q = xm * xm + y2;
-        if (q * (q + xm) <= 0.25f * y2 - 2e-6f || ((cx + 1.0f) * (cx + 1.0f) + y2) <= 0.0625f - 2e-6f)
-            return -1.0f;
-    }
-
-    float dx = 0.0f, dy = 0.0f;
-    uint m = 0u;
-    uint iter = 0u;
-    float escZx = 0.0f, escZy = 0.0f;
-    uint ldsStop = min(refLen, LDS_ORBIT_SIZE);
-
-    if (fractalType == 0u)
-    {
-        [loop]
-        while (iter < maxIter)
-        {
-            if (needScaleCheck == 0u && m > 0u && m < ldsStop)
-            {
-                uint endIter = iter + min(maxIter - iter, ldsStop - m);
-                [loop]
-                while (iter < endIter)
-                {
-                    float2 r = s_orbit[m];
-                    float zx = r.x + dx;
-                    float zy = r.y + dy;
-                    float mod2 = zx * zx + zy * zy;
-                    float dz2 = dx * dx + dy * dy;
-                    if (mod2 > 16.0f || mod2 < dz2) break;
-                    float sx = r.x + zx;
-                    float sy = r.y + zy;
-                    float nextDx = sx * dx - sy * dy + dcx;
-                    dy = sx * dy + sy * dx + dcy;
-                    dx = nextDx;
-                    ++m;
-                    ++iter;
-                }
-                if (iter >= maxIter) break;
-            }
-
-            float2 r = (m < sharedLim) ? s_orbit[m] : OrbitFast[m];
-            float rx = r.x, ry = r.y;
-            float zx = rx + dx;
-            float zy = ry + dy;
-            float mod2 = zx * zx + zy * zy;
-            if (mod2 > 16.0f) { escZx = zx; escZy = zy; break; }
-
-            bool doRebase = (m == refLen);
-            if (!doRebase && m > 0u)
-            {
-                doRebase = (needScaleCheck != 0u)
-                    ? ShouldRebaseScaled(rx, ry, dx, dy)
-                    : (mod2 < (dx * dx + dy * dy));
-            }
-            if (doRebase)
-            {
-                dx = zx; dy = zy; m = 0u; rx = 0.0f; ry = 0.0f;
-            }
-            float sx = rx + zx;
-            float sy = ry + zy;
-            float nextDx = sx * dx - sy * dy + dcx;
-            dy = sx * dy + sy * dx + dcy;
-            dx = nextDx;
-            ++m;
-            ++iter;
-        }
-    }
-    else
-    {
-        [loop]
-        while (iter < maxIter)
-        {
-            if (needScaleCheck == 0u && m > 0u && m < ldsStop)
-            {
-                uint endIter = iter + min(maxIter - iter, ldsStop - m);
-                if (fractalType == 1u)
-                {
-                    [loop]
-                    while (iter < endIter)
-                    {
-                        float2 r = s_orbit[m];
-                        float zx = r.x + dx, zy = r.y + dy;
-                        float mod2 = zx * zx + zy * zy;
-                        if (mod2 > 16.0f || mod2 < (dx * dx + dy * dy)) break;
-                        float sx = r.x + zx, sy = r.y + zy;
-                        float daX = DiffAbsF(r.x, dx), daY = DiffAbsF(r.y, dy);
-                        float nextDx = sx * dx - sy * dy + dcx;
-                        dy = -2.0f * (abs(r.x) * daY + abs(r.y) * daX + daX * daY) + dcy;
-                        dx = nextDx;
-                        ++m; ++iter;
-                    }
-                }
-                else if (fractalType == 2u)
-                {
-                    [loop]
-                    while (iter < endIter)
-                    {
-                        float2 r = s_orbit[m];
-                        float zx = r.x + dx, zy = r.y + dy;
-                        float mod2 = zx * zx + zy * zy;
-                        if (mod2 > 16.0f || mod2 < (dx * dx + dy * dy)) break;
-                        float sx = r.x + zx, sy = r.y + zy;
-                        float nextDx = sx * dx - sy * dy + dcx;
-                        dy = -(sx * dy + sy * dx) + dcy;
-                        dx = nextDx;
-                        ++m; ++iter;
-                    }
-                }
-                else
-                {
-                    [loop]
-                    while (iter < endIter)
-                    {
-                        float2 r = s_orbit[m];
-                        float zx = r.x + dx, zy = r.y + dy;
-                        float mod2 = zx * zx + zy * zy;
-                        if (mod2 > 16.0f || mod2 < (dx * dx + dy * dy)) break;
-                        float sx = r.x + zx, sy = r.y + zy;
-                        float daX = DiffAbsF(r.x, dx), daY = DiffAbsF(r.y, dy);
-                        float nextDx = DiffAbsF((r.x - r.y) * (r.x + r.y), sx * dx - sy * dy) + dcx;
-                        dy = -2.0f * (abs(r.x) * daY + abs(r.y) * daX + daX * daY) + dcy;
-                        dx = nextDx;
-                        ++m; ++iter;
-                    }
-                }
-                if (iter >= maxIter) break;
-            }
-
-            float2 r = (m < sharedLim) ? s_orbit[m] : OrbitFast[m];
-            float rx = r.x, ry = r.y;
-            float zx = rx + dx;
-            float zy = ry + dy;
-            float mod2 = zx * zx + zy * zy;
-            if (mod2 > 16.0f) { escZx = zx; escZy = zy; break; }
-
-            bool doRebase = (m == refLen);
-            if (!doRebase && m > 0u)
-            {
-                doRebase = (needScaleCheck != 0u)
-                    ? ShouldRebaseScaled(rx, ry, dx, dy)
-                    : (mod2 < (dx * dx + dy * dy));
-            }
-            if (doRebase)
-            {
-                dx = zx; dy = zy; m = 0u; rx = 0.0f; ry = 0.0f;
-            }
-
-            float sx = rx + zx;
-            float sy = ry + zy;
-            if (fractalType == 1u)
-            {
-                float daX = DiffAbsF(rx, dx);
-                float daY = DiffAbsF(ry, dy);
-                float nextDx = sx * dx - sy * dy + dcx;
-                dy = -2.0f * (abs(rx) * daY + abs(ry) * daX + daX * daY) + dcy;
-                dx = nextDx;
-            }
-            else if (fractalType == 2u)
-            {
-                float nextDx = sx * dx - sy * dy + dcx;
-                dy = -(sx * dy + sy * dx) + dcy;
-                dx = nextDx;
-            }
-            else
-            {
-                float daX = DiffAbsF(rx, dx);
-                float daY = DiffAbsF(ry, dy);
-                float nextDx = DiffAbsF((rx - ry) * (rx + ry), sx * dx - sy * dy) + dcx;
-                dy = -2.0f * (abs(rx) * daY + abs(ry) * daX + daX * daY) + dcy;
-                dx = nextDx;
-            }
-            ++m;
-            ++iter;
-        }
-    }
-
-    if (iter >= maxIter) return -1.0f;
-    if (smoothFlag == 0u) return float(iter);
-    return FinishPerturbSmooth(fractalType, iter, escZx, escZy, refCx + dcx, refCy + dcy);
-}
-
-[numthreads(32, 16, 1)]
-void CSPrimary(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
-{
-    uint sharedLim = min(refLen + 1u, LDS_ORBIT_SIZE);
-    for (uint i = gi; i < sharedLim; i += 512u)
-        s_orbit[i] = OrbitFast[i];
-    GroupMemoryBarrierWithGroupSync();
-
-    uint py = tid.y + rowOffset;
-    if (tid.x >= width || py >= height) return;
-    OutIters[(tid.y + outRowOffset) * width + tid.x] = EvalPerturbLds(ColCoords[tid.x * 3u + 1u], RowCoords[py * 3u + 1u], sharedLim);
-}
-
-[numthreads(512, 1, 1)]
-void CSSubpixels(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
-{
-    uint sharedLim = min(refLen + 1u, LDS_ORBIT_SIZE);
-    for (uint i = gi; i < sharedLim; i += 512u)
-        s_orbit[i] = OrbitFast[i];
-    GroupMemoryBarrierWithGroupSync();
-
-    uint activeTotal = (subpixelTotal == 0xFFFFFFFFu) ? (SubpixelCountSrv[0] * 4u) : subpixelTotal;
-    uint sIdx = tid.x;
-    if (sIdx >= activeTotal) return;
-    uint pix = SubpixelIndices[sIdx >> 2];
-    uint corner = sIdx & 3u;
-    uint py = pix / width;
-    uint px = pix - py * width;
-    uint kx = (corner & 1u) ? 2u : 0u;
-    uint ky = (corner & 2u) ? 2u : 0u;
-    OutSubpixelsFlat[sIdx] = EvalPerturbLds(ColCoords[px * 3u + kx], RowCoords[py * 3u + ky], sharedLim);
-}
-)";
-
-        // Shader 3: High-occupancy 512-thread LDS Perturbation + float32 BLA (Mandelbrot, zoom < 1e32).
-        static const char* kPerturbLdsBlaShaderSrc = R"(
-#define LDS_ORBIT_SIZE 2048u
-
-cbuffer Params : register(b0)
-{
-    uint width;
-    uint height;
-    uint maxIter;
-    uint refLen;
-    uint smoothFlag;
-    uint blaNumLevels;
-    uint rowOffset;
-    uint subpixelTotal;
-    float blaMaxRadius;
-    float refCx;
-    float refCy;
-    float pad0;
-    uint checkCardioid, outRowOffset, pad3, pad4;
-};
-
-struct GpuBlaBlockF32
-{
-    float ar, ai;
-    float br, bi;
-    float radius;
-    float pad0, pad1, pad2;
-};
-
-Buffer<float2> OrbitFast : register(t0);
-Buffer<float> ColCoords : register(t1);
-Buffer<float> RowCoords : register(t2);
-StructuredBuffer<GpuBlaBlockF32> BlaBlocks : register(t3);
-StructuredBuffer<uint2> BlaMeta : register(t4);
-Buffer<uint> SubpixelIndices : register(t5);
-Buffer<uint> SubpixelCountSrv : register(t7);
-RWStructuredBuffer<float> OutIters : register(u0);
-RWStructuredBuffer<float> OutSubpixelsFlat : register(u1);
-
-groupshared float2 s_orbit[LDS_ORBIT_SIZE];
-
-float EvalPerturbLdsBla(float dcx, float dcy, uint sharedLim)
-{
-    if (checkCardioid != 0u)
-    {
-        float cx = refCx + dcx;
-        float cy = refCy + dcy;
-        float xm = cx - 0.25f;
-        float y2 = cy * cy;
-        float q = xm * xm + y2;
-        if (q * (q + xm) <= 0.25f * y2 - 2e-6f || ((cx + 1.0f) * (cx + 1.0f) + y2) <= 0.0625f - 2e-6f)
-            return -1.0f;
-    }
-
-    float dx = 0.0f, dy = 0.0f;
-    uint m = 0u;
-    uint iter = 0u;
-    float escZx = 0.0f, escZy = 0.0f;
-    uint ldsStop = min(refLen, LDS_ORBIT_SIZE);
-    float blaBurstFloor = max(blaMaxRadius, 1e-15f);
-
-    [loop]
-    while (iter < maxIter)
-    {
-        float maxD = max(abs(dx), abs(dy));
-        if (maxD >= blaBurstFloor && m > 0u && m < ldsStop)
-        {
-            uint endIter = iter + min(maxIter - iter, ldsStop - m);
-            [loop]
-            while (iter < endIter)
-            {
-                float2 r = s_orbit[m];
-                float zx = r.x + dx;
-                float zy = r.y + dy;
-                float mod2 = zx * zx + zy * zy;
-                float dz2 = dx * dx + dy * dy;
-                if (mod2 > 16.0f || mod2 < dz2) break;
-                float sx = r.x + zx;
-                float sy = r.y + zy;
-                float nextDx = sx * dx - sy * dy + dcx;
-                dy = sx * dy + sy * dx + dcy;
-                dx = nextDx;
-                ++m;
-                ++iter;
-            }
-            if (iter >= maxIter) break;
-            maxD = max(abs(dx), abs(dy));
-        }
-
-        float2 r = (m < sharedLim) ? s_orbit[m] : OrbitFast[m];
-        float rx = r.x, ry = r.y;
-        float zx = rx + dx;
-        float zy = ry + dy;
-        float mod2 = zx * zx + zy * zy;
-        if (mod2 > 16.0f) { escZx = zx; escZy = zy; break; }
-
-        bool doRebase = (m == refLen);
-        if (!doRebase && m > 0u && max(abs(rx), abs(ry)) < 3.0f * maxD && maxD > 0.0f)
-        {
-            float s = (maxD < 1e-15f) ? 1.0842022e19f : 1.0f;
-            float szx = rx * s + dx * s;
-            float szy = ry * s + dy * s;
-            float sdx = dx * s;
-            float sdy = dy * s;
-            if (szx * szx + szy * szy < sdx * sdx + sdy * sdy)
-                doRebase = true;
-        }
-        if (doRebase)
-        {
-            dx = zx; dy = zy; m = 0u; rx = 0.0f; ry = 0.0f;
-            maxD = max(abs(dx), abs(dy));
-        }
-
-        if (m >= 1u && (maxIter - iter) >= 4u && ((m - 1u) & 3u) == 0u && m + 4u <= refLen && maxD < blaMaxRadius)
-        {
-            uint start = m - 1u;
-            uint aligned = (start != 0u) ? firstbitlow(start) : 30u;
-            uint top = min(aligned, blaNumLevels - 1u);
-            uint skipped = 0u;
-            for (int lv = int(top); lv >= 2; --lv)
-            {
-                uint len = 1u << uint(lv);
-                if (len > (maxIter - iter) || m + len > refLen) continue;
-                uint2 meta = BlaMeta[lv];
-                uint idx = start >> uint(lv);
-                if (idx >= meta.y) continue;
-                GpuBlaBlockF32 blk = BlaBlocks[meta.x + idx];
-                if (!(maxD * 1.41421356f < blk.radius)) continue;
-                float nx = (blk.ar * dx - blk.ai * dy) + (blk.br * dcx - blk.bi * dcy);
-                float ny = (blk.ar * dy + blk.ai * dx) + (blk.br * dcy + blk.bi * dcx);
-                dx = nx; dy = ny;
-                skipped = len;
-                break;
-            }
-            if (skipped != 0u)
-            {
-                m += skipped;
-                iter += skipped;
-                continue;
-            }
-        }
-
-        float sx = rx + zx;
-        float sy = ry + zy;
-        float nextDx = sx * dx - sy * dy + dcx;
-        dy = sx * dy + sy * dx + dcy;
-        dx = nextDx;
-        ++m;
-        ++iter;
-    }
-
-    if (iter >= maxIter) return -1.0f;
-    if (smoothFlag == 0u) return float(iter);
-
-    float cxApprox = refCx + dcx;
-    float cyApprox = refCy + dcy;
-    float zr = escZx, zi = escZy;
-    float zr2 = zr * zr, zi2 = zi * zi;
-    uint sIter = iter;
-    for (uint extra = 0u; extra < 3u && (zr2 + zi2) < 1e18f; ++extra)
-    {
-        zi = 2.0f * zr * zi + cyApprox;
-        zr = zr2 - zi2 + cxApprox;
-        zr2 = zr * zr;
-        zi2 = zi * zi;
-        ++sIter;
-    }
-    return max(0.0f, float(sIter) + 1.0f - log2(log(zr2 + zi2) * 0.5f));
-}
-
-[numthreads(32, 16, 1)]
-void CSPrimary(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
-{
-    uint sharedLim = min(refLen + 1u, LDS_ORBIT_SIZE);
-    for (uint i = gi; i < sharedLim; i += 512u)
-        s_orbit[i] = OrbitFast[i];
-    GroupMemoryBarrierWithGroupSync();
-
-    uint py = tid.y + rowOffset;
-    if (tid.x >= width || py >= height) return;
-    OutIters[(tid.y + outRowOffset) * width + tid.x] = EvalPerturbLdsBla(ColCoords[tid.x * 3u + 1u], RowCoords[py * 3u + 1u], sharedLim);
-}
-
-[numthreads(512, 1, 1)]
-void CSSubpixels(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
-{
-    uint sharedLim = min(refLen + 1u, LDS_ORBIT_SIZE);
-    for (uint i = gi; i < sharedLim; i += 512u)
-        s_orbit[i] = OrbitFast[i];
-    GroupMemoryBarrierWithGroupSync();
-
-    uint activeTotal = (subpixelTotal == 0xFFFFFFFFu) ? (SubpixelCountSrv[0] * 4u) : subpixelTotal;
-    uint sIdx = tid.x;
-    if (sIdx >= activeTotal) return;
-    uint pix = SubpixelIndices[sIdx >> 2];
-    uint corner = sIdx & 3u;
-    uint py = pix / width;
-    uint px = pix - py * width;
-    uint kx = (corner & 1u) ? 2u : 0u;
-    uint ky = (corner & 2u) ? 2u : 0u;
-    OutSubpixelsFlat[sIdx] = EvalPerturbLdsBla(ColCoords[px * 3u + kx], RowCoords[py * 3u + ky], sharedLim);
-}
-)";
-
-        // Shader 4: Ultra-Deep FloatExp Perturbation + FloatExp BLA (zoom >= 1e32 .. 1e300).
-        static const char* kPerturbDeepExpShaderSrc = R"(
-cbuffer Params : register(b0)
-{
-    uint width;
-    uint height;
-    uint maxIter;
-    uint refLen;
-    uint smoothFlag;
-    uint useBla;
-    uint blaNumLevels;
-    uint rowOffset;
-    uint subpixelTotal;
-    float blaMaxRadMant;
-    int blaMaxRadExp;
-    float refCx;
-    float refCy;
-    uint outRowOffset;
-    float pad1, pad2;
-};
-
-struct GpuOrbitPointExp
-{
-    float rx, ry;
-    float rmx, rmy;
-    int rExp;
-    int pad0, pad1, pad2;
-};
-
-struct GpuCoordExp
-{
-    float mant;
-    int exp;
-};
-
-struct GpuBlaBlockExp
-{
-    float ar, ai;
-    float br, bi;
-    float radMant;
-    int aExp, bExp, radExp;
-};
-
-Buffer<float2> OrbitFast : register(t0);
-StructuredBuffer<GpuOrbitPointExp> OrbitFull : register(t1);
-StructuredBuffer<GpuCoordExp> ColCoordsExp : register(t2);
-StructuredBuffer<GpuCoordExp> RowCoordsExp : register(t3);
-StructuredBuffer<GpuBlaBlockExp> BlaBlocks : register(t4);
-StructuredBuffer<uint2> BlaMeta : register(t5);
-Buffer<uint> SubpixelIndices : register(t6);
-Buffer<uint> SubpixelCountSrv : register(t7);
-RWStructuredBuffer<float> OutIters : register(u0);
-RWStructuredBuffer<float> OutSubpixelsFlat : register(u1);
-
-void Renorm2(inout float mx, inout float my, inout int e)
-{
-    float a = max(abs(mx), abs(my));
-    if (a == 0.0f) { mx = 0.0f; my = 0.0f; e = -1073741824; return; }
-    if (a < 1.1754944e-38f)
-    {
-        mx *= 16777216.0f;
-        my *= 16777216.0f;
-        e -= 24;
-        a = max(abs(mx), abs(my));
-    }
-    uint bits = asuint(a);
-    int biasedExp = int((bits >> 23) & 255u);
-    int rawExp = biasedExp - 126;
-    int scaleBiased = clamp(253 - biasedExp, 1, 254);
-    float scale = asfloat(uint(scaleBiased) << 23);
-    mx *= scale;
-    my *= scale;
-    e += rawExp;
-}
-
-void FloatExpAdd(float ax, float ay, int ae, float bx, float by, int be, out float ox, out float oy, out int oe)
-{
-    if (ae <= -100000000) { ox = bx; oy = by; oe = be; return; }
-    if (be <= -100000000) { ox = ax; oy = ay; oe = ae; return; }
-    if (ae >= be)
-    {
-        int diff = ae - be;
-        if (diff >= 30) { ox = ax; oy = ay; oe = ae; return; }
-        float s = asfloat(uint(127 - diff) << 23);
-        ox = ax + bx * s; oy = ay + by * s; oe = ae;
-    }
-    else
-    {
-        int diff = be - ae;
-        if (diff >= 30) { ox = bx; oy = by; oe = be; return; }
-        float s = asfloat(uint(127 - diff) << 23);
-        ox = bx + ax * s; oy = by + ay * s; oe = be;
-    }
-    Renorm2(ox, oy, oe);
-}
-
-bool FloatExpLess(float dmx, float dmy, int de, float radMant, int radExp)
-{
-    if (radExp <= -100000000) return false;
-    if (de <= -100000000) return true;
-    int diff = de - radExp;
-    if (diff < -1) return true;
-    if (diff > 1) return false;
-    float s = asfloat(uint(127 + diff) << 23);
-    return sqrt(dmx * dmx + dmy * dmy) * s < radMant;
-}
-
-float EvalDeepExp(GpuCoordExp cx, GpuCoordExp cy)
-{
-    float dcMx = 0.0f, dcMy = 0.0f;
-    int dcExp = -1073741824;
-    if (cx.exp > -100000000 || cy.exp > -100000000)
-    {
-        dcExp = max(cx.exp, cy.exp);
-        dcMx = (cx.exp > -100000000 && (dcExp - cx.exp) < 30)
-            ? (cx.mant * asfloat(uint(127 - (dcExp - cx.exp)) << 23))
-            : 0.0f;
-        dcMy = (cy.exp > -100000000 && (dcExp - cy.exp) < 30)
-            ? (cy.mant * asfloat(uint(127 - (dcExp - cy.exp)) << 23))
-            : 0.0f;
-        Renorm2(dcMx, dcMy, dcExp);
-    }
-
-    float dcxF = (dcExp > -126) ? (dcMx * asfloat(uint(clamp(127 + dcExp, 1, 254)) << 23)) : 0.0f;
-    float dcyF = (dcExp > -126) ? (dcMy * asfloat(uint(clamp(127 + dcExp, 1, 254)) << 23)) : 0.0f;
-
-    uint m = 0u;
-    uint iter = 0u;
-    float escZx = 0.0f, escZy = 0.0f;
-    float dmx = 0.0f, dmy = 0.0f;
-    int dExp = -1073741824;
-
-    [loop]
-    while (iter < maxIter)
-    {
-        if (dExp >= -45 && dExp <= 10 && m > 0u)
-        {
-            float initScale = asfloat(uint(127 + dExp) << 23);
-            float dx = dmx * initScale;
-            float dy = dmy * initScale;
-            bool escaped = false;
-            [loop]
-            while (iter < maxIter)
-            {
-                float2 r = OrbitFast[m];
-                float rx = r.x, ry = r.y;
-                float zx = rx + dx;
-                float zy = ry + dy;
-                float mod2 = zx * zx + zy * zy;
-                if (mod2 > 16.0f) { escZx = zx; escZy = zy; escaped = true; break; }
-                float dz2 = dx * dx + dy * dy;
-                if (m == refLen || (m > 0u && mod2 < dz2))
-                {
-                    dx = zx; dy = zy; m = 0u; rx = 0.0f; ry = 0.0f;
-                    if (max(abs(dx), abs(dy)) < 1e-12f)
-                    {
-                        dmx = dx * 1.0842022e19f; dmy = dy * 1.0842022e19f; dExp = -63;
-                        Renorm2(dmx, dmy, dExp);
-                        break;
-                    }
-                }
-                float sx = rx + zx;
-                float sy = ry + zy;
-                float nextDx = sx * dx - sy * dy + dcxF;
-                dy = sx * dy + sy * dx + dcyF;
-                dx = nextDx;
-                ++m;
-                ++iter;
-                if (max(abs(dx), abs(dy)) < 2.842171e-14f)
-                {
-                    dmx = dx * 1.0842022e19f; dmy = dy * 1.0842022e19f; dExp = -63;
-                    Renorm2(dmx, dmy, dExp);
-                    break;
-                }
-            }
-            if (escaped || iter >= maxIter) break;
-            continue;
-        }
-
-        GpuOrbitPointExp op = OrbitFull[m];
-        if (op.rExp >= 2)
-        {
-            float dScale = (dExp >= -125 && dExp <= 10) ? asfloat(uint(127 + dExp) << 23) : 0.0f;
-            float zx = op.rx + dmx * dScale;
-            float zy = op.ry + dmy * dScale;
-            if (zx * zx + zy * zy > 16.0f) { escZx = zx; escZy = zy; break; }
-        }
-
-        bool doRebase = (m == refLen);
-        float zmx = 0.0f, zmy = 0.0f;
-        int zExp = -1073741824;
-        if (doRebase || (m > 0u && op.rExp <= dExp + 2))
-        {
-            FloatExpAdd(op.rmx, op.rmy, op.rExp, dmx, dmy, dExp, zmx, zmy, zExp);
-            if (!doRebase && m > 0u)
-            {
-                int cExp = max(zExp, dExp);
-                if (cExp > -100000000)
-                {
-                    float zs = (zExp > -100000000 && (cExp - zExp) < 30) ? asfloat(uint(127 - (cExp - zExp)) << 23) : 0.0f;
-                    float ds = (dExp > -100000000 && (cExp - dExp) < 30) ? asfloat(uint(127 - (cExp - dExp)) << 23) : 0.0f;
-                    float zxS = zmx * zs, zyS = zmy * zs;
-                    float dxS = dmx * ds, dyS = dmy * ds;
-                    if (zxS * zxS + zyS * zyS < dxS * dxS + dyS * dyS) doRebase = true;
-                }
-            }
-        }
-        if (doRebase)
-        {
-            dmx = zmx; dmy = zmy; dExp = zExp; m = 0u;
-            op.rx = 0.0f; op.ry = 0.0f; op.rmx = 0.0f; op.rmy = 0.0f; op.rExp = -1073741824;
-        }
-
-        if (useBla != 0u && m >= 1u && (maxIter - iter) >= 4u && ((m - 1u) & 3u) == 0u && m + 4u <= refLen &&
-            FloatExpLess(dmx, dmy, dExp, blaMaxRadMant, blaMaxRadExp))
-        {
-            uint start = m - 1u;
-            uint aligned = (start != 0u) ? firstbitlow(start) : 30u;
-            uint top = min(aligned, blaNumLevels - 1u);
-            uint skipped = 0u;
-            for (int lv = int(top); lv >= 2; --lv)
-            {
-                uint len = 1u << uint(lv);
-                if (len > (maxIter - iter) || m + len > refLen) continue;
-                uint2 meta = BlaMeta[lv];
-                uint idx = start >> uint(lv);
-                if (idx >= meta.y) continue;
-                GpuBlaBlockExp blk = BlaBlocks[meta.x + idx];
-                if (!FloatExpLess(dmx, dmy, dExp, blk.radMant, blk.radExp)) continue;
-
-                float azx = blk.ar * dmx - blk.ai * dmy;
-                float azy = blk.ar * dmy + blk.ai * dmx;
-                int azExp = (dExp > -100000000) ? (blk.aExp + dExp) : -1073741824;
-                Renorm2(azx, azy, azExp);
-
-                float bcx = blk.br * dcMx - blk.bi * dcMy;
-                float bcy = blk.br * dcMy + blk.bi * dcMx;
-                int bcExp = (dcExp > -100000000) ? (blk.bExp + dcExp) : -1073741824;
-                Renorm2(bcx, bcy, bcExp);
-
-                FloatExpAdd(azx, azy, azExp, bcx, bcy, bcExp, dmx, dmy, dExp);
-                skipped = len;
-                break;
-            }
-            if (skipped != 0u) { m += skipped; iter += skipped; continue; }
-        }
-
-        float smx = dmx, smy = dmy;
-        int sExp = dExp;
-        if (op.rExp > -100000000)
-        {
-            FloatExpAdd(op.rmx, op.rmy, op.rExp + 1, dmx, dmy, dExp, smx, smy, sExp);
-        }
-        float prodX = smx * dmx - smy * dmy;
-        float prodY = smx * dmy + smy * dmx;
-        int prodExp = (sExp > -100000000 && dExp > -100000000) ? (sExp + dExp) : -1073741824;
-        Renorm2(prodX, prodY, prodExp);
-        FloatExpAdd(prodX, prodY, prodExp, dcMx, dcMy, dcExp, dmx, dmy, dExp);
-        ++m;
-        ++iter;
-    }
-
-    if (iter >= maxIter) return -1.0f;
-    if (smoothFlag == 0u) return float(iter);
-
-    float zr = escZx, zi = escZy;
-    float zr2 = zr * zr, zi2 = zi * zi;
-    uint sIter = iter;
-    for (uint extra = 0u; extra < 3u && (zr2 + zi2) < 1e18f; ++extra)
-    {
-        zi = 2.0f * zr * zi + refCy;
-        zr = zr2 - zi2 + refCx;
-        zr2 = zr * zr;
-        zi2 = zi * zi;
-        ++sIter;
-    }
-    return max(0.0f, float(sIter) + 1.0f - log2(log(zr2 + zi2) * 0.5f));
-}
-
-[numthreads(16, 16, 1)]
-void CSPrimary(uint3 tid : SV_DispatchThreadID)
-{
-    uint py = tid.y + rowOffset;
-    if (tid.x >= width || py >= height) return;
-    OutIters[(tid.y + outRowOffset) * width + tid.x] = EvalDeepExp(ColCoordsExp[tid.x * 3u + 1u], RowCoordsExp[py * 3u + 1u]);
-}
-
-[numthreads(256, 1, 1)]
-void CSSubpixels(uint3 tid : SV_DispatchThreadID)
-{
-    uint activeTotal = (subpixelTotal == 0xFFFFFFFFu) ? (SubpixelCountSrv[0] * 4u) : subpixelTotal;
-    uint sIdx = tid.x;
-    if (sIdx >= activeTotal) return;
-    uint pix = SubpixelIndices[sIdx >> 2];
-    uint corner = sIdx & 3u;
-    uint py = pix / width;
-    uint px = pix - py * width;
-    uint kx = (corner & 1u) ? 2u : 0u;
-    uint ky = (corner & 2u) ? 2u : 0u;
-    OutSubpixelsFlat[sIdx] = EvalDeepExp(ColCoordsExp[px * 3u + kx], RowCoordsExp[py * 3u + ky]);
-}
-)";
-
-        // Shader 5: GPU Boundary Detection + 16x16 Tile Compaction + Indirect Dispatch Argument Builder.
-        static const char* kPostDetectShaderSrc = R"(
-cbuffer PostParams : register(b0)
-{
-    uint width;
-    uint bandHeight;
-    uint visibleRows;
-    uint topHalo;
-    uint destRowOffset;
-    uint fractalType;
-    uint smoothFlag;
-    uint invertFlag;
-    float frequency;
-    float phaseOffset;
-    uint interiorColor;
-    uint avgRgb;
-    uint temporalMode;
-    uint subGroupThreads;
-    uint pad0, pad1;
-};
-
-struct GpuPixelSubInfo
-{
-    uint slot;
-    float weight;
-};
-
-StructuredBuffer<float> InIters : register(t0);
-Buffer<uint> InSubCounter : register(t5);
-
-RWBuffer<uint> OutSubpixelIndices : register(u0);
-RWStructuredBuffer<GpuPixelSubInfo> OutPixelSubInfo : register(u1);
-RWBuffer<uint> OutSubCounter : register(u2);
-
-groupshared uint s_groupCount;
-groupshared uint s_groupBase;
-
-[numthreads(16, 16, 1)]
-void CSDetectBoundaries(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
-{
-    if (gi == 0u) s_groupCount = 0u;
-    GroupMemoryBarrierWithGroupSync();
-
-    bool valid = (tid.x < width && tid.y < visibleRows);
-    float weight = 0.0f;
-    uint fullIdx = 0u;
-
-    if (valid)
-    {
-        uint y = tid.y + topHalo;
-        uint x = tid.x;
-        fullIdx = y * width + x;
-        float center = InIters[fullIdx];
-        uint x0 = (x > 0u) ? (x - 1u) : 0u;
-        uint x1 = min(width - 1u, x + 1u);
-        uint y0 = (y > 0u) ? (y - 1u) : 0u;
-        uint y1 = min(bandHeight - 1u, y + 1u);
-
-        if (center < 0.0f)
-        {
-            bool boundary = false;
-            [loop]
-            for (uint ny = y0; ny <= y1 && !boundary; ++ny)
-            {
-                uint rowBase = ny * width;
-                [loop]
-                for (uint nx = x0; nx <= x1; ++nx)
-                {
-                    if (InIters[rowBase + nx] >= 0.0f) { boundary = true; break; }
-                }
-            }
-            weight = boundary ? 1.0f : 0.0f;
-        }
-        else
-        {
-            float variation = 0.0f;
-            bool boundary = false;
-            float a = (fractalType == 7u) ? fmod(center, 1000000.0f) : center;
-            [loop]
-            for (uint ny = y0; ny <= y1; ++ny)
-            {
-                uint rowBase = ny * width;
-                [loop]
-                for (uint nx = x0; nx <= x1; ++nx)
-                {
-                    if (nx == x && ny == y) continue;
-                    float neighbor = InIters[rowBase + nx];
-                    if (neighbor < 0.0f) { boundary = true; continue; }
-                    bool sameBasin = (fractalType != 7u) || (int(center / 1000000.0f) == int(neighbor / 1000000.0f));
-                    if (!sameBasin || (smoothFlag == 0u && center != neighbor))
-                    {
-                        boundary = true;
-                    }
-                    float b = (fractalType == 7u) ? fmod(neighbor, 1000000.0f) : neighbor;
-                    variation = max(variation, abs(a - b) / (10.0f + min(a, b)));
-                }
-            }
-            float t = saturate((variation - 0.015f) / 0.065f);
-            weight = boundary ? 1.0f : (t * t * (3.0f - 2.0f * t));
-        }
-    }
-
-    uint localOffset = 0u;
-    if (valid && weight > 0.0f)
-    {
-        InterlockedAdd(s_groupCount, 1u, localOffset);
-    }
-    GroupMemoryBarrierWithGroupSync();
-
-    if (gi == 0u && s_groupCount > 0u)
-    {
-        InterlockedAdd(OutSubCounter[0], s_groupCount, s_groupBase);
-    }
-    GroupMemoryBarrierWithGroupSync();
-
-    if (valid)
-    {
-        GpuPixelSubInfo info;
-        if (weight > 0.0f)
-        {
-            uint slot = s_groupBase + localOffset;
-            OutSubpixelIndices[slot] = fullIdx;
-            info.slot = slot;
-            info.weight = weight;
-        }
-        else
-        {
-            info.slot = 0xFFFFFFFFu;
-            info.weight = 0.0f;
-        }
-        OutPixelSubInfo[tid.y * width + tid.x] = info;
-    }
-}
-
-[numthreads(1, 1, 1)]
-void CSBuildIndirectArgs(uint3 tid : SV_DispatchThreadID)
-{
-    uint subTotal = InSubCounter[0] * 4u;
-    OutSubpixelIndices[0] = (subTotal > 0u) ? ((subTotal + subGroupThreads - 1u) / subGroupThreads) : 0u;
-    OutSubpixelIndices[1] = 1u;
-    OutSubpixelIndices[2] = 1u;
-}
-)";
-
-        // Shader 6: Fused GPU 4x Supersampled Palette Coloring + Linear-Light Temporal Blending.
-        static const char* kPostResolveShaderSrc = R"(
-cbuffer PostParams : register(b0)
-{
-    uint width;
-    uint bandHeight;
-    uint visibleRows;
-    uint topHalo;
-    uint destRowOffset;
-    uint fractalType;
-    uint smoothFlag;
-    uint invertFlag;
-    float frequency;
-    float phaseOffset;
-    uint interiorColor;
-    uint avgRgb;
-    uint temporalMode;
-    uint subGroupThreads;
-    uint pad0, pad1;
-};
-
-struct GpuPixelSubInfo
-{
-    uint slot;
-    float weight;
-};
-
-StructuredBuffer<float> InIters : register(t0);
-StructuredBuffer<GpuPixelSubInfo> InPixelSubInfo : register(t1);
-StructuredBuffer<float> InSubpixelsFlat : register(t2);
-Buffer<uint> PaletteLut : register(t3);
-StructuredBuffer<uint> PrevBandPixels : register(t4);
-
-RWStructuredBuffer<uint> OutAccumPixels : register(u0);
-
-float MapIterToPhase(float iterVal)
-{
-    if (iterVal <= 0.0f) return 0.0f;
-    return 1.6f * log(1.0f + iterVal * 0.1f) * frequency;
-}
-
-uint SamplePaletteLut(float phase)
-{
-    float u = phase - floor(phase);
-    if (u >= 1.0f) u = 0.0f;
-    if (invertFlag != 0u) u = 1.0f - u;
-    return PaletteLut[uint(u * 4095.0f) & 4095u];
-}
-
-uint ColorAtPhaseGpu(float basePhase, float deltaU)
-{
-    float uCenter = basePhase + phaseOffset;
-    if (deltaU <= 0.04f) return SamplePaletteLut(uCenter);
-    float span = min(deltaU, 1.0f);
-    uint c0 = SamplePaletteLut(uCenter - 0.375f * span);
-    uint c1 = SamplePaletteLut(uCenter - 0.125f * span);
-    uint c2 = SamplePaletteLut(uCenter + 0.125f * span);
-    uint c3 = SamplePaletteLut(uCenter + 0.375f * span);
-    float r = float(((c0 >> 16) & 255u) + ((c1 >> 16) & 255u) + ((c2 >> 16) & 255u) + ((c3 >> 16) & 255u)) * 0.25f;
-    float g = float(((c0 >> 8) & 255u)  + ((c1 >> 8) & 255u)  + ((c2 >> 8) & 255u)  + ((c3 >> 8) & 255u))  * 0.25f;
-    float b = float((c0 & 255u)         + (c1 & 255u)         + (c2 & 255u)         + (c3 & 255u))         * 0.25f;
-    if (deltaU > 0.20f)
-    {
-        float damp = clamp(deltaU - 0.20f, 0.0f, 0.72f);
-        float avgR = float((avgRgb >> 16) & 255u);
-        float avgG = float((avgRgb >> 8) & 255u);
-        float avgB = float(avgRgb & 255u);
-        r = r * (1.0f - damp) + avgR * damp;
-        g = g * (1.0f - damp) + avgG * damp;
-        b = b * (1.0f - damp) + avgB * damp;
-    }
-    return 0xFF000000u |
-        (uint(clamp(r + 0.5f, 0.0f, 255.0f)) << 16) |
-        (uint(clamp(g + 0.5f, 0.0f, 255.0f)) << 8) |
-        uint(clamp(b + 0.5f, 0.0f, 255.0f));
-}
-
-uint ColorIterationGpu(float value)
-{
-    if (value < 0.0f) return interiorColor;
-    if (fractalType == 7u)
-    {
-        int root = int(value / 1000000.0f);
-        float iter = value - float(root) * 1000000.0f;
-        float rootBase = float(root % 3) * (1.0f / 3.0f);
-        float compressedIter = 12.0f * log(1.0f + iter * (1.0f / 12.0f));
-        float rawRing = compressedIter * 0.06f * frequency + phaseOffset;
-        float ring = rawRing - floor(rawRing);
-        if (ring >= 1.0f) ring = 0.0f;
-        float u = rootBase + ring * (1.0f / 3.0f);
-        if (u >= 1.0f) u -= 1.0f;
-        if (invertFlag != 0u) u = 1.0f - u;
-        uint color = PaletteLut[uint(u * 4095.0f) & 4095u];
-        float shading = max(0.35f, 1.0f / (1.0f + 0.025f * compressedIter));
-        if (shading < 0.99f)
-        {
-            uint a = (color >> 24) & 255u;
-            uint r = uint(float((color >> 16) & 255u) * shading);
-            uint g = uint(float((color >> 8) & 255u) * shading);
-            uint b = uint(float(color & 255u) * shading);
-            color = (a << 24) | (r << 16) | (g << 8) | b;
-        }
-        return color;
-    }
-    return SamplePaletteLut(MapIterToPhase(value) + phaseOffset);
-}
-
-float SrgbByteToLinear(uint byteVal)
-{
-    float v = float(byteVal) * (1.0f / 255.0f);
-    return (v <= 0.04045f) ? (v * (1.0f / 12.92f)) : pow((v + 0.055f) * (1.0f / 1.055f), 2.4f);
-}
-
-uint LinearToSrgbByte(float lin)
-{
-    float v = floor(clamp(lin * 4096.0f + 0.5f, 0.0f, 4096.0f)) * (1.0f / 4096.0f);
-    float s = (v <= 0.0031308f) ? (12.92f * v) : (1.055f * pow(max(v, 0.0f), 1.0f / 2.4f) - 0.055f);
-    return uint(clamp(s * 255.0f + 0.5f, 0.0f, 255.0f));
-}
-
-[numthreads(16, 16, 1)]
-void CSResolveAndBlend(uint3 tid : SV_DispatchThreadID)
-{
-    if (tid.x >= width || tid.y >= visibleRows) return;
-
-    uint fullIdx = (tid.y + topHalo) * width + tid.x;
-    uint centerColor = ColorIterationGpu(InIters[fullIdx]);
-    uint resolvedColor = centerColor;
-
-    GpuPixelSubInfo info = InPixelSubInfo[tid.y * width + tid.x];
-    if (info.slot != 0xFFFFFFFFu && info.weight > 0.0f)
-    {
-        uint baseIdx = info.slot * 4u;
-        float sIter[4] = {
-            InSubpixelsFlat[baseIdx + 0u],
-            InSubpixelsFlat[baseIdx + 1u],
-            InSubpixelsFlat[baseIdx + 2u],
-            InSubpixelsFlat[baseIdx + 3u]
-        };
-        float weight = min(info.weight, 1.0f);
-
-        if (sIter[0] < 0.0f && sIter[1] < 0.0f && sIter[2] < 0.0f && sIter[3] < 0.0f &&
-            (centerColor == interiorColor || weight >= 1.0f))
-        {
-            resolvedColor = interiorColor;
-        }
-        else
-        {
-            float phases[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-            if (fractalType != 7u)
-            {
-                [unroll]
-                for (uint s = 0u; s < 4u; ++s)
-                    if (sIter[s] >= 0.0f)
-                        phases[s] = MapIterToPhase(sIter[s]);
-            }
-
-            uint colors[4];
-            [unroll]
-            for (uint s = 0u; s < 4u; ++s)
-            {
-                if (fractalType != 7u && sIter[s] >= 0.0f)
-                {
-                    float deltaU = 0.0f;
-                    uint n0 = s ^ 1u;
-                    uint n1 = s ^ 2u;
-                    if (sIter[n0] >= 0.0f) deltaU = max(deltaU, abs(phases[s] - phases[n0]));
-                    if (sIter[n1] >= 0.0f) deltaU = max(deltaU, abs(phases[s] - phases[n1]));
-                    colors[s] = ColorAtPhaseGpu(phases[s], deltaU);
-                }
-                else
-                {
-                    colors[s] = ColorIterationGpu(sIter[s]);
-                }
-            }
-
-            if (colors[0] == colors[1] && colors[0] == colors[2] && colors[0] == colors[3] &&
-                (colors[0] == centerColor || weight >= 1.0f))
-            {
-                resolvedColor = colors[0];
-            }
-            else
-            {
-                uint outRgb = 0u;
-                [unroll]
-                for (uint ch = 0u; ch < 3u; ++ch)
-                {
-                    uint sh = ch * 8u;
-                    float avg = (SrgbByteToLinear((colors[0] >> sh) & 255u) +
-                                 SrgbByteToLinear((colors[1] >> sh) & 255u) +
-                                 SrgbByteToLinear((colors[2] >> sh) & 255u) +
-                                 SrgbByteToLinear((colors[3] >> sh) & 255u)) * 0.25f;
-                    float lin = (weight >= 1.0f)
-                        ? avg
-                        : (avg * weight + SrgbByteToLinear((centerColor >> sh) & 255u) * (1.0f - weight));
-                    outRgb |= LinearToSrgbByte(lin) << sh;
-                }
-                float alphaAvg = float((colors[0] >> 24) + (colors[1] >> 24) + (colors[2] >> 24) + (colors[3] >> 24)) * 0.25f;
-                float alpha = (weight >= 1.0f)
-                    ? alphaAvg
-                    : (alphaAvg * weight + float(centerColor >> 24) * (1.0f - weight));
-                resolvedColor = outRgb | (uint(alpha + 0.5f) << 24);
-            }
-        }
-    }
-
-    uint localIdx = tid.y * width + tid.x;
-    uint dstIdx = (destRowOffset + tid.y) * width + tid.x;
-
-    if (temporalMode == 0u)
-    {
-        OutAccumPixels[dstIdx] = resolvedColor;
-    }
-    else
-    {
-        uint c0 = (temporalMode == 1u) ? OutAccumPixels[dstIdx] : PrevBandPixels[localIdx];
-        if (c0 != resolvedColor)
-        {
-            uint blended = 0xFF000000u;
-            [unroll]
-            for (uint ch = 0u; ch < 3u; ++ch)
-            {
-                uint sh = ch * 8u;
-                float avg = (SrgbByteToLinear((c0 >> sh) & 255u) +
-                             SrgbByteToLinear((resolvedColor >> sh) & 255u)) * 0.5f;
-                blended |= LinearToSrgbByte(avg) << sh;
-            }
-            OutAccumPixels[dstIdx] = blended;
-        }
-        else if (temporalMode == 2u)
-        {
-            OutAccumPixels[dstIdx] = c0;
-        }
-    }
-}
-)";
-
-        struct CompiledShaderCache
-        {
-            ComPtr<ID3DBlob> shallowPrim, shallowSub;
-            ComPtr<ID3DBlob> ldsPrim, ldsSub;
-            ComPtr<ID3DBlob> ldsBlaPrim, ldsBlaSub;
-            ComPtr<ID3DBlob> deepExpPrim, deepExpSub;
-            ComPtr<ID3DBlob> postDetect, postBuildIndirect, postResolve;
-            bool ok{ false };
-        };
-
-        const CompiledShaderCache& GetCompiledShaderCache()
-        {
-            static CompiledShaderCache cache;
-            static std::once_flag flag;
-            std::call_once(flag, []()
-            {
-                auto compileOne = [](const char* src, const char* entry, ComPtr<ID3DBlob>& outBlob) -> bool
-                {
-                    ComPtr<ID3DBlob> err;
-                    const HRESULT hr = D3DCompile(
-                        src,
-                        std::strlen(src),
-                        entry,
-                        nullptr,
-                        nullptr,
-                        entry,
-                        "cs_5_0",
-                        D3DCOMPILE_OPTIMIZATION_LEVEL3,
-                        0,
-                        &outBlob,
-                        &err);
-                    return SUCCEEDED(hr) && outBlob != nullptr;
-                };
-
-                cache.ok =
-                    compileOne(kShallowShaderSrc, "CSPrimary", cache.shallowPrim) &&
-                    compileOne(kShallowShaderSrc, "CSSubpixels", cache.shallowSub) &&
-                    compileOne(kPerturbLdsShaderSrc, "CSPrimary", cache.ldsPrim) &&
-                    compileOne(kPerturbLdsShaderSrc, "CSSubpixels", cache.ldsSub) &&
-                    compileOne(kPerturbLdsBlaShaderSrc, "CSPrimary", cache.ldsBlaPrim) &&
-                    compileOne(kPerturbLdsBlaShaderSrc, "CSSubpixels", cache.ldsBlaSub) &&
-                    compileOne(kPerturbDeepExpShaderSrc, "CSPrimary", cache.deepExpPrim) &&
-                    compileOne(kPerturbDeepExpShaderSrc, "CSSubpixels", cache.deepExpSub) &&
-                    compileOne(kPostDetectShaderSrc, "CSDetectBoundaries", cache.postDetect) &&
-                    compileOne(kPostDetectShaderSrc, "CSBuildIndirectArgs", cache.postBuildIndirect) &&
-                    compileOne(kPostResolveShaderSrc, "CSResolveAndBlend", cache.postResolve);
-            });
-            return cache;
-        }
-
-        size_t GrowCapacityBytes(size_t currentBytes, size_t neededBytes) noexcept
-        {
-            if (neededBytes <= currentBytes) return currentBytes;
-            if (neededBytes >= 64ULL * 1024 * 1024) return neededBytes;
-            const size_t grown = std::max(neededBytes, currentBytes + (currentBytes >> 1) + 4096);
-            return std::min(grown, kD3D11SafeMaxBufferBytes);
-        }
-    }
-
-    struct GpuFractalSolver::Impl
-    {
-        std::mutex mutex;
-        bool available{ false };
-        bool usingSoftwareAdapter{ false };
-
-        ComPtr<ID3D11Device> device;
-        ComPtr<ID3D11DeviceContext> context;
-
-        ComPtr<ID3D11ComputeShader> csShallowPrim, csShallowSub;
-        ComPtr<ID3D11ComputeShader> csLdsPrim, csLdsSub;
-        ComPtr<ID3D11ComputeShader> csLdsBlaPrim, csLdsBlaSub;
-        ComPtr<ID3D11ComputeShader> csDeepExpPrim, csDeepExpSub;
-        ComPtr<ID3D11ComputeShader> csPostDetect, csPostBuildIndirect, csPostResolve;
-
-        ComPtr<ID3D11Buffer> constantBuffer;
-
-        ComPtr<ID3D11Buffer> outItersBuf, outItersStaging;
-        ComPtr<ID3D11UnorderedAccessView> outItersUav;
-        ComPtr<ID3D11ShaderResourceView> outItersSrv;
-        size_t outItersCapElems{ 0 };
-        size_t outItersStagingCapBytes{ 0 };
-
-        ComPtr<ID3D11Buffer> subIdxBuf;
-        ComPtr<ID3D11ShaderResourceView> subIdxSrv;
-        size_t subIdxCapElems{ 0 };
-
-        ComPtr<ID3D11Buffer> subOutBuf, subOutStaging;
-        ComPtr<ID3D11UnorderedAccessView> subOutUav;
-        ComPtr<ID3D11ShaderResourceView> subOutSrv;
-        size_t subOutCapFloats{ 0 };
-        size_t subOutStagingCapBytes{ 0 };
-
-        // Fused GPU movie post-processing & temporal accumulation resources
-        ComPtr<ID3D11Buffer> subCounterBuf;
-        ComPtr<ID3D11UnorderedAccessView> subCounterUav;
-        ComPtr<ID3D11ShaderResourceView> subCounterSrv;
-
-        ComPtr<ID3D11Buffer> indirectArgsBuf;
-        ComPtr<ID3D11UnorderedAccessView> indirectArgsUav;
-
-        ComPtr<ID3D11Buffer> paletteLutBuf;
-        ComPtr<ID3D11ShaderResourceView> paletteLutSrv;
-        uint64_t uploadedLutHash{ 0 };
-        bool hasUploadedLut{ false };
-
-        ComPtr<ID3D11Buffer> gpuSubIdxBuf;
-        ComPtr<ID3D11UnorderedAccessView> gpuSubIdxUav;
-        ComPtr<ID3D11ShaderResourceView> gpuSubIdxSrv;
-        size_t gpuSubIdxCapElems{ 0 };
-
-        ComPtr<ID3D11Buffer> pixelSubInfoBuf;
-        ComPtr<ID3D11UnorderedAccessView> pixelSubInfoUav;
-        ComPtr<ID3D11ShaderResourceView> pixelSubInfoSrv;
-        size_t pixelSubInfoCapElems{ 0 };
-
-        ComPtr<ID3D11Buffer> accumPixelsBuf, accumPixelsStaging;
-        ComPtr<ID3D11UnorderedAccessView> accumPixelsUav;
-        size_t accumPixelsCapElems{ 0 };
-        size_t accumPixelsStagingCapBytes{ 0 };
-        bool movieFullFrameAccum{ false };
-
-        ComPtr<ID3D11Buffer> prevBandBuf;
-        ComPtr<ID3D11ShaderResourceView> prevBandSrv;
-        size_t prevBandCapElems{ 0 };
-
-        ComPtr<ID3D11Buffer> colCoordsBuf, rowCoordsBuf;
-        ComPtr<ID3D11ShaderResourceView> colCoordsSrv, rowCoordsSrv;
-        size_t colCoordsCapFloats{ 0 }, rowCoordsCapFloats{ 0 };
-
-        ComPtr<ID3D11Buffer> colCoordsExpBuf, rowCoordsExpBuf;
-        ComPtr<ID3D11ShaderResourceView> colCoordsExpSrv, rowCoordsExpSrv;
-        size_t colCoordsExpCapElems{ 0 }, rowCoordsExpCapElems{ 0 };
-
-        ComPtr<ID3D11Buffer> orbitFastBuf;
-        ComPtr<ID3D11ShaderResourceView> orbitFastSrv;
-        size_t orbitFastCapElems{ 0 };
-
-        ComPtr<ID3D11Buffer> orbitFullBuf;
-        ComPtr<ID3D11ShaderResourceView> orbitFullSrv;
-        size_t orbitFullCapElems{ 0 };
-
-        ComPtr<ID3D11Buffer> blaF32Buf;
-        ComPtr<ID3D11ShaderResourceView> blaF32Srv;
-        size_t blaF32CapElems{ 0 };
-
-        ComPtr<ID3D11Buffer> blaExpBuf;
-        ComPtr<ID3D11ShaderResourceView> blaExpSrv;
-        size_t blaExpCapElems{ 0 };
-
-        ComPtr<ID3D11Buffer> blaMetaBuf;
-        ComPtr<ID3D11ShaderResourceView> blaMetaSrv;
-
-        // Cached orbit & BLA state uploaded to GPU
-        uint64_t uploadedOrbitVersion{ 0 };
-        int uploadedRefLen{ -1 };
-        FractalType uploadedType{ FractalType::Mandelbrot };
-        bool uploadedHasDeepExpOrbit{ false };
-
-        uint64_t uploadedBlaOrbitVersion{ 0 };
-        int uploadedBlaRefLen{ -1 };
-        double uploadedBlaCMax{ 0.0 };
-        bool uploadedHasBlaF32{ false };
-        bool uploadedHasBlaExp{ false };
-        GpuBlaBuilder blaBuilder;
-
-        // Reusable host staging vectors to avoid heap churn and WC memory stalls
-        std::vector<float> hostColCoords, hostRowCoords;
-        std::vector<GpuCoordExp> hostColCoordsExp, hostRowCoordsExp;
-        std::vector<float> hostOrbitFast;
-        std::vector<GpuOrbitPointExp> hostOrbitExp;
-        std::vector<uint32_t> hostSlotOfPixel;
-        std::vector<uint32_t> hostTiledPixels;
-        std::vector<uint32_t> hostTiledSlots;
-        std::vector<float> hostSubFloats;
-
-        explicit Impl(bool allowSoftwareAdapter)
-        {
-            const auto& shaders = GetCompiledShaderCache();
-            if (!shaders.ok) return;
-
-            const D3D_FEATURE_LEVEL featureLevels[]{ D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
-            D3D_FEATURE_LEVEL flOut{};
-
-            ComPtr<IDXGIFactory1> factory;
-            if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) && factory)
-            {
-                for (UINT idx = 0;; ++idx)
-                {
-                    ComPtr<IDXGIAdapter1> adapter;
-                    if (factory->EnumAdapters1(idx, &adapter) == DXGI_ERROR_NOT_FOUND) break;
-                    DXGI_ADAPTER_DESC1 desc{};
-                    if (FAILED(adapter->GetDesc1(&desc))) continue;
-                    if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0) continue;
-
-                    if (SUCCEEDED(D3D11CreateDevice(
-                        adapter.Get(),
-                        D3D_DRIVER_TYPE_UNKNOWN,
-                        nullptr,
-                        D3D11_CREATE_DEVICE_SINGLETHREADED,
-                        featureLevels,
-                        static_cast<UINT>(std::size(featureLevels)),
-                        D3D11_SDK_VERSION,
-                        &device,
-                        &flOut,
-                        &context)))
-                    {
-                        usingSoftwareAdapter = false;
-                        break;
-                    }
-                }
-            }
-
-            if (!device && allowSoftwareAdapter)
-            {
-                if (SUCCEEDED(D3D11CreateDevice(
-                    nullptr,
-                    D3D_DRIVER_TYPE_WARP,
-                    nullptr,
-                    D3D11_CREATE_DEVICE_SINGLETHREADED,
-                    featureLevels,
-                    static_cast<UINT>(std::size(featureLevels)),
-                    D3D11_SDK_VERSION,
-                    &device,
-                    &flOut,
-                    &context)))
-                {
-                    usingSoftwareAdapter = true;
-                }
-            }
-
-            if (!device || !context) return;
-
-            auto makeShader = [&](const ComPtr<ID3DBlob>& blob, ComPtr<ID3D11ComputeShader>& outCs) -> bool
-            {
-                return SUCCEEDED(device->CreateComputeShader(
-                    blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &outCs)) && outCs != nullptr;
-            };
-
-            if (!makeShader(shaders.shallowPrim, csShallowPrim) ||
-                !makeShader(shaders.shallowSub, csShallowSub) ||
-                !makeShader(shaders.ldsPrim, csLdsPrim) ||
-                !makeShader(shaders.ldsSub, csLdsSub) ||
-                !makeShader(shaders.ldsBlaPrim, csLdsBlaPrim) ||
-                !makeShader(shaders.ldsBlaSub, csLdsBlaSub) ||
-                !makeShader(shaders.deepExpPrim, csDeepExpPrim) ||
-                !makeShader(shaders.deepExpSub, csDeepExpSub) ||
-                !makeShader(shaders.postDetect, csPostDetect) ||
-                !makeShader(shaders.postBuildIndirect, csPostBuildIndirect) ||
-                !makeShader(shaders.postResolve, csPostResolve))
-            {
-                return;
-            }
-
-            D3D11_BUFFER_DESC cbDesc{};
-            cbDesc.ByteWidth = 64;
-            cbDesc.Usage = D3D11_USAGE_DYNAMIC;
-            cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-            cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-            if (FAILED(device->CreateBuffer(&cbDesc, nullptr, &constantBuffer)))
-            {
-                return;
-            }
-
-            D3D11_BUFFER_DESC metaDesc{};
-            metaDesc.ByteWidth = 32 * 8;
-            metaDesc.Usage = D3D11_USAGE_DYNAMIC;
-            metaDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-            metaDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-            metaDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-            metaDesc.StructureByteStride = 8;
-            if (FAILED(device->CreateBuffer(&metaDesc, nullptr, &blaMetaBuf)))
-            {
-                return;
-            }
-            D3D11_SHADER_RESOURCE_VIEW_DESC metaSrvDesc{};
-            metaSrvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-            metaSrvDesc.Buffer.NumElements = 32;
-            if (FAILED(device->CreateShaderResourceView(blaMetaBuf.Get(), &metaSrvDesc, &blaMetaSrv)))
-            {
-                return;
-            }
-
-            // Fixed small GPU-resident buffers for fused movie post-processing
-            D3D11_BUFFER_DESC counterDesc{};
-            counterDesc.ByteWidth = 16;
-            counterDesc.Usage = D3D11_USAGE_DEFAULT;
-            counterDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
-            if (FAILED(device->CreateBuffer(&counterDesc, nullptr, &subCounterBuf)))
-            {
-                return;
-            }
-            D3D11_UNORDERED_ACCESS_VIEW_DESC counterUavDesc{};
-            counterUavDesc.Format = DXGI_FORMAT_R32_UINT;
-            counterUavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-            counterUavDesc.Buffer.NumElements = 4;
-            if (FAILED(device->CreateUnorderedAccessView(subCounterBuf.Get(), &counterUavDesc, &subCounterUav)))
-            {
-                return;
-            }
-            D3D11_SHADER_RESOURCE_VIEW_DESC counterSrvDesc{};
-            counterSrvDesc.Format = DXGI_FORMAT_R32_UINT;
-            counterSrvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-            counterSrvDesc.Buffer.NumElements = 4;
-            if (FAILED(device->CreateShaderResourceView(subCounterBuf.Get(), &counterSrvDesc, &subCounterSrv)))
-            {
-                return;
-            }
-
-            D3D11_BUFFER_DESC indirectDesc{};
-            indirectDesc.ByteWidth = 16;
-            indirectDesc.Usage = D3D11_USAGE_DEFAULT;
-            indirectDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
-            indirectDesc.MiscFlags = D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS;
-            if (FAILED(device->CreateBuffer(&indirectDesc, nullptr, &indirectArgsBuf)) ||
-                FAILED(device->CreateUnorderedAccessView(indirectArgsBuf.Get(), &counterUavDesc, &indirectArgsUav)))
-            {
-                return;
-            }
-
-            D3D11_BUFFER_DESC lutDesc{};
-            lutDesc.ByteWidth = static_cast<UINT>(kPaletteLutSize * sizeof(uint32_t));
-            lutDesc.Usage = D3D11_USAGE_DYNAMIC;
-            lutDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-            lutDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-            if (FAILED(device->CreateBuffer(&lutDesc, nullptr, &paletteLutBuf)))
-            {
-                return;
-            }
-            D3D11_SHADER_RESOURCE_VIEW_DESC lutSrvDesc{};
-            lutSrvDesc.Format = DXGI_FORMAT_R32_UINT;
-            lutSrvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-            lutSrvDesc.Buffer.NumElements = static_cast<UINT>(kPaletteLutSize);
-            if (FAILED(device->CreateShaderResourceView(paletteLutBuf.Get(), &lutSrvDesc, &paletteLutSrv)))
-            {
-                return;
-            }
-
-            available = true;
-        }
-
-        bool CanSupportConfig(const FractalConfig& config) const noexcept
-        {
-            if (!available || config.width <= 0 || config.height <= 0 || config.maxIterations < 0)
+        const size_t orbitCount = static_cast<size_t>(refState.refLen) + 1;
+        const bool zoomDeepExp = (config.zoom >= kGpuDeepExpThreshold);
+
+        if (refState.orbitVersion != uploadedOrbitVersion ||
+            refState.refLen > uploadedRefLen ||
+            config.fractalType != uploadedType)
+        {
+            if (!EnsureTypedSrvBuffer(
+                orbitCount, 8, DXGI_FORMAT_R32G32_FLOAT, orbitFastBuf, orbitFastSrv, orbitFastCapElems))
             {
                 return false;
             }
-            if (config.renderStride > 1 && config.width >= 8 && config.height >= 8)
+            hostOrbitFast.resize(orbitCount * 2);
+            for (size_t m = 0; m < orbitCount; ++m)
+            {
+                hostOrbitFast[m * 2 + 0] = static_cast<float>(refState.orbit[m].x);
+                hostOrbitFast[m * 2 + 1] = static_cast<float>(refState.orbit[m].y);
+            }
+            if (!UploadBufferDiscard(orbitFastBuf.Get(), hostOrbitFast.data(), orbitCount * 8))
             {
                 return false;
             }
+            uploadedOrbitVersion = refState.orbitVersion;
+            uploadedRefLen = refState.refLen;
+            uploadedType = config.fractalType;
+            uploadedHasDeepExpOrbit = false;
+        }
 
-            if (config.juliaSet)
+        if (config.fractalType == FractalType::Mandelbrot)
+        {
+            if (refState.orbitVersion != uploadedBlaOrbitVersion ||
+                refState.refLen != uploadedBlaRefLen ||
+                cMax > uploadedBlaCMax * (1.0 + 1e-12) ||
+                cMax < uploadedBlaCMax * 0.25)
             {
-                if (config.zoom >= GpuPerturbationThreshold) return false;
-                if (config.fractalType != FractalType::Mandelbrot && config.fractalType != FractalType::BurningShip)
-                    return false;
-                const double jx = config.juliaX.ToDouble();
-                const double jy = config.juliaY.ToDouble();
-                if (!std::isfinite(jx) || !std::isfinite(jy)) return false;
-                const double bailout2 = std::max(16.0, 4.0 * std::hypot(jx, jy));
-                return std::isfinite(bailout2) && bailout2 <= 1e18;
-            }
-
-            if (config.zoom < GpuPerturbationThreshold)
-            {
-                return std::isfinite(config.centerX) && std::isfinite(config.centerY);
-            }
-
-            switch (config.fractalType)
-            {
-            case FractalType::Mandelbrot:
-                return config.zoom <= MaxZoom;
-            case FractalType::Tricorn:
-                return config.zoom < kGpuTricornMaxZoom;
-            case FractalType::BurningShip:
-            case FractalType::Buffalo:
-                return config.zoom < DeepZoomThreshold;
-            case FractalType::Celtic:
-            case FractalType::CubicMultibrot:
-            case FractalType::Phoenix:
-            case FractalType::Newton:
-            default:
-                return false;
-            }
-        }
-
-        bool EnsureTypedSrvBuffer(
-            size_t neededElems,
-            UINT elemBytes,
-            DXGI_FORMAT format,
-            ComPtr<ID3D11Buffer>& buf,
-            ComPtr<ID3D11ShaderResourceView>& srv,
-            size_t& capElems)
-        {
-            if (neededElems <= capElems && buf && srv) return true;
-            const size_t currentBytes = capElems * elemBytes;
-            const size_t neededBytes = std::max<size_t>(1, neededElems) * elemBytes;
-            if (neededBytes > kD3D11SafeMaxBufferBytes) return false;
-            const size_t allocBytes = GrowCapacityBytes(currentBytes, neededBytes);
-            const size_t allocElems = allocBytes / elemBytes;
-
-            D3D11_BUFFER_DESC desc{};
-            desc.ByteWidth = static_cast<UINT>(allocElems * elemBytes);
-            desc.Usage = D3D11_USAGE_DYNAMIC;
-            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-            desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-
-            ComPtr<ID3D11Buffer> newBuf;
-            if (FAILED(device->CreateBuffer(&desc, nullptr, &newBuf))) return false;
-
-            D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-            srvDesc.Format = format;
-            srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-            srvDesc.Buffer.NumElements = static_cast<UINT>(allocElems);
-
-            ComPtr<ID3D11ShaderResourceView> newSrv;
-            if (FAILED(device->CreateShaderResourceView(newBuf.Get(), &srvDesc, &newSrv))) return false;
-
-            buf = std::move(newBuf);
-            srv = std::move(newSrv);
-            capElems = allocElems;
-            return true;
-        }
-
-        bool EnsureStructuredSrvBuffer(
-            size_t neededElems,
-            UINT strideBytes,
-            ComPtr<ID3D11Buffer>& buf,
-            ComPtr<ID3D11ShaderResourceView>& srv,
-            size_t& capElems)
-        {
-            if (neededElems <= capElems && buf && srv) return true;
-            const size_t currentBytes = capElems * strideBytes;
-            const size_t neededBytes = std::max<size_t>(1, neededElems) * strideBytes;
-            if (neededBytes > kD3D11SafeMaxBufferBytes) return false;
-            const size_t allocBytes = GrowCapacityBytes(currentBytes, neededBytes);
-            const size_t allocElems = allocBytes / strideBytes;
-
-            D3D11_BUFFER_DESC desc{};
-            desc.ByteWidth = static_cast<UINT>(allocElems * strideBytes);
-            desc.Usage = D3D11_USAGE_DYNAMIC;
-            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-            desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-            desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-            desc.StructureByteStride = strideBytes;
-
-            ComPtr<ID3D11Buffer> newBuf;
-            if (FAILED(device->CreateBuffer(&desc, nullptr, &newBuf))) return false;
-
-            D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-            srvDesc.Format = DXGI_FORMAT_UNKNOWN;
-            srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-            srvDesc.Buffer.NumElements = static_cast<UINT>(allocElems);
-
-            ComPtr<ID3D11ShaderResourceView> newSrv;
-            if (FAILED(device->CreateShaderResourceView(newBuf.Get(), &srvDesc, &newSrv))) return false;
-
-            buf = std::move(newBuf);
-            srv = std::move(newSrv);
-            capElems = allocElems;
-            return true;
-        }
-
-        bool EnsureStructuredUavSrvBuffer(
-            size_t neededElems,
-            UINT strideBytes,
-            ComPtr<ID3D11Buffer>& buf,
-            ComPtr<ID3D11UnorderedAccessView>& uav,
-            ComPtr<ID3D11ShaderResourceView>& srv,
-            size_t& capElems)
-        {
-            if (neededElems <= capElems && buf && uav && srv) return true;
-            const size_t currentBytes = capElems * strideBytes;
-            const size_t neededBytes = std::max<size_t>(1, neededElems) * strideBytes;
-            if (neededBytes > kD3D11SafeMaxBufferBytes) return false;
-            const size_t allocBytes = GrowCapacityBytes(currentBytes, neededBytes);
-            const size_t allocElems = allocBytes / strideBytes;
-
-            D3D11_BUFFER_DESC desc{};
-            desc.ByteWidth = static_cast<UINT>(allocElems * strideBytes);
-            desc.Usage = D3D11_USAGE_DEFAULT;
-            desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
-            desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-            desc.StructureByteStride = strideBytes;
-
-            ComPtr<ID3D11Buffer> newBuf;
-            if (FAILED(device->CreateBuffer(&desc, nullptr, &newBuf))) return false;
-
-            D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
-            uavDesc.Format = DXGI_FORMAT_UNKNOWN;
-            uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-            uavDesc.Buffer.NumElements = static_cast<UINT>(allocElems);
-
-            ComPtr<ID3D11UnorderedAccessView> newUav;
-            if (FAILED(device->CreateUnorderedAccessView(newBuf.Get(), &uavDesc, &newUav))) return false;
-
-            D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-            srvDesc.Format = DXGI_FORMAT_UNKNOWN;
-            srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-            srvDesc.Buffer.NumElements = static_cast<UINT>(allocElems);
-
-            ComPtr<ID3D11ShaderResourceView> newSrv;
-            if (FAILED(device->CreateShaderResourceView(newBuf.Get(), &srvDesc, &newSrv))) return false;
-
-            buf = std::move(newBuf);
-            uav = std::move(newUav);
-            srv = std::move(newSrv);
-            capElems = allocElems;
-            return true;
-        }
-
-        bool EnsureTypedUavSrvBuffer(
-            size_t neededElems,
-            UINT elemBytes,
-            DXGI_FORMAT format,
-            ComPtr<ID3D11Buffer>& buf,
-            ComPtr<ID3D11UnorderedAccessView>& uav,
-            ComPtr<ID3D11ShaderResourceView>& srv,
-            size_t& capElems)
-        {
-            if (neededElems <= capElems && buf && uav && srv) return true;
-            const size_t currentBytes = capElems * elemBytes;
-            const size_t neededBytes = std::max<size_t>(1, neededElems) * elemBytes;
-            if (neededBytes > kD3D11SafeMaxBufferBytes) return false;
-            const size_t allocBytes = GrowCapacityBytes(currentBytes, neededBytes);
-            const size_t allocElems = allocBytes / elemBytes;
-
-            D3D11_BUFFER_DESC desc{};
-            desc.ByteWidth = static_cast<UINT>(allocElems * elemBytes);
-            desc.Usage = D3D11_USAGE_DEFAULT;
-            desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
-
-            ComPtr<ID3D11Buffer> newBuf;
-            if (FAILED(device->CreateBuffer(&desc, nullptr, &newBuf))) return false;
-
-            D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
-            uavDesc.Format = format;
-            uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-            uavDesc.Buffer.NumElements = static_cast<UINT>(allocElems);
-
-            ComPtr<ID3D11UnorderedAccessView> newUav;
-            if (FAILED(device->CreateUnorderedAccessView(newBuf.Get(), &uavDesc, &newUav))) return false;
-
-            D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-            srvDesc.Format = format;
-            srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-            srvDesc.Buffer.NumElements = static_cast<UINT>(allocElems);
-
-            ComPtr<ID3D11ShaderResourceView> newSrv;
-            if (FAILED(device->CreateShaderResourceView(newBuf.Get(), &srvDesc, &newSrv))) return false;
-
-            buf = std::move(newBuf);
-            uav = std::move(newUav);
-            srv = std::move(newSrv);
-            capElems = allocElems;
-            return true;
-        }
-
-        bool EnsureStructuredUavBuffer(
-            size_t neededElems,
-            UINT strideBytes,
-            ComPtr<ID3D11Buffer>& buf,
-            ComPtr<ID3D11UnorderedAccessView>& uav,
-            size_t& capElems)
-        {
-            if (neededElems <= capElems && buf && uav) return true;
-            const size_t currentBytes = capElems * strideBytes;
-            const size_t neededBytes = std::max<size_t>(1, neededElems) * strideBytes;
-            if (neededBytes > kD3D11SafeMaxBufferBytes) return false;
-            const size_t allocBytes = GrowCapacityBytes(currentBytes, neededBytes);
-            const size_t allocElems = allocBytes / strideBytes;
-
-            D3D11_BUFFER_DESC desc{};
-            desc.ByteWidth = static_cast<UINT>(allocElems * strideBytes);
-            desc.Usage = D3D11_USAGE_DEFAULT;
-            desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
-            desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-            desc.StructureByteStride = strideBytes;
-
-            ComPtr<ID3D11Buffer> newBuf;
-            if (FAILED(device->CreateBuffer(&desc, nullptr, &newBuf))) return false;
-
-            D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
-            uavDesc.Format = DXGI_FORMAT_UNKNOWN;
-            uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-            uavDesc.Buffer.NumElements = static_cast<UINT>(allocElems);
-
-            ComPtr<ID3D11UnorderedAccessView> newUav;
-            if (FAILED(device->CreateUnorderedAccessView(newBuf.Get(), &uavDesc, &newUav))) return false;
-
-            buf = std::move(newBuf);
-            uav = std::move(newUav);
-            capElems = allocElems;
-            return true;
-        }
-
-        bool EnsureStagingReadBuffer(
-            size_t neededBytes,
-            ComPtr<ID3D11Buffer>& stagingBuf,
-            size_t& capBytes)
-        {
-            if (neededBytes <= capBytes && stagingBuf) return true;
-            const size_t reqBytes = std::max<size_t>(4, neededBytes);
-            if (reqBytes > kD3D11SafeMaxBufferBytes) return false;
-            const size_t allocBytes = GrowCapacityBytes(capBytes, reqBytes);
-
-            D3D11_BUFFER_DESC stageDesc{};
-            stageDesc.ByteWidth = static_cast<UINT>(allocBytes);
-            stageDesc.Usage = D3D11_USAGE_STAGING;
-            stageDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-
-            ComPtr<ID3D11Buffer> newStaging;
-            if (FAILED(device->CreateBuffer(&stageDesc, nullptr, &newStaging))) return false;
-
-            stagingBuf = std::move(newStaging);
-            capBytes = allocBytes;
-            return true;
-        }
-
-        bool UploadBufferDiscard(ID3D11Buffer* buf, const void* src, size_t bytes)
-        {
-            if (bytes == 0) return true;
-            D3D11_MAPPED_SUBRESOURCE mapped{};
-            if (FAILED(context->Map(buf, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
-            std::memcpy(mapped.pData, src, bytes);
-            context->Unmap(buf, 0);
-            return true;
-        }
-
-        bool EnsurePaletteLutUploaded(const uint32_t* lutData)
-        {
-            if (!lutData) return false;
-            uint64_t hash = 14695981039346656037ULL;
-            for (size_t i = 0; i < kPaletteLutSize; ++i)
-            {
-                hash ^= lutData[i];
-                hash *= 1099511628211ULL;
-            }
-            if (hasUploadedLut && hash == uploadedLutHash)
-            {
-                return true;
-            }
-            if (!UploadBufferDiscard(paletteLutBuf.Get(), lutData, kPaletteLutSize * sizeof(uint32_t)))
-            {
-                return false;
-            }
-            uploadedLutHash = hash;
-            hasUploadedLut = true;
-            return true;
-        }
-
-        bool SyncReferenceAndBla(
-            const FractalConfig& config,
-            const DeepReferenceState& refState,
-            double cMax,
-            const std::atomic<bool>* cancelToken,
-            bool& outRunDeepExp)
-        {
-            const size_t orbitCount = static_cast<size_t>(refState.refLen) + 1;
-            const bool zoomDeepExp = (config.zoom >= kGpuDeepExpThreshold);
-
-            if (refState.orbitVersion != uploadedOrbitVersion ||
-                refState.refLen > uploadedRefLen ||
-                config.fractalType != uploadedType)
-            {
-                if (!EnsureTypedSrvBuffer(
-                    orbitCount, 8, DXGI_FORMAT_R32G32_FLOAT, orbitFastBuf, orbitFastSrv, orbitFastCapElems))
+                blaBuilder.Build(refState.orbit, refState.refLen, cMax, cancelToken);
+                if (cancelToken && cancelToken->load(std::memory_order_relaxed))
                 {
                     return false;
                 }
-                hostOrbitFast.resize(orbitCount * 2);
-                for (size_t m = 0; m < orbitCount; ++m)
-                {
-                    hostOrbitFast[m * 2 + 0] = static_cast<float>(refState.orbit[m].x);
-                    hostOrbitFast[m * 2 + 1] = static_cast<float>(refState.orbit[m].y);
-                }
-                if (!UploadBufferDiscard(orbitFastBuf.Get(), hostOrbitFast.data(), orbitCount * 8))
-                {
-                    return false;
-                }
-                uploadedOrbitVersion = refState.orbitVersion;
-                uploadedRefLen = refState.refLen;
-                uploadedType = config.fractalType;
-                uploadedHasDeepExpOrbit = false;
-            }
+                uploadedBlaOrbitVersion = refState.orbitVersion;
+                uploadedBlaRefLen = refState.refLen;
+                uploadedBlaCMax = cMax;
+                uploadedHasBlaF32 = false;
+                uploadedHasBlaExp = false;
 
-            if (config.fractalType == FractalType::Mandelbrot)
-            {
-                if (refState.orbitVersion != uploadedBlaOrbitVersion ||
-                    refState.refLen != uploadedBlaRefLen ||
-                    cMax > uploadedBlaCMax * (1.0 + 1e-12) ||
-                    cMax < uploadedBlaCMax * 0.25)
+                if (blaBuilder.numLevels >= 3)
                 {
-                    blaBuilder.Build(refState.orbit, refState.refLen, cMax, cancelToken);
-                    if (cancelToken && cancelToken->load(std::memory_order_relaxed))
+                    if (!UploadBufferDiscard(blaMetaBuf.Get(), blaBuilder.levelMeta.data(), 32 * 8))
                     {
                         return false;
                     }
-                    uploadedBlaOrbitVersion = refState.orbitVersion;
-                    uploadedBlaRefLen = refState.refLen;
-                    uploadedBlaCMax = cMax;
-                    uploadedHasBlaF32 = false;
-                    uploadedHasBlaExp = false;
-
-                    if (blaBuilder.numLevels >= 3)
-                    {
-                        if (!UploadBufferDiscard(blaMetaBuf.Get(), blaBuilder.levelMeta.data(), 32 * 8))
-                        {
-                            return false;
-                        }
-                    }
                 }
             }
-            else
-            {
-                blaBuilder.Clear();
-                uploadedBlaOrbitVersion = 0;
-                uploadedBlaRefLen = -1;
-                uploadedBlaCMax = 0.0;
-                uploadedHasBlaF32 = false;
-                uploadedHasBlaExp = false;
-            }
-
-            const bool hasBla = (config.fractalType == FractalType::Mandelbrot && blaBuilder.numLevels >= 3);
-            outRunDeepExp = zoomDeepExp || (hasBla && !blaBuilder.fitsFloat32);
-
-            if (outRunDeepExp && !uploadedHasDeepExpOrbit)
-            {
-                if (!EnsureStructuredSrvBuffer(
-                    orbitCount, sizeof(GpuOrbitPointExp), orbitFullBuf, orbitFullSrv, orbitFullCapElems))
-                {
-                    return false;
-                }
-                hostOrbitExp.resize(orbitCount);
-                for (size_t m = 0; m < orbitCount; ++m)
-                {
-                    const double rx = refState.orbit[m].x;
-                    const double ry = refState.orbit[m].y;
-                    hostOrbitExp[m].rx = static_cast<float>(rx);
-                    hostOrbitExp[m].ry = static_cast<float>(ry);
-                    SplitFrexp2(rx, ry, hostOrbitExp[m].rmx, hostOrbitExp[m].rmy, hostOrbitExp[m].rExp);
-                }
-                if (!UploadBufferDiscard(orbitFullBuf.Get(), hostOrbitExp.data(), orbitCount * sizeof(GpuOrbitPointExp)))
-                {
-                    return false;
-                }
-                uploadedHasDeepExpOrbit = true;
-            }
-
-            if (hasBla)
-            {
-                if (outRunDeepExp)
-                {
-                    if (!uploadedHasBlaExp)
-                    {
-                        if (!EnsureStructuredSrvBuffer(
-                            blaBuilder.blocksExp.size(), sizeof(GpuBlaBlockExp), blaExpBuf, blaExpSrv, blaExpCapElems))
-                        {
-                            return false;
-                        }
-                        if (!UploadBufferDiscard(
-                            blaExpBuf.Get(),
-                            blaBuilder.blocksExp.data(),
-                            blaBuilder.blocksExp.size() * sizeof(GpuBlaBlockExp)))
-                        {
-                            return false;
-                        }
-                        uploadedHasBlaExp = true;
-                    }
-                }
-                else
-                {
-                    if (!uploadedHasBlaF32)
-                    {
-                        if (!EnsureStructuredSrvBuffer(
-                            blaBuilder.blocksF32.size(), sizeof(GpuBlaBlockF32), blaF32Buf, blaF32Srv, blaF32CapElems))
-                        {
-                            return false;
-                        }
-                        if (!UploadBufferDiscard(
-                            blaF32Buf.Get(),
-                            blaBuilder.blocksF32.data(),
-                            blaBuilder.blocksF32.size() * sizeof(GpuBlaBlockF32)))
-                        {
-                            return false;
-                        }
-                        uploadedHasBlaF32 = true;
-                    }
-                }
-            }
-
-            return true;
+        }
+        else
+        {
+            blaBuilder.Clear();
+            uploadedBlaOrbitVersion = 0;
+            uploadedBlaRefLen = -1;
+            uploadedBlaCMax = 0.0;
+            uploadedHasBlaF32 = false;
+            uploadedHasBlaExp = false;
         }
 
-        enum class PrepResult
+        const bool hasBla = (config.fractalType == FractalType::Mandelbrot && blaBuilder.numLevels >= 3);
+        outRunDeepExp = zoomDeepExp || (hasBla && !blaBuilder.fitsFloat32);
+
+        if (outRunDeepExp && !uploadedHasDeepExpOrbit)
         {
-            Ok,
-            Canceled,
-            Fallback
-        };
+            if (!EnsureStructuredSrvBuffer(
+                orbitCount, sizeof(GpuOrbitPointExp), orbitFullBuf, orbitFullSrv, orbitFullCapElems))
+            {
+                return false;
+            }
+            hostOrbitExp.resize(orbitCount);
+            for (size_t m = 0; m < orbitCount; ++m)
+            {
+                const double rx = refState.orbit[m].x;
+                const double ry = refState.orbit[m].y;
+                hostOrbitExp[m].rx = static_cast<float>(rx);
+                hostOrbitExp[m].ry = static_cast<float>(ry);
+                SplitFrexp2(rx, ry, hostOrbitExp[m].rmx, hostOrbitExp[m].rmy, hostOrbitExp[m].rExp);
+            }
+            if (!UploadBufferDiscard(orbitFullBuf.Get(), hostOrbitExp.data(), orbitCount * sizeof(GpuOrbitPointExp)))
+            {
+                return false;
+            }
+            uploadedHasDeepExpOrbit = true;
+        }
 
-        PrepResult PrepareModeAndCoords(
-            const FractalConfig& config,
-            const BigFloat& centerX,
-            const BigFloat& centerY,
-            DeepReferenceCache& referenceCache,
-            const std::atomic<bool>* cancelToken,
-            ShaderMode& outMode,
-            DeepReferenceState& outRefState,
-            double& outJuliaCx,
-            double& outJuliaCy,
-            double& outJuliaBailout2)
+        if (hasBla)
         {
-            const int width = config.width;
-            const int height = config.height;
-            outJuliaCx = 0.0;
-            outJuliaCy = 0.0;
-            outJuliaBailout2 = 16.0;
-
-            if (config.zoom < GpuPerturbationThreshold)
+            if (outRunDeepExp)
             {
-                outMode = ShaderMode::Shallow;
-                const double effectiveZoom = config.juliaSet
-                    ? std::clamp(config.zoom, MinZoom, MaxZoom)
-                    : (config.zoom > 1e-12 ? config.zoom : 1e-12);
-                const double step = (3.0 / effectiveZoom) / static_cast<double>(width);
-                const double halfW = static_cast<double>(width) * 0.5;
-                const double halfH = static_cast<double>(height) * 0.5;
-                const double cx0 = config.juliaSet ? centerX.ToDouble() : config.centerX;
-                const double cy0 = config.juliaSet ? centerY.ToDouble() : config.centerY;
-
-                if (config.juliaSet)
+                if (!uploadedHasBlaExp)
                 {
-                    outJuliaCx = config.juliaX.ToDouble();
-                    outJuliaCy = config.juliaY.ToDouble();
-                    outJuliaBailout2 = std::max(16.0, 4.0 * std::hypot(outJuliaCx, outJuliaCy));
-                }
-
-                hostColCoords.resize(static_cast<size_t>(width) * 3);
-                for (int x = 0; x < width; ++x)
-                {
-                    hostColCoords[static_cast<size_t>(x) * 3 + 0] = static_cast<float>(cx0 + ((x + 0.25) - halfW) * step);
-                    hostColCoords[static_cast<size_t>(x) * 3 + 1] = static_cast<float>(cx0 + ((x + 0.50) - halfW) * step);
-                    hostColCoords[static_cast<size_t>(x) * 3 + 2] = static_cast<float>(cx0 + ((x + 0.75) - halfW) * step);
-                }
-                hostRowCoords.resize(static_cast<size_t>(height) * 3);
-                for (int y = 0; y < height; ++y)
-                {
-                    hostRowCoords[static_cast<size_t>(y) * 3 + 0] = static_cast<float>(cy0 + (halfH - (y + 0.25)) * step);
-                    hostRowCoords[static_cast<size_t>(y) * 3 + 1] = static_cast<float>(cy0 + (halfH - (y + 0.50)) * step);
-                    hostRowCoords[static_cast<size_t>(y) * 3 + 2] = static_cast<float>(cy0 + (halfH - (y + 0.75)) * step);
-                }
-
-                if (!EnsureTypedSrvBuffer(
-                        hostColCoords.size(), 4, DXGI_FORMAT_R32_FLOAT,
-                        colCoordsBuf, colCoordsSrv, colCoordsCapFloats) ||
-                    !EnsureTypedSrvBuffer(
-                        hostRowCoords.size(), 4, DXGI_FORMAT_R32_FLOAT,
-                        rowCoordsBuf, rowCoordsSrv, rowCoordsCapFloats) ||
-                    !UploadBufferDiscard(
-                        colCoordsBuf.Get(), hostColCoords.data(), hostColCoords.size() * sizeof(float)) ||
-                    !UploadBufferDiscard(
-                        rowCoordsBuf.Get(), hostRowCoords.data(), hostRowCoords.size() * sizeof(float)))
-                {
-                    return PrepResult::Fallback;
-                }
-                return PrepResult::Ok;
-            }
-
-            if (!referenceCache.Ensure(config, centerX, centerY, ExecutionMode::Gpu, outRefState, cancelToken))
-            {
-                return (cancelToken && cancelToken->load(std::memory_order_relaxed))
-                    ? PrepResult::Canceled
-                    : PrepResult::Fallback;
-            }
-
-            const double clampedZoom = std::clamp(config.zoom, MinZoom, MaxZoom);
-            const double step = (3.0 / clampedZoom) / static_cast<double>(width);
-            const double maxCx = std::max(std::abs(-0.25 - outRefState.refPosX), std::abs(width - 0.75 - outRefState.refPosX)) * step;
-            const double maxCy = std::max(std::abs(outRefState.refPosY + 0.25), std::abs(outRefState.refPosY - (height - 0.75))) * step;
-            const double cMax = std::hypot(maxCx, maxCy);
-
-            bool runDeepExp = false;
-            if (!SyncReferenceAndBla(config, outRefState, cMax, cancelToken, runDeepExp))
-            {
-                return (cancelToken && cancelToken->load(std::memory_order_relaxed))
-                    ? PrepResult::Canceled
-                    : PrepResult::Fallback;
-            }
-
-            if (runDeepExp)
-            {
-                outMode = ShaderMode::PerturbDeepExp;
-                int stepExp = 0;
-                const double stepMantD = std::frexp(step, &stepExp);
-
-                hostColCoordsExp.resize(static_cast<size_t>(width) * 3);
-                for (int x = 0; x < width; ++x)
-                {
-                    SplitFrexpSigned(((x - 0.25) - outRefState.refPosX) * stepMantD, stepExp,
-                        hostColCoordsExp[static_cast<size_t>(x) * 3 + 0].mant,
-                        hostColCoordsExp[static_cast<size_t>(x) * 3 + 0].exp);
-                    SplitFrexpSigned((static_cast<double>(x) - outRefState.refPosX) * stepMantD, stepExp,
-                        hostColCoordsExp[static_cast<size_t>(x) * 3 + 1].mant,
-                        hostColCoordsExp[static_cast<size_t>(x) * 3 + 1].exp);
-                    SplitFrexpSigned(((x + 0.25) - outRefState.refPosX) * stepMantD, stepExp,
-                        hostColCoordsExp[static_cast<size_t>(x) * 3 + 2].mant,
-                        hostColCoordsExp[static_cast<size_t>(x) * 3 + 2].exp);
-                }
-
-                hostRowCoordsExp.resize(static_cast<size_t>(height) * 3);
-                for (int y = 0; y < height; ++y)
-                {
-                    SplitFrexpSigned((outRefState.refPosY - (y - 0.25)) * stepMantD, stepExp,
-                        hostRowCoordsExp[static_cast<size_t>(y) * 3 + 0].mant,
-                        hostRowCoordsExp[static_cast<size_t>(y) * 3 + 0].exp);
-                    SplitFrexpSigned((outRefState.refPosY - static_cast<double>(y)) * stepMantD, stepExp,
-                        hostRowCoordsExp[static_cast<size_t>(y) * 3 + 1].mant,
-                        hostRowCoordsExp[static_cast<size_t>(y) * 3 + 1].exp);
-                    SplitFrexpSigned((outRefState.refPosY - (y + 0.25)) * stepMantD, stepExp,
-                        hostRowCoordsExp[static_cast<size_t>(y) * 3 + 2].mant,
-                        hostRowCoordsExp[static_cast<size_t>(y) * 3 + 2].exp);
-                }
-
-                if (!EnsureStructuredSrvBuffer(
-                        hostColCoordsExp.size(), sizeof(GpuCoordExp),
-                        colCoordsExpBuf, colCoordsExpSrv, colCoordsExpCapElems) ||
-                    !EnsureStructuredSrvBuffer(
-                        hostRowCoordsExp.size(), sizeof(GpuCoordExp),
-                        rowCoordsExpBuf, rowCoordsExpSrv, rowCoordsExpCapElems) ||
-                    !UploadBufferDiscard(
-                        colCoordsExpBuf.Get(), hostColCoordsExp.data(),
-                        hostColCoordsExp.size() * sizeof(GpuCoordExp)) ||
-                    !UploadBufferDiscard(
-                        rowCoordsExpBuf.Get(), hostRowCoordsExp.data(),
-                        hostRowCoordsExp.size() * sizeof(GpuCoordExp)))
-                {
-                    return PrepResult::Fallback;
+                    if (!EnsureStructuredSrvBuffer(
+                        blaBuilder.blocksExp.size(), sizeof(GpuBlaBlockExp), blaExpBuf, blaExpSrv, blaExpCapElems))
+                    {
+                        return false;
+                    }
+                    if (!UploadBufferDiscard(
+                        blaExpBuf.Get(),
+                        blaBuilder.blocksExp.data(),
+                        blaBuilder.blocksExp.size() * sizeof(GpuBlaBlockExp)))
+                    {
+                        return false;
+                    }
+                    uploadedHasBlaExp = true;
                 }
             }
             else
             {
-                const bool hasBla = (config.fractalType == FractalType::Mandelbrot && blaBuilder.numLevels >= 3);
-                outMode = hasBla ? ShaderMode::PerturbLdsBla : ShaderMode::PerturbLds;
-
-                hostColCoords.resize(static_cast<size_t>(width) * 3);
-                for (int x = 0; x < width; ++x)
+                if (!uploadedHasBlaF32)
                 {
-                    hostColCoords[static_cast<size_t>(x) * 3 + 0] = static_cast<float>(((x - 0.25) - outRefState.refPosX) * step);
-                    hostColCoords[static_cast<size_t>(x) * 3 + 1] = static_cast<float>((static_cast<double>(x) - outRefState.refPosX) * step);
-                    hostColCoords[static_cast<size_t>(x) * 3 + 2] = static_cast<float>(((x + 0.25) - outRefState.refPosX) * step);
-                }
-                hostRowCoords.resize(static_cast<size_t>(height) * 3);
-                for (int y = 0; y < height; ++y)
-                {
-                    hostRowCoords[static_cast<size_t>(y) * 3 + 0] = static_cast<float>((outRefState.refPosY - (y - 0.25)) * step);
-                    hostRowCoords[static_cast<size_t>(y) * 3 + 1] = static_cast<float>((outRefState.refPosY - static_cast<double>(y)) * step);
-                    hostRowCoords[static_cast<size_t>(y) * 3 + 2] = static_cast<float>((outRefState.refPosY - (y + 0.25)) * step);
-                }
-
-                if (!EnsureTypedSrvBuffer(
-                        hostColCoords.size(), 4, DXGI_FORMAT_R32_FLOAT,
-                        colCoordsBuf, colCoordsSrv, colCoordsCapFloats) ||
-                    !EnsureTypedSrvBuffer(
-                        hostRowCoords.size(), 4, DXGI_FORMAT_R32_FLOAT,
-                        rowCoordsBuf, rowCoordsSrv, rowCoordsCapFloats) ||
-                    !UploadBufferDiscard(
-                        colCoordsBuf.Get(), hostColCoords.data(), hostColCoords.size() * sizeof(float)) ||
-                    !UploadBufferDiscard(
-                        rowCoordsBuf.Get(), hostRowCoords.data(), hostRowCoords.size() * sizeof(float)))
-                {
-                    return PrepResult::Fallback;
+                    if (!EnsureStructuredSrvBuffer(
+                        blaBuilder.blocksF32.size(), sizeof(GpuBlaBlockF32), blaF32Buf, blaF32Srv, blaF32CapElems))
+                    {
+                        return false;
+                    }
+                    if (!UploadBufferDiscard(
+                        blaF32Buf.Get(),
+                        blaBuilder.blocksF32.data(),
+                        blaBuilder.blocksF32.size() * sizeof(GpuBlaBlockF32)))
+                    {
+                        return false;
+                    }
+                    uploadedHasBlaF32 = true;
                 }
             }
+        }
 
+        return true;
+    }
+
+    GpuFractalSolver::Impl::PrepResult GpuFractalSolver::Impl::PrepareModeAndCoords(
+        const FractalConfig& config,
+        const BigFloat& centerX,
+        const BigFloat& centerY,
+        DeepReferenceCache& referenceCache,
+        const std::atomic<bool>* cancelToken,
+        GpuShaderMode& outMode,
+        DeepReferenceState& outRefState,
+        double& outJuliaCx,
+        double& outJuliaCy,
+        double& outJuliaBailout2)
+    {
+        const int width = config.width;
+        const int height = config.height;
+        outJuliaCx = 0.0;
+        outJuliaCy = 0.0;
+        outJuliaBailout2 = 16.0;
+
+        if (config.zoom < GpuPerturbationThreshold)
+        {
+            outMode = GpuShaderMode::Shallow;
+            const double effectiveZoom = config.juliaSet
+                ? std::clamp(config.zoom, MinZoom, MaxZoom)
+                : (config.zoom > 1e-12 ? config.zoom : 1e-12);
+            const double step = (3.0 / effectiveZoom) / static_cast<double>(width);
+            const double halfW = static_cast<double>(width) * 0.5;
+            const double halfH = static_cast<double>(height) * 0.5;
+            const double cx0 = config.juliaSet ? centerX.ToDouble() : config.centerX;
+            const double cy0 = config.juliaSet ? centerY.ToDouble() : config.centerY;
+
+            if (config.juliaSet)
+            {
+                outJuliaCx = config.juliaX.ToDouble();
+                outJuliaCy = config.juliaY.ToDouble();
+                outJuliaBailout2 = std::max(16.0, 4.0 * std::hypot(outJuliaCx, outJuliaCy));
+            }
+
+            hostColCoords.resize(static_cast<size_t>(width) * 3);
+            for (int x = 0; x < width; ++x)
+            {
+                hostColCoords[static_cast<size_t>(x) * 3 + 0] = static_cast<float>(cx0 + ((x + 0.25) - halfW) * step);
+                hostColCoords[static_cast<size_t>(x) * 3 + 1] = static_cast<float>(cx0 + ((x + 0.50) - halfW) * step);
+                hostColCoords[static_cast<size_t>(x) * 3 + 2] = static_cast<float>(cx0 + ((x + 0.75) - halfW) * step);
+            }
+            hostRowCoords.resize(static_cast<size_t>(height) * 3);
+            for (int y = 0; y < height; ++y)
+            {
+                hostRowCoords[static_cast<size_t>(y) * 3 + 0] = static_cast<float>(cy0 + (halfH - (y + 0.25)) * step);
+                hostRowCoords[static_cast<size_t>(y) * 3 + 1] = static_cast<float>(cy0 + (halfH - (y + 0.50)) * step);
+                hostRowCoords[static_cast<size_t>(y) * 3 + 2] = static_cast<float>(cy0 + (halfH - (y + 0.75)) * step);
+            }
+
+            if (!EnsureTypedSrvBuffer(
+                    hostColCoords.size(), 4, DXGI_FORMAT_R32_FLOAT,
+                    colCoordsBuf, colCoordsSrv, colCoordsCapFloats) ||
+                !EnsureTypedSrvBuffer(
+                    hostRowCoords.size(), 4, DXGI_FORMAT_R32_FLOAT,
+                    rowCoordsBuf, rowCoordsSrv, rowCoordsCapFloats) ||
+                !UploadBufferDiscard(
+                    colCoordsBuf.Get(), hostColCoords.data(), hostColCoords.size() * sizeof(float)) ||
+                !UploadBufferDiscard(
+                    rowCoordsBuf.Get(), hostRowCoords.data(), hostRowCoords.size() * sizeof(float)))
+            {
+                return PrepResult::Fallback;
+            }
             return PrepResult::Ok;
         }
 
-        bool UploadFractalCb(
-            ShaderMode mode,
-            const FractalConfig& config,
-            const DeepReferenceState& refState,
-            double juliaCx,
-            double juliaCy,
-            double juliaBailout2,
-            uint32_t rowOffset,
-            uint32_t outRowOffset,
-            uint32_t subTotal)
+        if (!referenceCache.Ensure(config, centerX, centerY, ExecutionMode::Gpu, outRefState, cancelToken))
         {
-            switch (mode)
+            return (cancelToken && cancelToken->load(std::memory_order_relaxed))
+                ? PrepResult::Canceled
+                : PrepResult::Fallback;
+        }
+
+        const double clampedZoom = std::clamp(config.zoom, MinZoom, MaxZoom);
+        const double step = (3.0 / clampedZoom) / static_cast<double>(width);
+        const double maxCx = std::max(std::abs(-0.25 - outRefState.refPosX), std::abs(width - 0.75 - outRefState.refPosX)) * step;
+        const double maxCy = std::max(std::abs(outRefState.refPosY + 0.25), std::abs(outRefState.refPosY - (height - 0.75))) * step;
+        const double cMax = std::hypot(maxCx, maxCy);
+
+        bool runDeepExp = false;
+        if (!SyncReferenceAndBla(config, outRefState, cMax, cancelToken, runDeepExp))
+        {
+            return (cancelToken && cancelToken->load(std::memory_order_relaxed))
+                ? PrepResult::Canceled
+                : PrepResult::Fallback;
+        }
+
+        if (runDeepExp)
+        {
+            outMode = GpuShaderMode::PerturbDeepExp;
+            int stepExp = 0;
+            const double stepMantD = std::frexp(step, &stepExp);
+
+            hostColCoordsExp.resize(static_cast<size_t>(width) * 3);
+            for (int x = 0; x < width; ++x)
             {
-            case ShaderMode::Shallow:
-            {
-                ShallowCb cb{};
-                cb.width = static_cast<uint32_t>(config.width);
-                cb.height = static_cast<uint32_t>(config.height);
-                cb.maxIter = static_cast<uint32_t>(config.maxIterations);
-                cb.smoothFlag = config.smooth ? 1u : 0u;
-                cb.fractalType = static_cast<uint32_t>(config.fractalType);
-                cb.juliaFlag = config.juliaSet ? 1u : 0u;
-                cb.rowOffset = rowOffset;
-                cb.subpixelTotal = subTotal;
-                cb.juliaCx = static_cast<float>(juliaCx);
-                cb.juliaCy = static_cast<float>(juliaCy);
-                cb.bailout2 = static_cast<float>(juliaBailout2);
-                cb.outRowOffset = outRowOffset;
-                return UploadBufferDiscard(constantBuffer.Get(), &cb, sizeof(cb));
+                SplitFrexpSigned(((x - 0.25) - outRefState.refPosX) * stepMantD, stepExp,
+                    hostColCoordsExp[static_cast<size_t>(x) * 3 + 0].mant,
+                    hostColCoordsExp[static_cast<size_t>(x) * 3 + 0].exp);
+                SplitFrexpSigned((static_cast<double>(x) - outRefState.refPosX) * stepMantD, stepExp,
+                    hostColCoordsExp[static_cast<size_t>(x) * 3 + 1].mant,
+                    hostColCoordsExp[static_cast<size_t>(x) * 3 + 1].exp);
+                SplitFrexpSigned(((x + 0.25) - outRefState.refPosX) * stepMantD, stepExp,
+                    hostColCoordsExp[static_cast<size_t>(x) * 3 + 2].mant,
+                    hostColCoordsExp[static_cast<size_t>(x) * 3 + 2].exp);
             }
-            case ShaderMode::PerturbLds:
+
+            hostRowCoordsExp.resize(static_cast<size_t>(height) * 3);
+            for (int y = 0; y < height; ++y)
             {
-                PerturbLdsCb cb{};
-                cb.width = static_cast<uint32_t>(config.width);
-                cb.height = static_cast<uint32_t>(config.height);
-                cb.maxIter = static_cast<uint32_t>(config.maxIterations);
-                cb.refLen = static_cast<uint32_t>(refState.refLen);
-                cb.fractalType = static_cast<uint32_t>(config.fractalType);
-                cb.smoothFlag = config.smooth ? 1u : 0u;
-                cb.checkCardioid = (config.fractalType == FractalType::Mandelbrot && config.zoom < 1e6) ? 1u : 0u;
-                cb.needScaleCheck = (config.zoom >= 1e15) ? 1u : 0u;
-                cb.rowOffset = rowOffset;
-                cb.subpixelTotal = subTotal;
-                cb.refCx = static_cast<float>(refState.refCxDouble);
-                cb.refCy = static_cast<float>(refState.refCyDouble);
-                cb.outRowOffset = outRowOffset;
-                return UploadBufferDiscard(constantBuffer.Get(), &cb, sizeof(cb));
+                SplitFrexpSigned((outRefState.refPosY - (y - 0.25)) * stepMantD, stepExp,
+                    hostRowCoordsExp[static_cast<size_t>(y) * 3 + 0].mant,
+                    hostRowCoordsExp[static_cast<size_t>(y) * 3 + 0].exp);
+                SplitFrexpSigned((outRefState.refPosY - static_cast<double>(y)) * stepMantD, stepExp,
+                    hostRowCoordsExp[static_cast<size_t>(y) * 3 + 1].mant,
+                    hostRowCoordsExp[static_cast<size_t>(y) * 3 + 1].exp);
+                SplitFrexpSigned((outRefState.refPosY - (y + 0.25)) * stepMantD, stepExp,
+                    hostRowCoordsExp[static_cast<size_t>(y) * 3 + 2].mant,
+                    hostRowCoordsExp[static_cast<size_t>(y) * 3 + 2].exp);
             }
-            case ShaderMode::PerturbLdsBla:
+
+            if (!EnsureStructuredSrvBuffer(
+                    hostColCoordsExp.size(), sizeof(GpuCoordExp),
+                    colCoordsExpBuf, colCoordsExpSrv, colCoordsExpCapElems) ||
+                !EnsureStructuredSrvBuffer(
+                    hostRowCoordsExp.size(), sizeof(GpuCoordExp),
+                    rowCoordsExpBuf, rowCoordsExpSrv, rowCoordsExpCapElems) ||
+                !UploadBufferDiscard(
+                    colCoordsExpBuf.Get(), hostColCoordsExp.data(),
+                    hostColCoordsExp.size() * sizeof(GpuCoordExp)) ||
+                !UploadBufferDiscard(
+                    rowCoordsExpBuf.Get(), hostRowCoordsExp.data(),
+                    hostRowCoordsExp.size() * sizeof(GpuCoordExp)))
             {
-                PerturbLdsBlaCb cb{};
-                cb.width = static_cast<uint32_t>(config.width);
-                cb.height = static_cast<uint32_t>(config.height);
-                cb.maxIter = static_cast<uint32_t>(config.maxIterations);
-                cb.refLen = static_cast<uint32_t>(refState.refLen);
-                cb.smoothFlag = config.smooth ? 1u : 0u;
-                cb.blaNumLevels = blaBuilder.numLevels;
-                cb.rowOffset = rowOffset;
-                cb.subpixelTotal = subTotal;
-                cb.blaMaxRadius = static_cast<float>(blaBuilder.maxRadD);
-                cb.refCx = static_cast<float>(refState.refCxDouble);
-                cb.refCy = static_cast<float>(refState.refCyDouble);
-                cb.checkCardioid = (config.zoom < 1e6) ? 1u : 0u;
-                cb.outRowOffset = outRowOffset;
-                return UploadBufferDiscard(constantBuffer.Get(), &cb, sizeof(cb));
+                return PrepResult::Fallback;
             }
-            case ShaderMode::PerturbDeepExp:
-            default:
+        }
+        else
+        {
+            const bool hasBla = (config.fractalType == FractalType::Mandelbrot && blaBuilder.numLevels >= 3);
+            outMode = hasBla ? GpuShaderMode::PerturbLdsBla : GpuShaderMode::PerturbLds;
+
+            hostColCoords.resize(static_cast<size_t>(width) * 3);
+            for (int x = 0; x < width; ++x)
             {
-                const bool useBla = (config.fractalType == FractalType::Mandelbrot && blaBuilder.numLevels >= 3);
-                PerturbDeepExpCb cb{};
-                cb.width = static_cast<uint32_t>(config.width);
-                cb.height = static_cast<uint32_t>(config.height);
-                cb.maxIter = static_cast<uint32_t>(config.maxIterations);
-                cb.refLen = static_cast<uint32_t>(refState.refLen);
-                cb.smoothFlag = config.smooth ? 1u : 0u;
-                cb.useBla = useBla ? 1u : 0u;
-                cb.blaNumLevels = blaBuilder.numLevels;
-                cb.rowOffset = rowOffset;
-                cb.subpixelTotal = subTotal;
-                cb.blaMaxRadMant = blaBuilder.maxRadMant;
-                cb.blaMaxRadExp = blaBuilder.maxRadExp;
-                cb.refCx = static_cast<float>(refState.refCxDouble);
-                cb.refCy = static_cast<float>(refState.refCyDouble);
-                cb.outRowOffset = outRowOffset;
-                return UploadBufferDiscard(constantBuffer.Get(), &cb, sizeof(cb));
+                hostColCoords[static_cast<size_t>(x) * 3 + 0] = static_cast<float>(((x - 0.25) - outRefState.refPosX) * step);
+                hostColCoords[static_cast<size_t>(x) * 3 + 1] = static_cast<float>((static_cast<double>(x) - outRefState.refPosX) * step);
+                hostColCoords[static_cast<size_t>(x) * 3 + 2] = static_cast<float>(((x + 0.25) - outRefState.refPosX) * step);
             }
+            hostRowCoords.resize(static_cast<size_t>(height) * 3);
+            for (int y = 0; y < height; ++y)
+            {
+                hostRowCoords[static_cast<size_t>(y) * 3 + 0] = static_cast<float>((outRefState.refPosY - (y - 0.25)) * step);
+                hostRowCoords[static_cast<size_t>(y) * 3 + 1] = static_cast<float>((outRefState.refPosY - static_cast<double>(y)) * step);
+                hostRowCoords[static_cast<size_t>(y) * 3 + 2] = static_cast<float>((outRefState.refPosY - (y + 0.25)) * step);
+            }
+
+            if (!EnsureTypedSrvBuffer(
+                    hostColCoords.size(), 4, DXGI_FORMAT_R32_FLOAT,
+                    colCoordsBuf, colCoordsSrv, colCoordsCapFloats) ||
+                !EnsureTypedSrvBuffer(
+                    hostRowCoords.size(), 4, DXGI_FORMAT_R32_FLOAT,
+                    rowCoordsBuf, rowCoordsSrv, rowCoordsCapFloats) ||
+                !UploadBufferDiscard(
+                    colCoordsBuf.Get(), hostColCoords.data(), hostColCoords.size() * sizeof(float)) ||
+                !UploadBufferDiscard(
+                    rowCoordsBuf.Get(), hostRowCoords.data(), hostRowCoords.size() * sizeof(float)))
+            {
+                return PrepResult::Fallback;
             }
         }
 
-        void BindFractalSrvs(
-            ShaderMode mode,
-            ID3D11ShaderResourceView* activeSubIdxSrv,
-            ID3D11ShaderResourceView* activeSubCountSrv)
-        {
-            ID3D11ShaderResourceView* srvs[8]{};
-            switch (mode)
-            {
-            case ShaderMode::Shallow:
-                srvs[0] = colCoordsSrv.Get();
-                srvs[1] = rowCoordsSrv.Get();
-                srvs[4] = activeSubIdxSrv;
-                break;
-            case ShaderMode::PerturbLds:
-                srvs[0] = orbitFastSrv.Get();
-                srvs[1] = colCoordsSrv.Get();
-                srvs[2] = rowCoordsSrv.Get();
-                srvs[4] = activeSubIdxSrv;
-                break;
-            case ShaderMode::PerturbLdsBla:
-                srvs[0] = orbitFastSrv.Get();
-                srvs[1] = colCoordsSrv.Get();
-                srvs[2] = rowCoordsSrv.Get();
-                srvs[3] = blaF32Srv.Get();
-                srvs[4] = blaMetaSrv.Get();
-                srvs[5] = activeSubIdxSrv;
-                break;
-            case ShaderMode::PerturbDeepExp:
-                srvs[0] = orbitFastSrv.Get();
-                srvs[1] = orbitFullSrv.Get();
-                srvs[2] = colCoordsExpSrv.Get();
-                srvs[3] = rowCoordsExpSrv.Get();
-                srvs[4] = blaExpSrv.Get();
-                srvs[5] = blaMetaSrv.Get();
-                srvs[6] = activeSubIdxSrv;
-                break;
-            }
-            srvs[7] = activeSubCountSrv;
-            context->CSSetShaderResources(0, 8, srvs);
-        }
+        return PrepResult::Ok;
+    }
 
-        void SetPrimaryShader(ShaderMode mode)
+    bool GpuFractalSolver::Impl::UploadFractalCb(
+        GpuShaderMode mode,
+        const FractalConfig& config,
+        const DeepReferenceState& refState,
+        double juliaCx,
+        double juliaCy,
+        double juliaBailout2,
+        uint32_t rowOffset,
+        uint32_t outRowOffset,
+        uint32_t subTotal)
+    {
+        switch (mode)
         {
-            switch (mode)
-            {
-            case ShaderMode::Shallow:
-                context->CSSetShader(csShallowPrim.Get(), nullptr, 0);
-                break;
-            case ShaderMode::PerturbLds:
-                context->CSSetShader(csLdsPrim.Get(), nullptr, 0);
-                break;
-            case ShaderMode::PerturbLdsBla:
-                context->CSSetShader(csLdsBlaPrim.Get(), nullptr, 0);
-                break;
-            case ShaderMode::PerturbDeepExp:
-                context->CSSetShader(csDeepExpPrim.Get(), nullptr, 0);
-                break;
-            }
+        case GpuShaderMode::Shallow:
+        {
+            ShallowCb cb{};
+            cb.width = static_cast<uint32_t>(config.width);
+            cb.height = static_cast<uint32_t>(config.height);
+            cb.maxIter = static_cast<uint32_t>(config.maxIterations);
+            cb.smoothFlag = config.smooth ? 1u : 0u;
+            cb.fractalType = static_cast<uint32_t>(config.fractalType);
+            cb.juliaFlag = config.juliaSet ? 1u : 0u;
+            cb.rowOffset = rowOffset;
+            cb.subpixelTotal = subTotal;
+            cb.juliaCx = static_cast<float>(juliaCx);
+            cb.juliaCy = static_cast<float>(juliaCy);
+            cb.bailout2 = static_cast<float>(juliaBailout2);
+            cb.outRowOffset = outRowOffset;
+            return UploadBufferDiscard(constantBuffer.Get(), &cb, sizeof(cb));
         }
+        case GpuShaderMode::PerturbLds:
+        {
+            PerturbLdsCb cb{};
+            cb.width = static_cast<uint32_t>(config.width);
+            cb.height = static_cast<uint32_t>(config.height);
+            cb.maxIter = static_cast<uint32_t>(config.maxIterations);
+            cb.refLen = static_cast<uint32_t>(refState.refLen);
+            cb.fractalType = static_cast<uint32_t>(config.fractalType);
+            cb.smoothFlag = config.smooth ? 1u : 0u;
+            cb.checkCardioid = (config.fractalType == FractalType::Mandelbrot && config.zoom < 1e6) ? 1u : 0u;
+            cb.needScaleCheck = (config.zoom >= 1e15) ? 1u : 0u;
+            cb.rowOffset = rowOffset;
+            cb.subpixelTotal = subTotal;
+            cb.refCx = static_cast<float>(refState.refCxDouble);
+            cb.refCy = static_cast<float>(refState.refCyDouble);
+            cb.outRowOffset = outRowOffset;
+            return UploadBufferDiscard(constantBuffer.Get(), &cb, sizeof(cb));
+        }
+        case GpuShaderMode::PerturbLdsBla:
+        {
+            PerturbLdsBlaCb cb{};
+            cb.width = static_cast<uint32_t>(config.width);
+            cb.height = static_cast<uint32_t>(config.height);
+            cb.maxIter = static_cast<uint32_t>(config.maxIterations);
+            cb.refLen = static_cast<uint32_t>(refState.refLen);
+            cb.smoothFlag = config.smooth ? 1u : 0u;
+            cb.blaNumLevels = blaBuilder.numLevels;
+            cb.rowOffset = rowOffset;
+            cb.subpixelTotal = subTotal;
+            cb.blaMaxRadius = static_cast<float>(blaBuilder.maxRadD);
+            cb.refCx = static_cast<float>(refState.refCxDouble);
+            cb.refCy = static_cast<float>(refState.refCyDouble);
+            cb.checkCardioid = (config.zoom < 1e6) ? 1u : 0u;
+            cb.outRowOffset = outRowOffset;
+            return UploadBufferDiscard(constantBuffer.Get(), &cb, sizeof(cb));
+        }
+        case GpuShaderMode::PerturbDeepExp:
+        default:
+        {
+            const bool useBla = (config.fractalType == FractalType::Mandelbrot && blaBuilder.numLevels >= 3);
+            PerturbDeepExpCb cb{};
+            cb.width = static_cast<uint32_t>(config.width);
+            cb.height = static_cast<uint32_t>(config.height);
+            cb.maxIter = static_cast<uint32_t>(config.maxIterations);
+            cb.refLen = static_cast<uint32_t>(refState.refLen);
+            cb.smoothFlag = config.smooth ? 1u : 0u;
+            cb.useBla = useBla ? 1u : 0u;
+            cb.blaNumLevels = blaBuilder.numLevels;
+            cb.rowOffset = rowOffset;
+            cb.subpixelTotal = subTotal;
+            cb.blaMaxRadMant = blaBuilder.maxRadMant;
+            cb.blaMaxRadExp = blaBuilder.maxRadExp;
+            cb.refCx = static_cast<float>(refState.refCxDouble);
+            cb.refCy = static_cast<float>(refState.refCyDouble);
+            cb.outRowOffset = outRowOffset;
+            return UploadBufferDiscard(constantBuffer.Get(), &cb, sizeof(cb));
+        }
+        }
+    }
 
-        void SetSubpixelShader(ShaderMode mode)
+    void GpuFractalSolver::Impl::BindFractalSrvs(
+        GpuShaderMode mode,
+        ID3D11ShaderResourceView* activeSubIdxSrv,
+        ID3D11ShaderResourceView* activeSubCountSrv)
+    {
+        ID3D11ShaderResourceView* srvs[8]{};
+        switch (mode)
         {
-            switch (mode)
-            {
-            case ShaderMode::Shallow:
-                context->CSSetShader(csShallowSub.Get(), nullptr, 0);
-                break;
-            case ShaderMode::PerturbLds:
-                context->CSSetShader(csLdsSub.Get(), nullptr, 0);
-                break;
-            case ShaderMode::PerturbLdsBla:
-                context->CSSetShader(csLdsBlaSub.Get(), nullptr, 0);
-                break;
-            case ShaderMode::PerturbDeepExp:
-                context->CSSetShader(csDeepExpSub.Get(), nullptr, 0);
-                break;
-            }
+        case GpuShaderMode::Shallow:
+            srvs[0] = colCoordsSrv.Get();
+            srvs[1] = rowCoordsSrv.Get();
+            srvs[4] = activeSubIdxSrv;
+            break;
+        case GpuShaderMode::PerturbLds:
+            srvs[0] = orbitFastSrv.Get();
+            srvs[1] = colCoordsSrv.Get();
+            srvs[2] = rowCoordsSrv.Get();
+            srvs[4] = activeSubIdxSrv;
+            break;
+        case GpuShaderMode::PerturbLdsBla:
+            srvs[0] = orbitFastSrv.Get();
+            srvs[1] = colCoordsSrv.Get();
+            srvs[2] = rowCoordsSrv.Get();
+            srvs[3] = blaF32Srv.Get();
+            srvs[4] = blaMetaSrv.Get();
+            srvs[5] = activeSubIdxSrv;
+            break;
+        case GpuShaderMode::PerturbDeepExp:
+            srvs[0] = orbitFastSrv.Get();
+            srvs[1] = orbitFullSrv.Get();
+            srvs[2] = colCoordsExpSrv.Get();
+            srvs[3] = rowCoordsExpSrv.Get();
+            srvs[4] = blaExpSrv.Get();
+            srvs[5] = blaMetaSrv.Get();
+            srvs[6] = activeSubIdxSrv;
+            break;
         }
-    };
+        srvs[7] = activeSubCountSrv;
+        context->CSSetShaderResources(0, 8, srvs);
+    }
 
     GpuFractalSolver::GpuFractalSolver(bool allowSoftwareAdapter)
         : m_impl(std::make_unique<Impl>(allowSoftwareAdapter))
@@ -3137,7 +575,7 @@ void CSResolveAndBlend(uint3 tid : SV_DispatchThreadID)
             return true;
         }
 
-        ShaderMode mode = ShaderMode::Shallow;
+        GpuShaderMode mode = GpuShaderMode::Shallow;
         DeepReferenceState refState{};
         double juliaCx = 0.0, juliaCy = 0.0, juliaBailout2 = 16.0;
 
@@ -3164,17 +602,9 @@ void CSResolveAndBlend(uint3 tid : SV_DispatchThreadID)
             return false;
         }
 
-        auto unbindAll = [&]()
-        {
-            ID3D11UnorderedAccessView* nullUavs[3]{ nullptr, nullptr, nullptr };
-            m_impl->context->CSSetUnorderedAccessViews(0, 3, nullUavs, nullptr);
-            ID3D11ShaderResourceView* nullSrvs[8]{};
-            m_impl->context->CSSetShaderResources(0, 8, nullSrvs);
-        };
-
         ID3D11Buffer* cbs[]{ m_impl->constantBuffer.Get() };
         m_impl->context->CSSetConstantBuffers(0, 1, cbs);
-        unbindAll();
+        m_impl->UnbindComputeResources();
 
         // Pass 1: Primary center pixel evaluation (chunked by rows for TDR safety and bounded VRAM)
         m_impl->BindFractalSrvs(mode, nullptr, nullptr);
@@ -3182,7 +612,7 @@ void CSResolveAndBlend(uint3 tid : SV_DispatchThreadID)
         m_impl->context->CSSetUnorderedAccessViews(0, 3, primUavs, nullptr);
         m_impl->SetPrimaryShader(mode);
 
-        const UINT groupX = (mode == ShaderMode::PerturbLds || mode == ShaderMode::PerturbLdsBla)
+        const UINT groupX = (mode == GpuShaderMode::PerturbLds || mode == GpuShaderMode::PerturbLdsBla)
             ? static_cast<UINT>((width + 31) / 32)
             : static_cast<UINT>((width + 15) / 16);
 
@@ -3190,7 +620,7 @@ void CSResolveAndBlend(uint3 tid : SV_DispatchThreadID)
         {
             if (canceled())
             {
-                unbindAll();
+                m_impl->UnbindComputeResources();
                 return true;
             }
             const int chunkRows = std::min(maxChunkRows, height - rowStart);
@@ -3200,7 +630,7 @@ void CSResolveAndBlend(uint3 tid : SV_DispatchThreadID)
                 mode, config, refState, juliaCx, juliaCy, juliaBailout2,
                 static_cast<uint32_t>(rowStart), 0u, 0u))
             {
-                unbindAll();
+                m_impl->UnbindComputeResources();
                 return false;
             }
 
@@ -3214,7 +644,7 @@ void CSResolveAndBlend(uint3 tid : SV_DispatchThreadID)
             D3D11_MAPPED_SUBRESOURCE mapped{};
             if (FAILED(m_impl->context->Map(m_impl->outItersStaging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
             {
-                unbindAll();
+                m_impl->UnbindComputeResources();
                 return false;
             }
             std::memcpy(
@@ -3269,7 +699,7 @@ void CSResolveAndBlend(uint3 tid : SV_DispatchThreadID)
                             if (nx == x && ny == y) continue;
                             const float neighbor = nRow[nx];
                             if (neighbor < 0.0f) { boundary = true; continue; }
-                            if (!detail::SameBasin(center, neighbor, type) || (!smooth && center != neighbor))
+                            if (!SameBasin(center, neighbor, type) || (!smooth && center != neighbor))
                             {
                                 boundary = true;
                             }
@@ -3288,7 +718,7 @@ void CSResolveAndBlend(uint3 tid : SV_DispatchThreadID)
             if (canceled())
             {
                 subpixelSamples->clear();
-                unbindAll();
+                m_impl->UnbindComputeResources();
                 return true;
             }
 
@@ -3387,7 +817,7 @@ void CSResolveAndBlend(uint3 tid : SV_DispatchThreadID)
                         maxBatchPix * 4 * sizeof(float), m_impl->subOutStaging, m_impl->subOutStagingCapBytes))
                 {
                     subpixelSamples->clear();
-                    unbindAll();
+                    m_impl->UnbindComputeResources();
                     return false;
                 }
 
@@ -3397,14 +827,14 @@ void CSResolveAndBlend(uint3 tid : SV_DispatchThreadID)
                 m_impl->SetSubpixelShader(mode);
 
                 const uint32_t subGroupThreads =
-                    (mode == ShaderMode::PerturbLds || mode == ShaderMode::PerturbLdsBla) ? 512u : 256u;
+                    (mode == GpuShaderMode::PerturbLds || mode == GpuShaderMode::PerturbLdsBla) ? 512u : 256u;
 
                 for (size_t batchStart = 0; batchStart < subCount; batchStart += kMaxSubpixelBatchPixels)
                 {
                     if (canceled())
                     {
                         subpixelSamples->clear();
-                        unbindAll();
+                        m_impl->UnbindComputeResources();
                         return true;
                     }
                     const size_t batchPix = std::min(kMaxSubpixelBatchPixels, subCount - batchStart);
@@ -3419,7 +849,7 @@ void CSResolveAndBlend(uint3 tid : SV_DispatchThreadID)
                             0u, 0u, subTotal))
                     {
                         subpixelSamples->clear();
-                        unbindAll();
+                        m_impl->UnbindComputeResources();
                         return false;
                     }
 
@@ -3435,7 +865,7 @@ void CSResolveAndBlend(uint3 tid : SV_DispatchThreadID)
                     if (FAILED(m_impl->context->Map(m_impl->subOutStaging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
                     {
                         subpixelSamples->clear();
-                        unbindAll();
+                        m_impl->UnbindComputeResources();
                         return false;
                     }
                     std::memcpy(m_impl->hostSubFloats.data(), mapped.pData, subTotal * sizeof(float));
@@ -3456,340 +886,15 @@ void CSResolveAndBlend(uint3 tid : SV_DispatchThreadID)
                 if (canceled())
                 {
                     subpixelSamples->clear();
-                    unbindAll();
+                    m_impl->UnbindComputeResources();
                     return true;
                 }
             }
         }
 
-        unbindAll();
+        m_impl->UnbindComputeResources();
         outElapsedMs = std::chrono::duration<double, std::milli>(
             std::chrono::high_resolution_clock::now() - startTime).count();
-        return true;
-    }
-
-    bool GpuFractalSolver::BeginMovieFrame(int width, int height)
-    {
-        if (!m_impl || !m_impl->available || width <= 0 || height <= 0)
-        {
-            return false;
-        }
-
-        std::lock_guard lock(m_impl->mutex);
-        const size_t totalPixels = static_cast<size_t>(width) * static_cast<size_t>(height);
-        if (totalPixels <= kMaxFullFrameAccumPixels)
-        {
-            if (!m_impl->EnsureStructuredUavBuffer(
-                    totalPixels, sizeof(uint32_t),
-                    m_impl->accumPixelsBuf, m_impl->accumPixelsUav, m_impl->accumPixelsCapElems) ||
-                !m_impl->EnsureStagingReadBuffer(
-                    totalPixels * sizeof(uint32_t),
-                    m_impl->accumPixelsStaging, m_impl->accumPixelsStagingCapBytes))
-            {
-                return false;
-            }
-            m_impl->movieFullFrameAccum = true;
-        }
-        else
-        {
-            m_impl->movieFullFrameAccum = false;
-        }
-        return true;
-    }
-
-    bool GpuFractalSolver::RenderMovieBand(
-        const FractalConfig& bandConfig,
-        const BigFloat& centerX,
-        const BigFloat& centerY,
-        DeepReferenceCache& referenceCache,
-        int topHalo,
-        int visibleRows,
-        int destRowOffset,
-        int temporalStep,
-        const GpuMovieColorParams& colorParams,
-        uint32_t* ioBandPixels,
-        const std::atomic<bool>* cancelToken)
-    {
-        if (!m_impl || !m_impl->CanSupportConfig(bandConfig))
-        {
-            return false;
-        }
-        if (bandConfig.maxIterations <= 0 || visibleRows <= 0 || topHalo < 0 || destRowOffset < 0)
-        {
-            return false;
-        }
-
-        const int width = bandConfig.width;
-        const int bandHeight = bandConfig.height;
-        if (topHalo + visibleRows > bandHeight || !colorParams.lutData)
-        {
-            return false;
-        }
-
-        std::lock_guard lock(m_impl->mutex);
-        if (!m_impl->movieFullFrameAccum && !ioBandPixels)
-        {
-            return false;
-        }
-
-        auto canceled = [&] { return cancelToken && cancelToken->load(std::memory_order_relaxed); };
-        if (canceled())
-        {
-            return false;
-        }
-
-        if (!m_impl->EnsurePaletteLutUploaded(colorParams.lutData))
-        {
-            return false;
-        }
-
-        ShaderMode mode = ShaderMode::Shallow;
-        DeepReferenceState refState{};
-        double juliaCx = 0.0, juliaCy = 0.0, juliaBailout2 = 16.0;
-
-        if (m_impl->PrepareModeAndCoords(
-                bandConfig, centerX, centerY, referenceCache, cancelToken,
-                mode, refState, juliaCx, juliaCy, juliaBailout2) != Impl::PrepResult::Ok)
-        {
-            return false;
-        }
-
-        const size_t bandPixels = static_cast<size_t>(width) * static_cast<size_t>(bandHeight);
-        const size_t visiblePixels = static_cast<size_t>(width) * static_cast<size_t>(visibleRows);
-
-        if (!m_impl->EnsureStructuredUavSrvBuffer(
-                bandPixels, sizeof(float),
-                m_impl->outItersBuf, m_impl->outItersUav, m_impl->outItersSrv, m_impl->outItersCapElems) ||
-            !m_impl->EnsureTypedUavSrvBuffer(
-                visiblePixels, sizeof(uint32_t), DXGI_FORMAT_R32_UINT,
-                m_impl->gpuSubIdxBuf, m_impl->gpuSubIdxUav, m_impl->gpuSubIdxSrv, m_impl->gpuSubIdxCapElems) ||
-            !m_impl->EnsureStructuredUavSrvBuffer(
-                visiblePixels, sizeof(GpuPixelSubInfo),
-                m_impl->pixelSubInfoBuf, m_impl->pixelSubInfoUav, m_impl->pixelSubInfoSrv, m_impl->pixelSubInfoCapElems) ||
-            !m_impl->EnsureStructuredUavSrvBuffer(
-                visiblePixels * 4, sizeof(float),
-                m_impl->subOutBuf, m_impl->subOutUav, m_impl->subOutSrv, m_impl->subOutCapFloats))
-        {
-            return false;
-        }
-
-        if (!m_impl->movieFullFrameAccum)
-        {
-            if (!m_impl->EnsureStructuredUavBuffer(
-                    visiblePixels, sizeof(uint32_t),
-                    m_impl->accumPixelsBuf, m_impl->accumPixelsUav, m_impl->accumPixelsCapElems) ||
-                !m_impl->EnsureStagingReadBuffer(
-                    visiblePixels * sizeof(uint32_t),
-                    m_impl->accumPixelsStaging, m_impl->accumPixelsStagingCapBytes))
-            {
-                return false;
-            }
-            if (temporalStep > 0)
-            {
-                if (!m_impl->EnsureStructuredSrvBuffer(
-                        visiblePixels, sizeof(uint32_t),
-                        m_impl->prevBandBuf, m_impl->prevBandSrv, m_impl->prevBandCapElems) ||
-                    !m_impl->UploadBufferDiscard(
-                        m_impl->prevBandBuf.Get(), ioBandPixels, visiblePixels * sizeof(uint32_t)))
-                {
-                    return false;
-                }
-            }
-        }
-
-        auto unbindAll = [&]()
-        {
-            ID3D11UnorderedAccessView* nullUavs[3]{ nullptr, nullptr, nullptr };
-            m_impl->context->CSSetUnorderedAccessViews(0, 3, nullUavs, nullptr);
-            ID3D11ShaderResourceView* nullSrvs[8]{};
-            m_impl->context->CSSetShaderResources(0, 8, nullSrvs);
-        };
-
-        ID3D11Buffer* cbs[]{ m_impl->constantBuffer.Get() };
-        m_impl->context->CSSetConstantBuffers(0, 1, cbs);
-        unbindAll();
-
-        // Step A: Evaluate primary center pixels across the band (including halo rows) into OutIters in VRAM
-        m_impl->BindFractalSrvs(mode, nullptr, nullptr);
-        ID3D11UnorderedAccessView* primUavs[3]{ m_impl->outItersUav.Get(), nullptr, nullptr };
-        m_impl->context->CSSetUnorderedAccessViews(0, 3, primUavs, nullptr);
-        m_impl->SetPrimaryShader(mode);
-
-        const size_t maxRowsByTdr = std::max<size_t>(
-            1,
-            static_cast<size_t>(kMaxPrimaryIterBudget /
-                (static_cast<uint64_t>(width) * static_cast<uint64_t>(std::max(1, bandConfig.maxIterations)))));
-        const int maxChunkRows = static_cast<int>(std::min<size_t>(static_cast<size_t>(bandHeight), maxRowsByTdr));
-        const UINT primGroupX = (mode == ShaderMode::PerturbLds || mode == ShaderMode::PerturbLdsBla)
-            ? static_cast<UINT>((width + 31) / 32)
-            : static_cast<UINT>((width + 15) / 16);
-
-        for (int rowStart = 0; rowStart < bandHeight; rowStart += maxChunkRows)
-        {
-            if (canceled())
-            {
-                unbindAll();
-                return false;
-            }
-            const int chunkRows = std::min(maxChunkRows, bandHeight - rowStart);
-            if (!m_impl->UploadFractalCb(
-                mode, bandConfig, refState, juliaCx, juliaCy, juliaBailout2,
-                static_cast<uint32_t>(rowStart), static_cast<uint32_t>(rowStart), 0u))
-            {
-                unbindAll();
-                return false;
-            }
-            m_impl->context->Dispatch(primGroupX, static_cast<UINT>((chunkRows + 15) / 16), 1);
-        }
-
-        // Step B: GPU 3x3 boundary detection + 16x16 LDS spatial compaction
-        const UINT zeros[4]{ 0, 0, 0, 0 };
-        m_impl->context->ClearUnorderedAccessViewUint(m_impl->subCounterUav.Get(), zeros);
-
-        ID3D11UnorderedAccessView* detectUavs[3]{
-            m_impl->gpuSubIdxUav.Get(),
-            m_impl->pixelSubInfoUav.Get(),
-            m_impl->subCounterUav.Get()
-        };
-        m_impl->context->CSSetUnorderedAccessViews(0, 3, detectUavs, nullptr);
-
-        ID3D11ShaderResourceView* detectSrvs[8]{ m_impl->outItersSrv.Get() };
-        m_impl->context->CSSetShaderResources(0, 8, detectSrvs);
-
-        PostProcessCb postCb{};
-        postCb.width = static_cast<uint32_t>(width);
-        postCb.bandHeight = static_cast<uint32_t>(bandHeight);
-        postCb.visibleRows = static_cast<uint32_t>(visibleRows);
-        postCb.topHalo = static_cast<uint32_t>(topHalo);
-        postCb.destRowOffset = m_impl->movieFullFrameAccum ? static_cast<uint32_t>(destRowOffset) : 0u;
-        postCb.fractalType = static_cast<uint32_t>(bandConfig.fractalType);
-        postCb.smoothFlag = bandConfig.smooth ? 1u : 0u;
-        postCb.invertFlag = colorParams.invert ? 1u : 0u;
-        postCb.frequency = colorParams.frequency;
-        postCb.phaseOffset = colorParams.phaseOffset;
-        postCb.interiorColor = colorParams.interiorColor;
-        postCb.avgRgb = colorParams.avgRgb;
-        postCb.temporalMode = (temporalStep == 0) ? 0u : (m_impl->movieFullFrameAccum ? 1u : 2u);
-        postCb.subGroupThreads =
-            (mode == ShaderMode::PerturbLds || mode == ShaderMode::PerturbLdsBla) ? 512u : 256u;
-
-        if (!m_impl->UploadBufferDiscard(m_impl->constantBuffer.Get(), &postCb, sizeof(postCb)))
-        {
-            unbindAll();
-            return false;
-        }
-
-        const UINT visGroupX = static_cast<UINT>((width + 15) / 16);
-        const UINT visGroupY = static_cast<UINT>((visibleRows + 15) / 16);
-        m_impl->context->CSSetShader(m_impl->csPostDetect.Get(), nullptr, 0);
-        m_impl->context->Dispatch(visGroupX, visGroupY, 1);
-
-        // Step C: Build DispatchIndirect thread-group count from compacted boundary counter
-        ID3D11ShaderResourceView* nullSrvs8[8]{};
-        m_impl->context->CSSetShaderResources(0, 8, nullSrvs8);
-
-        ID3D11UnorderedAccessView* buildIndUavs[3]{ m_impl->indirectArgsUav.Get(), nullptr, nullptr };
-        m_impl->context->CSSetUnorderedAccessViews(0, 3, buildIndUavs, nullptr);
-
-        ID3D11ShaderResourceView* buildIndSrvs[8]{};
-        buildIndSrvs[5] = m_impl->subCounterSrv.Get();
-        m_impl->context->CSSetShaderResources(0, 8, buildIndSrvs);
-        m_impl->context->CSSetShader(m_impl->csPostBuildIndirect.Get(), nullptr, 0);
-        m_impl->context->Dispatch(1, 1, 1);
-
-        // Step D: GPU-driven 4x subpixel evaluation via DispatchIndirect (zero CPU round-trip)
-        ID3D11UnorderedAccessView* subUavs[3]{ nullptr, m_impl->subOutUav.Get(), nullptr };
-        m_impl->context->CSSetUnorderedAccessViews(0, 3, subUavs, nullptr);
-        m_impl->BindFractalSrvs(mode, m_impl->gpuSubIdxSrv.Get(), m_impl->subCounterSrv.Get());
-
-        if (!m_impl->UploadFractalCb(
-            mode, bandConfig, refState, juliaCx, juliaCy, juliaBailout2,
-            0u, 0u, kIndirectSubpixelSentinel))
-        {
-            unbindAll();
-            return false;
-        }
-        m_impl->SetSubpixelShader(mode);
-        m_impl->context->DispatchIndirect(m_impl->indirectArgsBuf.Get(), 0);
-
-        // Step E: Fused 4x supersampled palette coloring + linear-light temporal shutter blend
-        m_impl->context->CSSetShaderResources(0, 8, nullSrvs8);
-        ID3D11UnorderedAccessView* resolveUavs[3]{ m_impl->accumPixelsUav.Get(), nullptr, nullptr };
-        m_impl->context->CSSetUnorderedAccessViews(0, 3, resolveUavs, nullptr);
-
-        ID3D11ShaderResourceView* resolveSrvs[8]{
-            m_impl->outItersSrv.Get(),
-            m_impl->pixelSubInfoSrv.Get(),
-            m_impl->subOutSrv.Get(),
-            m_impl->paletteLutSrv.Get(),
-            (!m_impl->movieFullFrameAccum && temporalStep > 0) ? m_impl->prevBandSrv.Get() : nullptr,
-            nullptr,
-            nullptr,
-            nullptr
-        };
-        m_impl->context->CSSetShaderResources(0, 8, resolveSrvs);
-
-        if (!m_impl->UploadBufferDiscard(m_impl->constantBuffer.Get(), &postCb, sizeof(postCb)))
-        {
-            unbindAll();
-            return false;
-        }
-        m_impl->context->CSSetShader(m_impl->csPostResolve.Get(), nullptr, 0);
-        m_impl->context->Dispatch(visGroupX, visGroupY, 1);
-
-        unbindAll();
-
-        // For 8K+ frames exceeding single-buffer full-frame accumulation, read back only this strip;
-        // otherwise flush queued GPU dispatches immediately so CPU reference/BLA prep for the next
-        // temporal sample overlaps with GPU execution.
-        if (!m_impl->movieFullFrameAccum)
-        {
-            const size_t stripBytes = visiblePixels * sizeof(uint32_t);
-            D3D11_BOX box{ 0, 0, 0, static_cast<UINT>(stripBytes), 1, 1 };
-            m_impl->context->CopySubresourceRegion(
-                m_impl->accumPixelsStaging.Get(), 0, 0, 0, 0, m_impl->accumPixelsBuf.Get(), 0, &box);
-
-            D3D11_MAPPED_SUBRESOURCE mapped{};
-            if (FAILED(m_impl->context->Map(m_impl->accumPixelsStaging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
-            {
-                return false;
-            }
-            std::memcpy(ioBandPixels, mapped.pData, stripBytes);
-            m_impl->context->Unmap(m_impl->accumPixelsStaging.Get(), 0);
-        }
-        else
-        {
-            m_impl->context->Flush();
-        }
-
-        return true;
-    }
-
-    bool GpuFractalSolver::EndMovieFrame(int width, int height, uint32_t* outFramePixels)
-    {
-        if (!m_impl || !m_impl->available || !outFramePixels || width <= 0 || height <= 0)
-        {
-            return false;
-        }
-
-        std::lock_guard lock(m_impl->mutex);
-        if (!m_impl->movieFullFrameAccum)
-        {
-            return true;
-        }
-
-        const size_t totalBytes = static_cast<size_t>(width) * static_cast<size_t>(height) * sizeof(uint32_t);
-        D3D11_BOX box{ 0, 0, 0, static_cast<UINT>(totalBytes), 1, 1 };
-        m_impl->context->CopySubresourceRegion(
-            m_impl->accumPixelsStaging.Get(), 0, 0, 0, 0, m_impl->accumPixelsBuf.Get(), 0, &box);
-
-        D3D11_MAPPED_SUBRESOURCE mapped{};
-        if (FAILED(m_impl->context->Map(m_impl->accumPixelsStaging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
-        {
-            return false;
-        }
-        std::memcpy(outFramePixels, mapped.pData, totalBytes);
-        m_impl->context->Unmap(m_impl->accumPixelsStaging.Get(), 0);
         return true;
     }
 }

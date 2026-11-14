@@ -174,7 +174,11 @@
     <ClInclude Include="JuliaSolver.h" />
     <ClInclude Include="DeepReferenceCache.h" />
     <ClInclude Include="DeepZoomSolver.h" />
+    <ClInclude Include="GpuSolverTypes.h" />
+    <ClInclude Include="GpuMandelbrotBla.h" />
+    <ClInclude Include="GpuFractalShaders.h" />
     <ClInclude Include="GpuFractalSolver.h" />
+    <ClInclude Include="GpuFractalSolverImpl.h" />
     <ClInclude Include="MandelbrotSimd.h" />
     <ClInclude Include="MandelbrotEngine.h" />
     <ClInclude Include="MandelbrotBla.h" />
@@ -186,6 +190,8 @@
     <ClInclude Include="JuliaView.h" />
     <ClInclude Include="JuliaTour.h" />
     <ClInclude Include="MoviePlan.h" />
+    <ClInclude Include="VideoBitstream.h" />
+    <ClInclude Include="Mp4Muxer.h" />
     <ClInclude Include="MovieWriter.h" />
     <ClInclude Include="MovieExport.h" />
   </ItemGroup>
@@ -206,11 +212,18 @@
     <ClCompile Include="JuliaSolver.cpp" />
     <ClCompile Include="DeepReferenceCache.cpp" />
     <ClCompile Include="DeepZoomSolver.cpp" />
+    <ClCompile Include="GpuMandelbrotBla.cpp" />
+    <ClCompile Include="GpuShallowAndLdsShaders.cpp" />
+    <ClCompile Include="GpuDeepAndMovieShaders.cpp" />
+    <ClCompile Include="GpuComputeContext.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="GpuFractalSolver.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="GpuMoviePipeline.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="MandelbrotEngine.cpp" />
     <ClCompile Include="BackgroundRenderer.cpp" />
     <ClCompile Include="MainWindow.Julia.cpp" />
     <ClCompile Include="MainWindow.Movie.cpp" />
+    <ClCompile Include="VideoBitstream.cpp" />
+    <ClCompile Include="Mp4Muxer.cpp" />
     <ClCompile Include="MovieWriter.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="MovieExport.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="$(IntermediateOutputPath)XamlTypeInfo.g.cpp">

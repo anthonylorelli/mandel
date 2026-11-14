@@ -111,7 +111,11 @@
     <ClInclude Include="..\MandelbrotViewer\JuliaSolver.h" />
     <ClInclude Include="..\MandelbrotViewer\DeepReferenceCache.h" />
     <ClInclude Include="..\MandelbrotViewer\DeepZoomSolver.h" />
+    <ClInclude Include="..\MandelbrotViewer\GpuSolverTypes.h" />
+    <ClInclude Include="..\MandelbrotViewer\GpuMandelbrotBla.h" />
+    <ClInclude Include="..\MandelbrotViewer\GpuFractalShaders.h" />
     <ClInclude Include="..\MandelbrotViewer\GpuFractalSolver.h" />
+    <ClInclude Include="..\MandelbrotViewer\GpuFractalSolverImpl.h" />
     <ClInclude Include="..\MandelbrotViewer\MandelbrotSimd.h" />
     <ClInclude Include="..\MandelbrotViewer\MandelbrotEngine.h" />
     <ClInclude Include="..\MandelbrotViewer\MandelbrotBla.h" />
@@ -124,6 +128,8 @@
     <ClInclude Include="..\MandelbrotViewer\JuliaView.h" />
     <ClInclude Include="..\MandelbrotViewer\JuliaTour.h" />
     <ClInclude Include="..\MandelbrotViewer\MoviePlan.h" />
+    <ClInclude Include="..\MandelbrotViewer\VideoBitstream.h" />
+    <ClInclude Include="..\MandelbrotViewer\Mp4Muxer.h" />
     <ClInclude Include="..\MandelbrotViewer\MovieWriter.h" />
     <ClInclude Include="MoviePlayback.h" />
     <ClInclude Include="..\MandelbrotViewer\MovieExport.h" />
@@ -133,6 +139,8 @@
       <PrecompiledHeader>Create</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="TestMain.cpp" />
+    <ClCompile Include="HighPrecisionTests.cpp" />
+    <ClCompile Include="ViewportAndExploreTests.cpp" />
     <ClCompile Include="MandelbrotEngineTests.cpp" />
     <ClCompile Include="ColorThemeTests.cpp" />
     <ClCompile Include="ViewStateTests.cpp" />
@@ -146,6 +154,8 @@
     <ClCompile Include="JuliaTests.cpp" />
     <ClCompile Include="JuliaTourTests.cpp" />
     <ClCompile Include="MovieTests.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="..\MandelbrotViewer\VideoBitstream.cpp" />
+    <ClCompile Include="..\MandelbrotViewer\Mp4Muxer.cpp" />
     <ClCompile Include="..\MandelbrotViewer\MovieWriter.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\MandelbrotViewer\MovieExport.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\MandelbrotViewer\BackgroundRenderer.cpp" />
@@ -155,7 +165,12 @@
     <ClCompile Include="..\MandelbrotViewer\JuliaSolver.cpp" />
     <ClCompile Include="..\MandelbrotViewer\DeepReferenceCache.cpp" />
     <ClCompile Include="..\MandelbrotViewer\DeepZoomSolver.cpp" />
+    <ClCompile Include="..\MandelbrotViewer\GpuMandelbrotBla.cpp" />
+    <ClCompile Include="..\MandelbrotViewer\GpuShallowAndLdsShaders.cpp" />
+    <ClCompile Include="..\MandelbrotViewer\GpuDeepAndMovieShaders.cpp" />
+    <ClCompile Include="..\MandelbrotViewer\GpuComputeContext.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\MandelbrotViewer\GpuFractalSolver.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="..\MandelbrotViewer\GpuMoviePipeline.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\MandelbrotViewer\MandelbrotEngine.cpp" />
     <ClCompile Include="..\MandelbrotViewer\ColorTheme.cpp" />
   </ItemGroup>
