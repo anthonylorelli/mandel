@@ -21,6 +21,14 @@ namespace Mandelbrot
         uint32_t interiorColor{ 0xFF000000 };
     };
 
+    struct GpuMovieShutterParams
+    {
+        uint32_t tapCount{ 0 };
+        float shiftX[7]{};
+        float shiftY[7]{};
+        float scale[7]{};
+    };
+
     // DirectCompute (D3D11 cs_5_0) fractal solver supporting shallow FP32 evaluation,
     // high-occupancy LDS perturbation, single-precision and FloatExp Bivariate Linear
     // Approximation (BLA) skipping, batched 4x subpixel boundary refinement, and fused
@@ -61,7 +69,7 @@ namespace Mandelbrot
         // Fused GPU-resident movie frame pipeline: keeps iteration, boundary detection,
         // DispatchIndirect 4x subpixel evaluation, palette coloring, and 2x linear-light
         // temporal shutter blending entirely on the GPU with a single final BGRA readback.
-        bool BeginMovieFrame(int width, int height);
+        bool BeginMovieFrame(int width, int height, bool enableShutterBlur = false);
 
         bool RenderMovieBand(
             const FractalConfig& bandConfig,
@@ -76,7 +84,11 @@ namespace Mandelbrot
             uint32_t* ioBandPixels,
             const std::atomic<bool>* cancelToken);
 
-        bool EndMovieFrame(int width, int height, uint32_t* outFramePixels);
+        bool EndMovieFrame(
+            int width,
+            int height,
+            uint32_t* outFramePixels,
+            const GpuMovieShutterParams* shutterParams = nullptr);
 
     private:
         struct Impl;

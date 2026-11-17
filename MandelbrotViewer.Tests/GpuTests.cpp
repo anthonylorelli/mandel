@@ -281,6 +281,34 @@ TEST_CASE(Gpu, MovieRenderMatchesCpuAndRemainsBandIndependent)
         const double err = FilteredPixelError(cpuWhole, gpuWhole, gpuPlan.width, gpuPlan.height);
         ASSERT_LT(err, 4.5);
     }
+
+    // Combined pan + zoom camera trajectory exercises shiftX, shiftY, and scale shutter taps
+    {
+        MoviePlan panZoomPlan = gpuPlan;
+        panZoomPlan.start.SetCenter(-0.75, 0.08);
+        panZoomPlan.targetX = BigFloat("-0.743643887037158704752191506114774");
+        panZoomPlan.targetY = BigFloat("0.131825904205311970493132056385139");
+        panZoomPlan.start.zoom = 10.0;
+        panZoomPlan.endZoom = 1e6;
+        panZoomPlan.start.maxIterations = 500;
+
+        MoviePlan panZoomCpu = panZoomPlan;
+        panZoomCpu.useGpu = false;
+
+        const auto gpuWhole = RenderMovieFrame(panZoomPlan, 6.0, cancel, {}, panZoomPlan.height, &sharedGpu);
+        const auto gpuBanded = RenderMovieFrame(panZoomPlan, 6.0, cancel, {}, 8, &sharedGpu);
+        const auto cpuWhole = RenderMovieFrame(panZoomCpu, 6.0, cancel, {}, panZoomCpu.height, &sharedCpu);
+
+        ASSERT_EQ(gpuWhole.size(), gpuBanded.size());
+        for (size_t i = 0; i < gpuWhole.size(); ++i)
+        {
+            for (int shift : { 0, 8, 16 })
+            {
+                ASSERT_NEAR((gpuWhole[i] >> shift) & 255, (gpuBanded[i] >> shift) & 255, 1);
+            }
+        }
+        ASSERT_LT(FilteredPixelError(cpuWhole, gpuWhole, panZoomPlan.width, panZoomPlan.height), 4.5);
+    }
 }
 
 TEST_CASE(Gpu, FusedMoviePostProcessCoversThemesNewtonDeepExpAndNoSmoothing)

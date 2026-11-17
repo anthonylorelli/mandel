@@ -22,6 +22,15 @@ namespace winrt::MandelbrotViewer::implementation
             return hstring(text.str());
         }
 
+        hstring ElapsedTime(double seconds)
+        {
+            const auto tenths = static_cast<uint64_t>(std::max(0.0, std::floor(seconds * 10.0 + 0.5)));
+            std::wostringstream text;
+            text << std::setfill(L'0') << std::setw(2) << tenths / 36000 << L":"
+                << std::setw(2) << tenths / 600 % 60 << L":" << std::setw(2) << tenths / 10 % 60 << L"." << tenths % 10;
+            return hstring(text.str());
+        }
+
         std::wstring FormatMovieZoom(double zoom)
         {
             std::wostringstream ss;
@@ -177,6 +186,7 @@ namespace winrt::MandelbrotViewer::implementation
                     MoviePreviewImage().Source(nullptr);
                     MoviePreviewText().Text(L"The first rendered frame will appear here. Preview refreshes about every 15 seconds.");
                     MovieCancelButton().Content(box_value(L"Cancel Export")); MovieCancelButton().IsEnabled(true);
+                    MovieElapsedText().Text(L"Elapsed time: 00:00:00.0");
                     MovieStatusText().Text(L"Rendering..."); MovieProgressBar().Value(0);
                     MovieProgressOverlay().Visibility(Visibility::Visible);
                     MovieCancelButton().Focus(FocusState::Programmatic);
@@ -208,6 +218,7 @@ namespace winrt::MandelbrotViewer::implementation
             static_cast<double>(progress.completed) + progress.frameFraction) / progress.total);
         MovieRenderedText().Text(L"Rendered " + FootageTime(progress.completed, m_movieFps) + L" of " +
             FootageTime(progress.total, m_movieFps) + L"  |  " + to_hstring(progress.completed) + L" / " + to_hstring(progress.total) + L" frames");
+        MovieElapsedText().Text(L"Elapsed time: " + ElapsedTime(progress.elapsedSeconds));
         if (auto preview = m_movieExporter->TakePreview())
         {
             Media::Imaging::WriteableBitmap bitmap(preview->width, preview->height);

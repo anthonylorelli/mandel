@@ -520,6 +520,7 @@
                                TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
                     <ProgressBar x:Name="MovieProgressBar" Minimum="0" Maximum="100" Value="0" AutomationProperties.Name="Movie export progress"/>
                     <TextBlock x:Name="MovieRenderedText" FontFamily="Consolas" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite"/>
+                    <TextBlock x:Name="MovieElapsedText" FontFamily="Consolas" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
                     <TextBlock x:Name="MovieStatusText" Text="Rendering…" TextWrapping="Wrap"/>
                     <Button x:Name="MovieCancelButton" Content="Cancel Export" Click="OnMovieCancelClick" HorizontalAlignment="Right"/>
                 </StackPanel>

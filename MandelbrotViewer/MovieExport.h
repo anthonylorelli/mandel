@@ -23,6 +23,7 @@ namespace Mandelbrot
         float frameFraction{};
         bool finished{}, canceled{}, planning{};
         std::wstring error;
+        double elapsedSeconds{};
     };
 
     class MovieExporter
@@ -41,6 +42,8 @@ namespace Mandelbrot
         std::atomic<float> m_fraction{};
         std::atomic<bool> m_planning{};
         uint32_t m_total;
+        std::chrono::steady_clock::time_point m_startTime{};
+        std::chrono::steady_clock::time_point m_endTime{};
         mutable std::mutex m_mutex;
         std::optional<MoviePreview> m_preview;
         bool m_finished{}, m_canceled{};
