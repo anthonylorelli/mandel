@@ -27,7 +27,7 @@ namespace Mandelbrot
             ComPtr<ID3DBlob> ldsPrim, ldsSub;
             ComPtr<ID3DBlob> ldsBlaPrim, ldsBlaSub;
             ComPtr<ID3DBlob> deepExpPrim, deepExpSub;
-            ComPtr<ID3DBlob> postDetect, postBuildIndirect, postResolve;
+            ComPtr<ID3DBlob> postDetect, postBuildIndirect, postResolve, postShutter;
             bool ok{ false };
         };
 
@@ -61,6 +61,7 @@ namespace Mandelbrot
                 const char* deepExpSrc = GetPerturbDeepExpShaderSource();
                 const char* detectSrc = GetMovieDetectShaderSource();
                 const char* resolveSrc = GetMovieResolveShaderSource();
+                const char* shutterSrc = GetMovieShutterShaderSource();
 
                 cache.ok =
                     compileOne(shallowSrc, "CSPrimary", cache.shallowPrim) &&
@@ -73,7 +74,8 @@ namespace Mandelbrot
                     compileOne(deepExpSrc, "CSSubpixels", cache.deepExpSub) &&
                     compileOne(detectSrc, "CSDetectBoundaries", cache.postDetect) &&
                     compileOne(detectSrc, "CSBuildIndirectArgs", cache.postBuildIndirect) &&
-                    compileOne(resolveSrc, "CSResolveAndBlend", cache.postResolve);
+                    compileOne(resolveSrc, "CSResolveAndBlend", cache.postResolve) &&
+                    compileOne(shutterSrc, "CSShutterMotionBlur", cache.postShutter);
             });
             return cache;
         }
@@ -160,13 +162,14 @@ namespace Mandelbrot
             !makeShader(shaders.deepExpSub, csDeepExpSub) ||
             !makeShader(shaders.postDetect, csPostDetect) ||
             !makeShader(shaders.postBuildIndirect, csPostBuildIndirect) ||
-            !makeShader(shaders.postResolve, csPostResolve))
+            !makeShader(shaders.postResolve, csPostResolve) ||
+            !makeShader(shaders.postShutter, csPostShutter))
         {
             return;
         }
 
         D3D11_BUFFER_DESC cbDesc{};
-        cbDesc.ByteWidth = 64;
+        cbDesc.ByteWidth = 128;
         cbDesc.Usage = D3D11_USAGE_DYNAMIC;
         cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;

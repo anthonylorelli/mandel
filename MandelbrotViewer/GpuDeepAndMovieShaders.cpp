@@ -681,11 +681,135 @@ void CSResolveAndBlend(uint3 tid : SV_DispatchThreadID)
             }
             OutAccumPixels[dstIdx] = blended;
         }
-        else if (temporalMode == 2u)
-        {
-            OutAccumPixels[dstIdx] = c0;
-        }
+    else if (temporalMode == 2u)
+    {
+        OutAccumPixels[dstIdx] = c0;
     }
+    }
+}
+)";
+
+        // Shader 7: Analytical 180-degree camera-trajectory shutter motion blur in linear light.
+        constexpr const char* kPostShutterShaderSrc = R"(
+cbuffer ShutterParams : register(b0)
+{
+    uint width;
+    uint height;
+    uint tapCount;
+    uint pad0;
+    float4 taps[7];
+};
+
+StructuredBuffer<uint> InRawPixels : register(t0);
+RWStructuredBuffer<uint> OutShutterPixels : register(u0);
+
+float SrgbByteToLinear(uint byteVal)
+{
+    float v = float(byteVal) * (1.0f / 255.0f);
+    return (v <= 0.04045f) ? (v * (1.0f / 12.92f)) : pow((v + 0.055f) * (1.0f / 1.055f), 2.4f);
+}
+
+uint LinearToSrgbByte(float lin)
+{
+    float v = floor(clamp(lin * 4096.0f + 0.5f, 0.0f, 4096.0f)) * (1.0f / 4096.0f);
+    float s = (v <= 0.0031308f) ? (12.92f * v) : (1.055f * pow(max(v, 0.0f), 1.0f / 2.4f) - 0.055f);
+    return uint(clamp(s * 255.0f + 0.5f, 0.0f, 255.0f));
+}
+
+float3 DecodeBgraLinear(uint c)
+{
+    return float3(
+        SrgbByteToLinear(c & 255u),
+        SrgbByteToLinear((c >> 8) & 255u),
+        SrgbByteToLinear((c >> 16) & 255u));
+}
+
+[numthreads(16, 16, 1)]
+void CSShutterMotionBlur(uint3 tid : SV_DispatchThreadID)
+{
+    if (tid.x >= width || tid.y >= height) return;
+
+    uint idx = tid.y * width + tid.x;
+    uint centerColor = InRawPixels[idx];
+    if (tapCount <= 1u)
+    {
+        OutShutterPixels[idx] = centerColor;
+        return;
+    }
+
+    float halfW = float(width) * 0.5f;
+    float halfH = float(height) * 0.5f;
+    float relX = float(tid.x) + 0.5f - halfW;
+    float relY = float(tid.y) + 0.5f - halfH;
+
+    float4 firstTap = taps[0];
+    float4 lastTap = taps[tapCount - 1u];
+    float spanX = abs((lastTap.x - firstTap.x) + relX * (lastTap.z - firstTap.z));
+    float spanY = abs((lastTap.y - firstTap.y) + relY * (lastTap.z - firstTap.z));
+    if (max(spanX, spanY) < 0.125f)
+    {
+        OutShutterPixels[idx] = centerColor;
+        return;
+    }
+
+    float maxPx = float(width - 1u);
+    float maxPy = float(height - 1u);
+    float3 sumLin = float3(0.0f, 0.0f, 0.0f);
+    uint validCount = 0u;
+    bool allEqualCenter = true;
+
+    [loop]
+    for (uint k = 0u; k < tapCount; ++k)
+    {
+        float4 tap = taps[k];
+        float px = halfW + tap.x + relX * tap.z - 0.5f;
+        float py = halfH + tap.y + relY * tap.z - 0.5f;
+        if (px < 0.0f || px > maxPx || py < 0.0f || py > maxPy)
+            continue;
+
+        uint x0 = uint(px);
+        uint y0 = uint(py);
+        uint x1 = min(x0 + 1u, width - 1u);
+        uint y1 = min(y0 + 1u, height - 1u);
+        float fx = px - float(x0);
+        float fy = py - float(y0);
+
+        uint c00 = InRawPixels[y0 * width + x0];
+        uint c10 = InRawPixels[y0 * width + x1];
+        uint c01 = InRawPixels[y1 * width + x0];
+        uint c11 = InRawPixels[y1 * width + x1];
+
+        if (c00 == c10 && c00 == c01 && c00 == c11)
+        {
+            if (c00 != centerColor) allEqualCenter = false;
+            sumLin += DecodeBgraLinear(c00);
+        }
+        else
+        {
+            allEqualCenter = false;
+            float w00 = (1.0f - fx) * (1.0f - fy);
+            float w10 = fx * (1.0f - fy);
+            float w01 = (1.0f - fx) * fy;
+            float w11 = fx * fy;
+            sumLin += DecodeBgraLinear(c00) * w00
+                    + DecodeBgraLinear(c10) * w10
+                    + DecodeBgraLinear(c01) * w01
+                    + DecodeBgraLinear(c11) * w11;
+        }
+        ++validCount;
+    }
+
+    if (validCount == 0u || allEqualCenter)
+    {
+        OutShutterPixels[idx] = centerColor;
+        return;
+    }
+
+    float3 avgLin = sumLin * (1.0f / float(validCount));
+    OutShutterPixels[idx] = 0xFF000000u
+        | (LinearToSrgbByte(avgLin.z) << 16)
+        | (LinearToSrgbByte(avgLin.y) << 8)
+        | LinearToSrgbByte(avgLin.x);
 }
 )";
     }
@@ -703,5 +827,10 @@ void CSResolveAndBlend(uint3 tid : SV_DispatchThreadID)
     const char* GetMovieResolveShaderSource() noexcept
     {
         return kPostResolveShaderSrc;
+    }
+
+    const char* GetMovieShutterShaderSource() noexcept
+    {
+        return kPostShutterShaderSrc;
     }
 }

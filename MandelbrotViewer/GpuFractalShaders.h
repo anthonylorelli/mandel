@@ -8,4 +8,5 @@ namespace Mandelbrot::detail
     const char* GetPerturbDeepExpShaderSource() noexcept;
     const char* GetMovieDetectShaderSource() noexcept;
     const char* GetMovieResolveShaderSource() noexcept;
+    const char* GetMovieShutterShaderSource() noexcept;
 }

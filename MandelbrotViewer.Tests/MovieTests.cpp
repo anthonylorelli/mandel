@@ -461,6 +461,9 @@ TEST_CASE(Movie, BackgroundExportReportsFootageAndPublishesTheLastPreview)
     File file; const auto p = SmallMovie(); MovieExporter exporter(p, file.path.wstring()); WaitFor(exporter);
     const auto status = exporter.Progress(); ASSERT_TRUE(status.error.empty()); ASSERT_FALSE(status.canceled);
     ASSERT_EQ(p.FrameCount(), status.completed);
+    ASSERT_GT(status.elapsedSeconds, 0.0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    ASSERT_EQ(status.elapsedSeconds, exporter.Progress().elapsedSeconds);
     const auto preview = exporter.TakePreview(); ASSERT_TRUE(preview.has_value()); ASSERT_EQ(p.FrameCount(), preview->frame);
     ASSERT_FALSE(Read(file.path).empty());
 }

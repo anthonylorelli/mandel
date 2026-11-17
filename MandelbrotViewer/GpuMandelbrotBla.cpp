@@ -32,7 +32,7 @@ namespace Mandelbrot::detail
         auto canceled = [&] { return cancel && cancel->load(std::memory_order_relaxed); };
         if (canceled()) return;
 
-        constexpr double epsTol = 1e-8;
+        constexpr double epsTol = 2.5e-8;
         auto single = [&](double x, double y) noexcept -> BlockD
         {
             const double zAbs = std::hypot(x, y);
@@ -62,24 +62,15 @@ namespace Mandelbrot::detail
                 std::isfinite(m.ar) && std::isfinite(m.ai) &&
                 std::isfinite(m.br) && std::isfinite(m.bi))
             {
-                m.radius = 0.5 * std::min(x.radius, allowance / ax);
+                m.radius = std::min(x.radius, allowance / ax);
             }
             return m;
         };
 
-        BlockD init[8];
-        for (int i = 0; i < 8; ++i)
-        {
-            init[i] = single(orbit[i + 1].x, orbit[i + 1].y);
-        }
-        for (int cnt = 8; cnt > 1; cnt >>= 1)
-        {
-            for (int i = 0; i < cnt / 2; ++i)
-            {
-                init[i] = merge(init[2 * i], init[2 * i + 1]);
-            }
-        }
-        if (!(init[0].radius > cMax))
+        const BlockD firstFour = merge(
+            merge(single(orbit[1].x, orbit[1].y), single(orbit[2].x, orbit[2].y)),
+            merge(single(orbit[3].x, orbit[3].y), single(orbit[4].x, orbit[4].y)));
+        if (!(firstFour.radius > cMax * 0.125))
         {
             return;
         }
@@ -114,8 +105,7 @@ namespace Mandelbrot::detail
         }
         if (canceled() || !(localMaxRad > 0.0)) return;
 
-        maxRadD = localMaxRad;
-        SplitFrexpPositive(maxRadD, maxRadMant, maxRadExp);
+        SplitFrexpPositive(localMaxRad, maxRadMant, maxRadExp);
         numLevels = static_cast<uint32_t>(levels.size());
 
         size_t totalBlocks = 0;
@@ -126,6 +116,7 @@ namespace Mandelbrot::detail
         blocksF32.reserve(totalBlocks);
         blocksExp.reserve(totalBlocks);
 
+        double localMaxRadF32 = 0.0;
         for (uint32_t lv = 2; lv < numLevels; ++lv)
         {
             levelMeta[lv * 2 + 0] = static_cast<uint32_t>(blocksExp.size());
@@ -133,17 +124,19 @@ namespace Mandelbrot::detail
             for (const auto& b : levels[lv])
             {
                 const double maxCoeff = std::max({ std::abs(b.ar), std::abs(b.ai), std::abs(b.br), std::abs(b.bi) });
-                if (maxCoeff > 1e34 || (b.radius > 0.0 && b.radius < 1e-35))
-                {
-                    fitsFloat32 = false;
-                }
+                const double aAmp = std::hypot(b.ar, b.ai);
+                const bool blockFitsF32 = (maxCoeff <= 1e34 && aAmp >= 1e-6 && b.radius >= 1e-34);
 
                 GpuBlaBlockF32 bf{};
-                bf.ar = static_cast<float>(b.ar);
-                bf.ai = static_cast<float>(b.ai);
-                bf.br = static_cast<float>(b.br);
-                bf.bi = static_cast<float>(b.bi);
-                bf.radius = (maxCoeff <= 1e34 && b.radius >= 1e-35) ? static_cast<float>(b.radius) : 0.0f;
+                if (blockFitsF32)
+                {
+                    bf.ar = static_cast<float>(b.ar);
+                    bf.ai = static_cast<float>(b.ai);
+                    bf.br = static_cast<float>(b.br);
+                    bf.bi = static_cast<float>(b.bi);
+                    bf.radius = static_cast<float>(b.radius);
+                    localMaxRadF32 = std::max(localMaxRadF32, b.radius);
+                }
                 blocksF32.push_back(bf);
 
                 GpuBlaBlockExp be{};
@@ -153,5 +146,8 @@ namespace Mandelbrot::detail
                 blocksExp.push_back(be);
             }
         }
+
+        maxRadD = localMaxRadF32;
+        fitsFloat32 = (localMaxRadF32 > 0.0);
     }
 }

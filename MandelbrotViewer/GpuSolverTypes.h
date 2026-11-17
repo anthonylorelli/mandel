@@ -6,7 +6,7 @@
 
 namespace Mandelbrot::detail
 {
-    inline constexpr double kGpuDeepExpThreshold = 1e32;
+    inline constexpr double kGpuDeepExpThreshold = 1e30;
     inline constexpr double kGpuTricornMaxZoom = 1e20;
     inline constexpr size_t kMaxPrimaryChunkPixels = 16ULL * 1024 * 1024;
     inline constexpr uint64_t kMaxPrimaryIterBudget = 6'000'000'000ULL;
@@ -14,6 +14,7 @@ namespace Mandelbrot::detail
     inline constexpr size_t kMaxFullFrameAccumPixels = 16ULL * 1024 * 1024;
     inline constexpr size_t kD3D11SafeMaxBufferBytes = 128ULL * 1024 * 1024;
     inline constexpr uint32_t kIndirectSubpixelSentinel = 0xFFFFFFFFu;
+    inline constexpr uint32_t kMovieShutterTapCount = 7;
     inline constexpr size_t kPaletteLutSize = 4096;
     inline constexpr int kZeroExpSentinel = -1073741824;
 
@@ -117,6 +118,19 @@ namespace Mandelbrot::detail
         uint32_t temporalMode, subGroupThreads, pad0, pad1;
     };
     static_assert(sizeof(PostProcessCb) == 64);
+
+    struct GpuShutterTap
+    {
+        float shiftX, shiftY, scale, pad;
+    };
+    static_assert(sizeof(GpuShutterTap) == 16);
+
+    struct alignas(16) ShutterCb
+    {
+        uint32_t width, height, tapCount, pad0;
+        GpuShutterTap taps[kMovieShutterTapCount];
+    };
+    static_assert(sizeof(ShutterCb) == 128);
 
     inline void SplitFrexpSigned(double v, int extraExp, float& mOut, int32_t& expOut) noexcept
     {

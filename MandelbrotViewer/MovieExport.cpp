@@ -3,6 +3,7 @@
 #endif
 #include <windows.h>
 #include "MovieExport.h"
+#include "GpuFractalSolver.h"
 #include "MovieWriter.h"
 #include <condition_variable>
 #include <cstring>
@@ -35,6 +36,166 @@ namespace Mandelbrot
         };
         struct Canceled {};
         void ThrowIfCanceled(const std::atomic<bool>& cancel) { if (cancel.load(std::memory_order_relaxed)) throw Canceled{}; }
+
+        bool BuildShutterParams(
+            const MoviePlan& plan,
+            double frameIndex,
+            const MandelbrotConfig& cam0,
+            GpuMovieShutterParams& outShutter)
+        {
+            outShutter = {};
+            if (!plan.motionSmoothing || plan.FrameCount() <= 1)
+            {
+                return false;
+            }
+
+            constexpr std::array<double, 7> kTapOffsets{
+                -0.25, -1.0 / 6.0, -1.0 / 12.0, 0.0, 1.0 / 12.0, 1.0 / 6.0, 0.25
+            };
+
+            const BigFloat invStep0(cam0.zoom * (static_cast<double>(plan.width) / 3.0));
+            const float halfW = static_cast<float>(plan.width) * 0.5f;
+            const float halfH = static_cast<float>(plan.height) * 0.5f;
+            float maxCornerMotionPx = 0.0f;
+
+            outShutter.tapCount = static_cast<uint32_t>(kTapOffsets.size());
+            for (size_t k = 0; k < kTapOffsets.size(); ++k)
+            {
+                if (kTapOffsets[k] == 0.0)
+                {
+                    outShutter.shiftX[k] = 0.0f;
+                    outShutter.shiftY[k] = 0.0f;
+                    outShutter.scale[k] = 1.0f;
+                    continue;
+                }
+
+                const auto camTau = plan.CameraAt(frameIndex + kTapOffsets[k]);
+                const float sx = static_cast<float>((camTau.hpCenterX - cam0.hpCenterX).Mul(invStep0).ToDouble());
+                const float sy = static_cast<float>(-(camTau.hpCenterY - cam0.hpCenterY).Mul(invStep0).ToDouble());
+                const float sc = static_cast<float>(cam0.zoom / camTau.zoom);
+
+                outShutter.shiftX[k] = sx;
+                outShutter.shiftY[k] = sy;
+                outShutter.scale[k] = sc;
+
+                const float ds = sc - 1.0f;
+                maxCornerMotionPx = std::max({
+                    maxCornerMotionPx,
+                    std::abs(sx + halfW * ds),
+                    std::abs(sx - halfW * ds),
+                    std::abs(sy + halfH * ds),
+                    std::abs(sy - halfH * ds) });
+            }
+
+            if (maxCornerMotionPx < 0.05f)
+            {
+                outShutter.tapCount = 0;
+                return false;
+            }
+            return true;
+        }
+
+        void ApplyCpuShutterBlur(
+            const std::vector<uint32_t>& rawPixels,
+            std::vector<uint32_t>& outPixels,
+            int width,
+            int height,
+            const GpuMovieShutterParams& shutter,
+            const ColorSpace& colors,
+            const std::atomic<bool>& cancel)
+        {
+            const uint32_t tapCount = shutter.tapCount;
+            const float halfW = static_cast<float>(width) * 0.5f;
+            const float halfH = static_cast<float>(height) * 0.5f;
+            const float maxPx = static_cast<float>(width - 1);
+            const float maxPy = static_cast<float>(height - 1);
+            const float firstSx = shutter.shiftX[0], firstSy = shutter.shiftY[0], firstSc = shutter.scale[0];
+            const float lastSx = shutter.shiftX[tapCount - 1], lastSy = shutter.shiftY[tapCount - 1], lastSc = shutter.scale[tapCount - 1];
+
+            #pragma omp parallel for schedule(static)
+            for (int y = 0; y < height; ++y)
+            {
+                if (cancel.load(std::memory_order_relaxed)) continue;
+                const float relY = static_cast<float>(y) + 0.5f - halfH;
+                const size_t rowBase = static_cast<size_t>(y) * static_cast<size_t>(width);
+
+                for (int x = 0; x < width; ++x)
+                {
+                    const size_t idx = rowBase + static_cast<size_t>(x);
+                    const uint32_t centerColor = rawPixels[idx];
+                    const float relX = static_cast<float>(x) + 0.5f - halfW;
+
+                    const float spanX = std::abs((lastSx - firstSx) + relX * (lastSc - firstSc));
+                    const float spanY = std::abs((lastSy - firstSy) + relY * (lastSc - firstSc));
+                    if (std::max(spanX, spanY) < 0.125f)
+                    {
+                        outPixels[idx] = centerColor;
+                        continue;
+                    }
+
+                    float sumB = 0.0f, sumG = 0.0f, sumR = 0.0f;
+                    uint32_t validCount = 0;
+                    bool allEqualCenter = true;
+
+                    for (uint32_t k = 0; k < tapCount; ++k)
+                    {
+                        const float px = halfW + shutter.shiftX[k] + relX * shutter.scale[k] - 0.5f;
+                        const float py = halfH + shutter.shiftY[k] + relY * shutter.scale[k] - 0.5f;
+                        if (px < 0.0f || px > maxPx || py < 0.0f || py > maxPy)
+                            continue;
+
+                        const int x0 = static_cast<int>(px);
+                        const int y0 = static_cast<int>(py);
+                        const int x1 = std::min(x0 + 1, width - 1);
+                        const int y1 = std::min(y0 + 1, height - 1);
+                        const float fx = px - static_cast<float>(x0);
+                        const float fy = py - static_cast<float>(y0);
+
+                        const size_t r0 = static_cast<size_t>(y0) * static_cast<size_t>(width);
+                        const size_t r1 = static_cast<size_t>(y1) * static_cast<size_t>(width);
+                        const uint32_t c00 = rawPixels[r0 + static_cast<size_t>(x0)];
+                        const uint32_t c10 = rawPixels[r0 + static_cast<size_t>(x1)];
+                        const uint32_t c01 = rawPixels[r1 + static_cast<size_t>(x0)];
+                        const uint32_t c11 = rawPixels[r1 + static_cast<size_t>(x1)];
+
+                        if (c00 == c10 && c00 == c01 && c00 == c11)
+                        {
+                            if (c00 != centerColor) allEqualCenter = false;
+                            sumB += colors.decode[c00 & 255];
+                            sumG += colors.decode[(c00 >> 8) & 255];
+                            sumR += colors.decode[(c00 >> 16) & 255];
+                        }
+                        else
+                        {
+                            allEqualCenter = false;
+                            const float w00 = (1.0f - fx) * (1.0f - fy);
+                            const float w10 = fx * (1.0f - fy);
+                            const float w01 = (1.0f - fx) * fy;
+                            const float w11 = fx * fy;
+                            sumB += colors.decode[c00 & 255] * w00 + colors.decode[c10 & 255] * w10 +
+                                    colors.decode[c01 & 255] * w01 + colors.decode[c11 & 255] * w11;
+                            sumG += colors.decode[(c00 >> 8) & 255] * w00 + colors.decode[(c10 >> 8) & 255] * w10 +
+                                    colors.decode[(c01 >> 8) & 255] * w01 + colors.decode[(c11 >> 8) & 255] * w11;
+                            sumR += colors.decode[(c00 >> 16) & 255] * w00 + colors.decode[(c10 >> 16) & 255] * w10 +
+                                    colors.decode[(c01 >> 16) & 255] * w01 + colors.decode[(c11 >> 16) & 255] * w11;
+                        }
+                        ++validCount;
+                    }
+
+                    if (validCount == 0 || allEqualCenter)
+                    {
+                        outPixels[idx] = centerColor;
+                        continue;
+                    }
+
+                    const float inv = 1.0f / static_cast<float>(validCount);
+                    const uint32_t b = colors.encode[static_cast<size_t>(std::clamp(sumB * inv * 4096.0f + 0.5f, 0.0f, 4096.0f))];
+                    const uint32_t g = colors.encode[static_cast<size_t>(std::clamp(sumG * inv * 4096.0f + 0.5f, 0.0f, 4096.0f))];
+                    const uint32_t r = colors.encode[static_cast<size_t>(std::clamp(sumR * inv * 4096.0f + 0.5f, 0.0f, 4096.0f))];
+                    outPixels[idx] = 0xFF000000u | (r << 16) | (g << 8) | b;
+                }
+            }
+        }
     }
 
     bool MoviePlan::PrepareAutoTargets(const std::atomic<bool>& cancel)
@@ -123,22 +284,19 @@ namespace Mandelbrot
         } modeGuard{ engine, previousMode };
         engine.SetExecutionMode(effectiveMode);
 
-        std::vector<uint32_t> output(static_cast<size_t>(plan.width) * plan.height), painted;
+        const size_t totalPixels = static_cast<size_t>(plan.width) * plan.height;
+        std::vector<uint32_t> output(totalPixels), rawOutput, painted;
         std::vector<float> iterations;
         std::vector<SubpixelSamples> subpixels;
-        const int temporal = plan.motionSmoothing ? 2 : 1;
-        std::array<MandelbrotConfig, 2> cameras{};
-        std::array<BigFloat, 2> steps{};
-        for (int time = 0; time < temporal; ++time)
-        {
-            cameras[time] = plan.CameraAt(frameIndex + (temporal == 2 ? (time == 0 ? -.25 : .25) : 0));
-            steps[time] = BigFloat(3.0 / cameras[time].zoom / plan.width);
-        }
+        const MandelbrotConfig camera = plan.CameraAt(frameIndex);
+        const BigFloat step(3.0 / camera.zoom / plan.width);
+        GpuMovieShutterParams shutter{};
+        const bool hasShutter = BuildShutterParams(plan, frameIndex, camera, shutter);
+        const bool gpuFullFrame = (totalPixels <= 16ULL * 1024 * 1024);
 
         if (effectiveMode == ExecutionMode::Gpu &&
-            engine.CanUseGpu(cameras[0]) &&
-            (temporal == 1 || engine.CanUseGpu(cameras[1])) &&
-            engine.BeginGpuMovieFrame(plan.width, plan.height))
+            engine.CanUseGpu(camera) &&
+            engine.BeginGpuMovieFrame(plan.width, plan.height, hasShutter && gpuFullFrame))
         {
             const int maxStripByMem = std::max(
                 1,
@@ -149,111 +307,105 @@ namespace Mandelbrot
                     (static_cast<uint64_t>(plan.width) * static_cast<uint64_t>(std::max(1, plan.start.maxIterations)))));
             const int gpuBandRows = std::min({ bandRows, maxStripByMem, maxStripByTdr });
 
+            if (hasShutter && !gpuFullFrame)
+            {
+                rawOutput.resize(totalPixels);
+            }
+            uint32_t* bandTargetBase = (hasShutter && !gpuFullFrame) ? rawOutput.data() : output.data();
+
             bool gpuOk = true;
-            for (int time = 0; time < temporal && gpuOk; ++time)
-            {
-                if (cancel.load(std::memory_order_relaxed)) return {};
-                const auto& camera = cameras[time];
-                engine.PrepareDeepReference(camera, &cancel);
-                if (cancel.load(std::memory_order_relaxed)) return {};
-
-                for (int row = 0; row < plan.height && gpuOk; row += gpuBandRows)
-                {
-                    if (cancel.load(std::memory_order_relaxed)) return {};
-                    const int rows = std::min(gpuBandRows, plan.height - row);
-                    const int topHalo = row > 0 ? 1 : 0;
-                    const int bottomHalo = (row + rows < plan.height) ? 1 : 0;
-                    const int firstRow = row - topHalo;
-                    const int bandHeight = rows + topHalo + bottomHalo;
-                    const BigFloat rowOffset((plan.height - bandHeight) * .5 - firstRow);
-
-                    auto band = camera;
-                    band.height = bandHeight;
-                    band.SetCenter(camera.hpCenterX,
-                        camera.hpCenterY + steps[time].Mul(rowOffset));
-
-                    uint32_t* outBand = output.data() + static_cast<size_t>(row) * plan.width;
-                    gpuOk = engine.RenderGpuMovieBand(
-                        band, topHalo, rows, row, time,
-                        plan.theme, plan.frequency, plan.phase, plan.invert, plan.interior,
-                        outBand, &cancel);
-                    if (cancel.load(std::memory_order_relaxed)) return {};
-
-                    if (gpuOk && progress)
-                    {
-                        const double completedRows = static_cast<double>(time) * plan.height + (row + rows);
-                        progress(static_cast<float>(completedRows / (static_cast<double>(temporal) * plan.height)));
-                    }
-                }
-            }
-
-            if (cancel.load(std::memory_order_relaxed)) return {};
-            if (gpuOk && engine.FinishGpuMovieFrame(plan.width, plan.height, output.data()))
-            {
-                return output;
-            }
-        }
-
-        for (int time = 0; time < temporal; ++time)
-        {
-            if (cancel.load(std::memory_order_relaxed)) return {};
-            const auto& camera = cameras[time];
             engine.PrepareDeepReference(camera, &cancel);
             if (cancel.load(std::memory_order_relaxed)) return {};
 
-            for (int row = 0; row < plan.height; row += bandRows)
+            for (int row = 0; row < plan.height && gpuOk; row += gpuBandRows)
             {
                 if (cancel.load(std::memory_order_relaxed)) return {};
-                const int rows = std::min(bandRows, plan.height - row);
+                const int rows = std::min(gpuBandRows, plan.height - row);
                 const int topHalo = row > 0 ? 1 : 0;
                 const int bottomHalo = (row + rows < plan.height) ? 1 : 0;
                 const int firstRow = row - topHalo;
                 const int bandHeight = rows + topHalo + bottomHalo;
-                const size_t count = static_cast<size_t>(plan.width) * rows;
-                const size_t bandCount = static_cast<size_t>(plan.width) * bandHeight;
-                painted.resize(bandCount);
                 const BigFloat rowOffset((plan.height - bandHeight) * .5 - firstRow);
 
                 auto band = camera;
                 band.height = bandHeight;
                 band.SetCenter(camera.hpCenterX,
-                    camera.hpCenterY + steps[time].Mul(rowOffset));
-                engine.Compute(band, iterations, &cancel, &subpixels);
+                    camera.hpCenterY + step.Mul(rowOffset));
+
+                uint32_t* outBand = bandTargetBase + static_cast<size_t>(row) * plan.width;
+                gpuOk = engine.RenderGpuMovieBand(
+                    band, topHalo, rows, row, 0,
+                    plan.theme, plan.frequency, plan.phase, plan.invert, plan.interior,
+                    outBand, &cancel);
                 if (cancel.load(std::memory_order_relaxed)) return {};
-                // Halo rows provide complete 3x3 neighborhoods across band boundaries, making
-                // adaptive subpixel refinement and colors independent of render bands.
-                plan.theme.Recolor(iterations, painted.data(), bandCount, plan.frequency, plan.phase,
-                    plan.invert, plan.interior, band.fractalType, band.width, &subpixels, false);
-                const uint32_t* bandPixels = painted.data() + static_cast<size_t>(topHalo) * plan.width;
-                uint32_t* outBand = output.data() + static_cast<size_t>(row) * plan.width;
-                if (time == 0)
+
+                if (gpuOk && progress)
                 {
-                    std::memcpy(outBand, bandPixels, count * sizeof(uint32_t));
-                }
-                else
-                {
-                    #pragma omp parallel for schedule(static)
-                    for (intptr_t i = 0; i < static_cast<intptr_t>(count); ++i)
-                    {
-                        const uint32_t c0 = outBand[i];
-                        const uint32_t c1 = bandPixels[i];
-                        if (c0 == c1) continue;
-                        uint32_t color = 0xFF000000;
-                        for (int channel = 0; channel < 3; ++channel)
-                        {
-                            const float avg = (colors.decode[(c0 >> (8 * channel)) & 255] +
-                                               colors.decode[(c1 >> (8 * channel)) & 255]) * 0.5f;
-                            color |= static_cast<uint32_t>(colors.encode[static_cast<size_t>(std::clamp(avg * 4096 + .5f, 0.0f, 4096.0f))]) << (channel * 8);
-                        }
-                        outBand[i] = color;
-                    }
-                }
-                if (progress)
-                {
-                    const double completedRows = static_cast<double>(time) * plan.height + (row + rows);
-                    progress(static_cast<float>(completedRows / (static_cast<double>(temporal) * plan.height)));
+                    progress(static_cast<float>(static_cast<double>(row + rows) / plan.height));
                 }
             }
+
+            if (cancel.load(std::memory_order_relaxed)) return {};
+            if (gpuOk && engine.FinishGpuMovieFrame(
+                plan.width,
+                plan.height,
+                output.data(),
+                (hasShutter && gpuFullFrame) ? &shutter : nullptr))
+            {
+                if (hasShutter && !gpuFullFrame)
+                {
+                    ApplyCpuShutterBlur(rawOutput, output, plan.width, plan.height, shutter, colors, cancel);
+                    if (cancel.load(std::memory_order_relaxed)) return {};
+                }
+                return output;
+            }
+        }
+
+        if (hasShutter)
+        {
+            rawOutput.resize(totalPixels);
+        }
+        uint32_t* cpuTargetBase = hasShutter ? rawOutput.data() : output.data();
+
+        engine.PrepareDeepReference(camera, &cancel);
+        if (cancel.load(std::memory_order_relaxed)) return {};
+
+        for (int row = 0; row < plan.height; row += bandRows)
+        {
+            if (cancel.load(std::memory_order_relaxed)) return {};
+            const int rows = std::min(bandRows, plan.height - row);
+            const int topHalo = row > 0 ? 1 : 0;
+            const int bottomHalo = (row + rows < plan.height) ? 1 : 0;
+            const int firstRow = row - topHalo;
+            const int bandHeight = rows + topHalo + bottomHalo;
+            const size_t count = static_cast<size_t>(plan.width) * rows;
+            const size_t bandCount = static_cast<size_t>(plan.width) * bandHeight;
+            painted.resize(bandCount);
+            const BigFloat rowOffset((plan.height - bandHeight) * .5 - firstRow);
+
+            auto band = camera;
+            band.height = bandHeight;
+            band.SetCenter(camera.hpCenterX,
+                camera.hpCenterY + step.Mul(rowOffset));
+            engine.Compute(band, iterations, &cancel, &subpixels);
+            if (cancel.load(std::memory_order_relaxed)) return {};
+            // Halo rows provide complete 3x3 neighborhoods across band boundaries, making
+            // adaptive subpixel refinement and colors independent of render bands.
+            plan.theme.Recolor(iterations, painted.data(), bandCount, plan.frequency, plan.phase,
+                plan.invert, plan.interior, band.fractalType, band.width, &subpixels, false);
+            const uint32_t* bandPixels = painted.data() + static_cast<size_t>(topHalo) * plan.width;
+            uint32_t* outBand = cpuTargetBase + static_cast<size_t>(row) * plan.width;
+            std::memcpy(outBand, bandPixels, count * sizeof(uint32_t));
+            if (progress)
+            {
+                progress(static_cast<float>(static_cast<double>(row + rows) / plan.height));
+            }
+        }
+
+        if (hasShutter)
+        {
+            ApplyCpuShutterBlur(rawOutput, output, plan.width, plan.height, shutter, colors, cancel);
+            if (cancel.load(std::memory_order_relaxed)) return {};
         }
         return output;
     }
@@ -286,7 +438,9 @@ namespace Mandelbrot
         return preview;
     }
 
-    MovieExporter::MovieExporter(MoviePlan plan, std::wstring destination) : m_total(plan.FrameCount())
+    MovieExporter::MovieExporter(MoviePlan plan, std::wstring destination)
+        : m_total(plan.FrameCount())
+        , m_startTime(std::chrono::steady_clock::now())
     {
         plan.Validate();
         m_planning.store(plan.autoRetarget);
@@ -298,7 +452,9 @@ namespace Mandelbrot
     MovieProgress MovieExporter::Progress() const
     {
         std::lock_guard lock(m_mutex);
-        return {m_completed.load(), m_total, m_fraction.load(), m_finished, m_canceled, m_planning.load(), m_error};
+        const auto end = m_finished ? m_endTime : std::chrono::steady_clock::now();
+        const double elapsed = std::max(0.0, std::chrono::duration<double>(end - m_startTime).count());
+        return {m_completed.load(), m_total, m_fraction.load(), m_finished, m_canceled, m_planning.load(), m_error, elapsed};
     }
     std::optional<MoviePreview> MovieExporter::TakePreview()
     {
@@ -442,6 +598,8 @@ namespace Mandelbrot
         catch (...) { std::lock_guard lock(m_mutex); m_error = L"Unexpected movie export error."; }
         if (ownsStaging && !staging.empty()) { std::error_code ignored; std::filesystem::remove(staging, ignored); }
         m_planning.store(false);
-        std::lock_guard lock(m_mutex); m_finished = true;
+        std::lock_guard lock(m_mutex);
+        m_endTime = std::chrono::steady_clock::now();
+        m_finished = true;
     }
 }

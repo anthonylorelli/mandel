@@ -292,9 +292,10 @@ namespace Mandelbrot
         return m_executionMode == ExecutionMode::Gpu && EnsureGpuSolver().CanSupportConfig(config);
     }
 
-    bool MandelbrotEngine::BeginGpuMovieFrame(int width, int height)
+    bool MandelbrotEngine::BeginGpuMovieFrame(int width, int height, bool enableShutterBlur)
     {
-        return m_executionMode == ExecutionMode::Gpu && EnsureGpuSolver().BeginMovieFrame(width, height);
+        return m_executionMode == ExecutionMode::Gpu &&
+            EnsureGpuSolver().BeginMovieFrame(width, height, enableShutterBlur);
     }
 
     bool MandelbrotEngine::RenderGpuMovieBand(
@@ -347,9 +348,14 @@ namespace Mandelbrot
             cancelToken);
     }
 
-    bool MandelbrotEngine::FinishGpuMovieFrame(int width, int height, uint32_t* outPixels)
+    bool MandelbrotEngine::FinishGpuMovieFrame(
+        int width,
+        int height,
+        uint32_t* outPixels,
+        const GpuMovieShutterParams* shutterParams)
     {
-        return m_executionMode == ExecutionMode::Gpu && EnsureGpuSolver().EndMovieFrame(width, height, outPixels);
+        return m_executionMode == ExecutionMode::Gpu &&
+            EnsureGpuSolver().EndMovieFrame(width, height, outPixels, shutterParams);
     }
 
     void MandelbrotEngine::ZoomViewport(

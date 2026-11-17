@@ -7,7 +7,7 @@ namespace Mandelbrot
 {
     using namespace detail;
 
-    bool GpuFractalSolver::BeginMovieFrame(int width, int height)
+    bool GpuFractalSolver::BeginMovieFrame(int width, int height, bool enableShutterBlur)
     {
         if (!m_impl || !m_impl->available || width <= 0 || height <= 0)
         {
@@ -18,9 +18,12 @@ namespace Mandelbrot
         const size_t totalPixels = static_cast<size_t>(width) * static_cast<size_t>(height);
         if (totalPixels <= kMaxFullFrameAccumPixels)
         {
-            if (!m_impl->EnsureStructuredUavBuffer(
+            if (!m_impl->EnsureStructuredUavSrvBuffer(
                     totalPixels, sizeof(uint32_t),
-                    m_impl->accumPixelsBuf, m_impl->accumPixelsUav, m_impl->accumPixelsCapElems) ||
+                    m_impl->accumPixelsBuf, m_impl->accumPixelsUav, m_impl->accumPixelsSrv, m_impl->accumPixelsCapElems) ||
+                (enableShutterBlur && !m_impl->EnsureStructuredUavBuffer(
+                    totalPixels, sizeof(uint32_t),
+                    m_impl->shutterPixelsBuf, m_impl->shutterPixelsUav, m_impl->shutterPixelsCapElems)) ||
                 !m_impl->EnsureStagingReadBuffer(
                     totalPixels * sizeof(uint32_t),
                     m_impl->accumPixelsStaging, m_impl->accumPixelsStagingCapBytes))
@@ -28,10 +31,12 @@ namespace Mandelbrot
                 return false;
             }
             m_impl->movieFullFrameAccum = true;
+            m_impl->movieShutterBlur = enableShutterBlur;
         }
         else
         {
             m_impl->movieFullFrameAccum = false;
+            m_impl->movieShutterBlur = false;
         }
         return true;
     }
@@ -114,9 +119,9 @@ namespace Mandelbrot
 
         if (!m_impl->movieFullFrameAccum)
         {
-            if (!m_impl->EnsureStructuredUavBuffer(
+            if (!m_impl->EnsureStructuredUavSrvBuffer(
                     visiblePixels, sizeof(uint32_t),
-                    m_impl->accumPixelsBuf, m_impl->accumPixelsUav, m_impl->accumPixelsCapElems) ||
+                    m_impl->accumPixelsBuf, m_impl->accumPixelsUav, m_impl->accumPixelsSrv, m_impl->accumPixelsCapElems) ||
                 !m_impl->EnsureStagingReadBuffer(
                     visiblePixels * sizeof(uint32_t),
                     m_impl->accumPixelsStaging, m_impl->accumPixelsStagingCapBytes))
@@ -296,7 +301,11 @@ namespace Mandelbrot
         return true;
     }
 
-    bool GpuFractalSolver::EndMovieFrame(int width, int height, uint32_t* outFramePixels)
+    bool GpuFractalSolver::EndMovieFrame(
+        int width,
+        int height,
+        uint32_t* outFramePixels,
+        const GpuMovieShutterParams* shutterParams)
     {
         if (!m_impl || !m_impl->available || !outFramePixels || width <= 0 || height <= 0)
         {
@@ -309,10 +318,54 @@ namespace Mandelbrot
             return true;
         }
 
+        ID3D11Buffer* readbackSrc = m_impl->accumPixelsBuf.Get();
+        if (m_impl->movieShutterBlur && shutterParams && shutterParams->tapCount > 1)
+        {
+            const size_t totalPixels = static_cast<size_t>(width) * static_cast<size_t>(height);
+            if (!m_impl->EnsureStructuredUavBuffer(
+                    totalPixels, sizeof(uint32_t),
+                    m_impl->shutterPixelsBuf, m_impl->shutterPixelsUav, m_impl->shutterPixelsCapElems))
+            {
+                return false;
+            }
+
+            ShutterCb shutterCb{};
+            shutterCb.width = static_cast<uint32_t>(width);
+            shutterCb.height = static_cast<uint32_t>(height);
+            shutterCb.tapCount = std::min<uint32_t>(shutterParams->tapCount, kMovieShutterTapCount);
+            for (uint32_t k = 0; k < shutterCb.tapCount; ++k)
+            {
+                shutterCb.taps[k].shiftX = shutterParams->shiftX[k];
+                shutterCb.taps[k].shiftY = shutterParams->shiftY[k];
+                shutterCb.taps[k].scale = shutterParams->scale[k];
+            }
+
+            if (!m_impl->UploadBufferDiscard(m_impl->constantBuffer.Get(), &shutterCb, sizeof(shutterCb)))
+            {
+                return false;
+            }
+
+            ID3D11Buffer* cbs[]{ m_impl->constantBuffer.Get() };
+            m_impl->context->CSSetConstantBuffers(0, 1, cbs);
+            m_impl->UnbindComputeResources();
+
+            ID3D11UnorderedAccessView* uavs[3]{ m_impl->shutterPixelsUav.Get(), nullptr, nullptr };
+            m_impl->context->CSSetUnorderedAccessViews(0, 3, uavs, nullptr);
+            ID3D11ShaderResourceView* srvs[8]{ m_impl->accumPixelsSrv.Get() };
+            m_impl->context->CSSetShaderResources(0, 8, srvs);
+            m_impl->context->CSSetShader(m_impl->csPostShutter.Get(), nullptr, 0);
+            m_impl->context->Dispatch(
+                static_cast<UINT>((width + 15) / 16),
+                static_cast<UINT>((height + 15) / 16),
+                1);
+            m_impl->UnbindComputeResources();
+            readbackSrc = m_impl->shutterPixelsBuf.Get();
+        }
+
         const size_t totalBytes = static_cast<size_t>(width) * static_cast<size_t>(height) * sizeof(uint32_t);
         D3D11_BOX box{ 0, 0, 0, static_cast<UINT>(totalBytes), 1, 1 };
         m_impl->context->CopySubresourceRegion(
-            m_impl->accumPixelsStaging.Get(), 0, 0, 0, 0, m_impl->accumPixelsBuf.Get(), 0, &box);
+            m_impl->accumPixelsStaging.Get(), 0, 0, 0, 0, readbackSrc, 0, &box);
 
         D3D11_MAPPED_SUBRESOURCE mapped{};
         if (FAILED(m_impl->context->Map(m_impl->accumPixelsStaging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))

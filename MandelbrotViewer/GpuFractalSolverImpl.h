@@ -42,7 +42,7 @@ namespace Mandelbrot
         ComPtr<ID3D11ComputeShader> csLdsPrim, csLdsSub;
         ComPtr<ID3D11ComputeShader> csLdsBlaPrim, csLdsBlaSub;
         ComPtr<ID3D11ComputeShader> csDeepExpPrim, csDeepExpSub;
-        ComPtr<ID3D11ComputeShader> csPostDetect, csPostBuildIndirect, csPostResolve;
+        ComPtr<ID3D11ComputeShader> csPostDetect, csPostBuildIndirect, csPostResolve, csPostShutter;
 
         ComPtr<ID3D11Buffer> constantBuffer;
 
@@ -87,9 +87,15 @@ namespace Mandelbrot
 
         ComPtr<ID3D11Buffer> accumPixelsBuf, accumPixelsStaging;
         ComPtr<ID3D11UnorderedAccessView> accumPixelsUav;
+        ComPtr<ID3D11ShaderResourceView> accumPixelsSrv;
         size_t accumPixelsCapElems{ 0 };
         size_t accumPixelsStagingCapBytes{ 0 };
         bool movieFullFrameAccum{ false };
+        bool movieShutterBlur{ false };
+
+        ComPtr<ID3D11Buffer> shutterPixelsBuf;
+        ComPtr<ID3D11UnorderedAccessView> shutterPixelsUav;
+        size_t shutterPixelsCapElems{ 0 };
 
         ComPtr<ID3D11Buffer> prevBandBuf;
         ComPtr<ID3D11ShaderResourceView> prevBandSrv;
