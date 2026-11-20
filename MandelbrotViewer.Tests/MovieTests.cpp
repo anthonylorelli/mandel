@@ -488,3 +488,52 @@ TEST_CASE(Movie, CancelPreservesAnExistingDestination)
         const auto bytes = Read(file.path); ASSERT_EQ(std::string("original"), std::string(bytes.begin(), bytes.end()));
     }
 }
+
+TEST_CASE(Movie, CameraScalesIterationsPerFrameWhenAutoScaleEnabled)
+{
+    auto p = SmallMovie();
+    p.start.zoom = 10.0;
+    p.endZoom = 1e60;
+    p.autoScaleIterations = true;
+    p.baseIterations = 300;
+    p.Validate();
+
+    const auto cFirst = p.CameraAt(0);
+    const auto cMid = p.CameraAt((p.FrameCount() - 1) * 0.5);
+    const auto cLast = p.CameraAt(p.FrameCount() - 1);
+
+    ASSERT_EQ(MandelbrotEngine::RecommendMaxIterations(cFirst.zoom, cFirst.fractalType, 300), cFirst.maxIterations);
+    ASSERT_EQ(MandelbrotEngine::RecommendMaxIterations(cMid.zoom, cMid.fractalType, 300), cMid.maxIterations);
+    ASSERT_EQ(MandelbrotEngine::RecommendMaxIterations(cLast.zoom, cLast.fractalType, 300), cLast.maxIterations);
+    ASSERT_LT(cFirst.maxIterations, cMid.maxIterations);
+    ASSERT_LT(cMid.maxIterations, cLast.maxIterations);
+}
+
+TEST_CASE(Movie, MovieHintReusesDeepReferenceAcrossLimbBoundaries)
+{
+    DeepReferenceCache cache;
+    const BigFloat anchorX(0.0);
+    const BigFloat anchorY(1.0);
+    cache.SetMovieHint(1e60, &anchorX, &anchorY);
+
+    FractalConfig cfg;
+    cfg.width = 64;
+    cfg.height = 48;
+    cfg.zoom = 1e14;
+    cfg.maxIterations = 600;
+    cfg.SetCenter(anchorX + BigFloat(0.2 * 3.0 / cfg.zoom), anchorY);
+
+    DeepReferenceState s0{};
+    ASSERT_TRUE(cache.Ensure(cfg, cfg.hpCenterX, cfg.hpCenterY, ExecutionMode::Gpu, s0));
+    const uint64_t initialVersion = s0.orbitVersion;
+    ASSERT_GE(s0.refLen, 600);
+
+    // Zoom across multiple 32-bit limb boundaries while maxIterations ramps up within extension cushion
+    cfg.zoom = 1e35;
+    cfg.maxIterations = 700;
+    cfg.SetCenter(anchorX, anchorY);
+    DeepReferenceState s1{};
+    ASSERT_TRUE(cache.Ensure(cfg, cfg.hpCenterX, cfg.hpCenterY, ExecutionMode::Gpu, s1));
+    ASSERT_EQ(initialVersion, s1.orbitVersion);
+    ASSERT_EQ(s0.refLen, s1.refLen);
+}

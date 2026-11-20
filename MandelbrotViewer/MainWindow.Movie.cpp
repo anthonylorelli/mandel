@@ -148,9 +148,11 @@ namespace winrt::MandelbrotViewer::implementation
                         throw std::invalid_argument("Enter a valid target X coordinate.");
                     if (!plan.autoRetarget && !(exactYText && targetY.Text() == targetYText) && !Mandelbrot::BigFloat::TryParse(targetY.Text(), plan.targetY))
                         throw std::invalid_argument("Enter a valid target Y coordinate.");
+                    plan.autoScaleIterations = autoIterations;
+                    plan.baseIterations = baseIterations;
                     if (autoIterations)
                         plan.start.maxIterations = Mandelbrot::MandelbrotEngine::RecommendMaxIterations(
-                            std::max(plan.start.zoom, plan.endZoom), plan.start.fractalType, baseIterations);
+                            plan.start.zoom, plan.start.fractalType, baseIterations);
                     plan.motionSmoothing = motion.IsChecked().GetBoolean();
                     plan.Validate();
                     if (plan.autoRetarget)

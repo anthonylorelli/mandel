@@ -53,17 +53,32 @@ namespace Mandelbrot
         {
             if (refState.orbitVersion != uploadedBlaOrbitVersion ||
                 refState.refLen != uploadedBlaRefLen ||
+                uploadedBlaForceDeepExp != zoomDeepExp ||
                 cMax > uploadedBlaCMax * (1.0 + 1e-12) ||
                 cMax < uploadedBlaCMax * 0.25)
             {
-                blaBuilder.Build(refState.orbit, refState.refLen, cMax, cancelToken);
+                // Add cMax headroom at deep zooms so zoom-out trajectories and small pans reuse
+                // the same BLA table across many frames instead of rebuilding every frame.
+                const double headroomCMax = (cMax < 1e-6) ? (cMax * 1.5) : cMax;
+                double builtCMax = headroomCMax;
+                blaBuilder.Build(refState.orbit, refState.refLen, headroomCMax, cancelToken, zoomDeepExp);
                 if (cancelToken && cancelToken->load(std::memory_order_relaxed))
                 {
                     return false;
                 }
+                if (blaBuilder.numLevels < 3 && headroomCMax > cMax)
+                {
+                    blaBuilder.Build(refState.orbit, refState.refLen, cMax, cancelToken, zoomDeepExp);
+                    builtCMax = cMax;
+                    if (cancelToken && cancelToken->load(std::memory_order_relaxed))
+                    {
+                        return false;
+                    }
+                }
                 uploadedBlaOrbitVersion = refState.orbitVersion;
                 uploadedBlaRefLen = refState.refLen;
-                uploadedBlaCMax = cMax;
+                uploadedBlaCMax = builtCMax;
+                uploadedBlaForceDeepExp = zoomDeepExp;
                 uploadedHasBlaF32 = false;
                 uploadedHasBlaExp = false;
 
@@ -82,6 +97,7 @@ namespace Mandelbrot
             uploadedBlaOrbitVersion = 0;
             uploadedBlaRefLen = -1;
             uploadedBlaCMax = 0.0;
+            uploadedBlaForceDeepExp = false;
             uploadedHasBlaF32 = false;
             uploadedHasBlaExp = false;
         }
@@ -101,9 +117,8 @@ namespace Mandelbrot
             {
                 const double rx = refState.orbit[m].x;
                 const double ry = refState.orbit[m].y;
-                hostOrbitExp[m].rx = static_cast<float>(rx);
-                hostOrbitExp[m].ry = static_cast<float>(ry);
                 SplitFrexp2(rx, ry, hostOrbitExp[m].rmx, hostOrbitExp[m].rmy, hostOrbitExp[m].rExp);
+                hostOrbitExp[m].pad0 = 0;
             }
             if (!UploadBufferDiscard(orbitFullBuf.Get(), hostOrbitExp.data(), orbitCount * sizeof(GpuOrbitPointExp)))
             {
@@ -194,13 +209,33 @@ namespace Mandelbrot
                 outJuliaBailout2 = std::max(16.0, 4.0 * std::hypot(outJuliaCx, outJuliaCy));
             }
 
-            hostColCoords.resize(static_cast<size_t>(width) * 3);
-            for (int x = 0; x < width; ++x)
+            const bool reuseCols = hasUploadedCols && colCoordsBuf &&
+                uploadedColMode == outMode && uploadedColWidth == width &&
+                uploadedColOrigin == cx0 && uploadedColStep == step;
+            if (!reuseCols)
             {
-                hostColCoords[static_cast<size_t>(x) * 3 + 0] = static_cast<float>(cx0 + ((x + 0.25) - halfW) * step);
-                hostColCoords[static_cast<size_t>(x) * 3 + 1] = static_cast<float>(cx0 + ((x + 0.50) - halfW) * step);
-                hostColCoords[static_cast<size_t>(x) * 3 + 2] = static_cast<float>(cx0 + ((x + 0.75) - halfW) * step);
+                hostColCoords.resize(static_cast<size_t>(width) * 3);
+                for (int x = 0; x < width; ++x)
+                {
+                    hostColCoords[static_cast<size_t>(x) * 3 + 0] = static_cast<float>(cx0 + ((x + 0.25) - halfW) * step);
+                    hostColCoords[static_cast<size_t>(x) * 3 + 1] = static_cast<float>(cx0 + ((x + 0.50) - halfW) * step);
+                    hostColCoords[static_cast<size_t>(x) * 3 + 2] = static_cast<float>(cx0 + ((x + 0.75) - halfW) * step);
+                }
+                if (!EnsureTypedSrvBuffer(
+                        hostColCoords.size(), 4, DXGI_FORMAT_R32_FLOAT,
+                        colCoordsBuf, colCoordsSrv, colCoordsCapFloats) ||
+                    !UploadBufferDiscard(
+                        colCoordsBuf.Get(), hostColCoords.data(), hostColCoords.size() * sizeof(float)))
+                {
+                    return PrepResult::Fallback;
+                }
+                hasUploadedCols = true;
+                uploadedColMode = outMode;
+                uploadedColWidth = width;
+                uploadedColOrigin = cx0;
+                uploadedColStep = step;
             }
+
             hostRowCoords.resize(static_cast<size_t>(height) * 3);
             for (int y = 0; y < height; ++y)
             {
@@ -210,13 +245,8 @@ namespace Mandelbrot
             }
 
             if (!EnsureTypedSrvBuffer(
-                    hostColCoords.size(), 4, DXGI_FORMAT_R32_FLOAT,
-                    colCoordsBuf, colCoordsSrv, colCoordsCapFloats) ||
-                !EnsureTypedSrvBuffer(
                     hostRowCoords.size(), 4, DXGI_FORMAT_R32_FLOAT,
                     rowCoordsBuf, rowCoordsSrv, rowCoordsCapFloats) ||
-                !UploadBufferDiscard(
-                    colCoordsBuf.Get(), hostColCoords.data(), hostColCoords.size() * sizeof(float)) ||
                 !UploadBufferDiscard(
                     rowCoordsBuf.Get(), hostRowCoords.data(), hostRowCoords.size() * sizeof(float)))
             {
@@ -252,18 +282,38 @@ namespace Mandelbrot
             int stepExp = 0;
             const double stepMantD = std::frexp(step, &stepExp);
 
-            hostColCoordsExp.resize(static_cast<size_t>(width) * 3);
-            for (int x = 0; x < width; ++x)
+            const bool reuseCols = hasUploadedCols && colCoordsExpBuf &&
+                uploadedColMode == outMode && uploadedColWidth == width &&
+                uploadedColOrigin == outRefState.refPosX && uploadedColStep == step;
+            if (!reuseCols)
             {
-                SplitFrexpSigned(((x - 0.25) - outRefState.refPosX) * stepMantD, stepExp,
-                    hostColCoordsExp[static_cast<size_t>(x) * 3 + 0].mant,
-                    hostColCoordsExp[static_cast<size_t>(x) * 3 + 0].exp);
-                SplitFrexpSigned((static_cast<double>(x) - outRefState.refPosX) * stepMantD, stepExp,
-                    hostColCoordsExp[static_cast<size_t>(x) * 3 + 1].mant,
-                    hostColCoordsExp[static_cast<size_t>(x) * 3 + 1].exp);
-                SplitFrexpSigned(((x + 0.25) - outRefState.refPosX) * stepMantD, stepExp,
-                    hostColCoordsExp[static_cast<size_t>(x) * 3 + 2].mant,
-                    hostColCoordsExp[static_cast<size_t>(x) * 3 + 2].exp);
+                hostColCoordsExp.resize(static_cast<size_t>(width) * 3);
+                for (int x = 0; x < width; ++x)
+                {
+                    SplitFrexpSigned(((x - 0.25) - outRefState.refPosX) * stepMantD, stepExp,
+                        hostColCoordsExp[static_cast<size_t>(x) * 3 + 0].mant,
+                        hostColCoordsExp[static_cast<size_t>(x) * 3 + 0].exp);
+                    SplitFrexpSigned((static_cast<double>(x) - outRefState.refPosX) * stepMantD, stepExp,
+                        hostColCoordsExp[static_cast<size_t>(x) * 3 + 1].mant,
+                        hostColCoordsExp[static_cast<size_t>(x) * 3 + 1].exp);
+                    SplitFrexpSigned(((x + 0.25) - outRefState.refPosX) * stepMantD, stepExp,
+                        hostColCoordsExp[static_cast<size_t>(x) * 3 + 2].mant,
+                        hostColCoordsExp[static_cast<size_t>(x) * 3 + 2].exp);
+                }
+                if (!EnsureStructuredSrvBuffer(
+                        hostColCoordsExp.size(), sizeof(GpuCoordExp),
+                        colCoordsExpBuf, colCoordsExpSrv, colCoordsExpCapElems) ||
+                    !UploadBufferDiscard(
+                        colCoordsExpBuf.Get(), hostColCoordsExp.data(),
+                        hostColCoordsExp.size() * sizeof(GpuCoordExp)))
+                {
+                    return PrepResult::Fallback;
+                }
+                hasUploadedCols = true;
+                uploadedColMode = outMode;
+                uploadedColWidth = width;
+                uploadedColOrigin = outRefState.refPosX;
+                uploadedColStep = step;
             }
 
             hostRowCoordsExp.resize(static_cast<size_t>(height) * 3);
@@ -281,14 +331,8 @@ namespace Mandelbrot
             }
 
             if (!EnsureStructuredSrvBuffer(
-                    hostColCoordsExp.size(), sizeof(GpuCoordExp),
-                    colCoordsExpBuf, colCoordsExpSrv, colCoordsExpCapElems) ||
-                !EnsureStructuredSrvBuffer(
                     hostRowCoordsExp.size(), sizeof(GpuCoordExp),
                     rowCoordsExpBuf, rowCoordsExpSrv, rowCoordsExpCapElems) ||
-                !UploadBufferDiscard(
-                    colCoordsExpBuf.Get(), hostColCoordsExp.data(),
-                    hostColCoordsExp.size() * sizeof(GpuCoordExp)) ||
                 !UploadBufferDiscard(
                     rowCoordsExpBuf.Get(), hostRowCoordsExp.data(),
                     hostRowCoordsExp.size() * sizeof(GpuCoordExp)))
@@ -301,13 +345,34 @@ namespace Mandelbrot
             const bool hasBla = (config.fractalType == FractalType::Mandelbrot && blaBuilder.numLevels >= 3);
             outMode = hasBla ? GpuShaderMode::PerturbLdsBla : GpuShaderMode::PerturbLds;
 
-            hostColCoords.resize(static_cast<size_t>(width) * 3);
-            for (int x = 0; x < width; ++x)
+            const bool reuseCols = hasUploadedCols && colCoordsBuf &&
+                (uploadedColMode == GpuShaderMode::PerturbLds || uploadedColMode == GpuShaderMode::PerturbLdsBla) &&
+                uploadedColWidth == width &&
+                uploadedColOrigin == outRefState.refPosX && uploadedColStep == step;
+            if (!reuseCols)
             {
-                hostColCoords[static_cast<size_t>(x) * 3 + 0] = static_cast<float>(((x - 0.25) - outRefState.refPosX) * step);
-                hostColCoords[static_cast<size_t>(x) * 3 + 1] = static_cast<float>((static_cast<double>(x) - outRefState.refPosX) * step);
-                hostColCoords[static_cast<size_t>(x) * 3 + 2] = static_cast<float>(((x + 0.25) - outRefState.refPosX) * step);
+                hostColCoords.resize(static_cast<size_t>(width) * 3);
+                for (int x = 0; x < width; ++x)
+                {
+                    hostColCoords[static_cast<size_t>(x) * 3 + 0] = static_cast<float>(((x - 0.25) - outRefState.refPosX) * step);
+                    hostColCoords[static_cast<size_t>(x) * 3 + 1] = static_cast<float>((static_cast<double>(x) - outRefState.refPosX) * step);
+                    hostColCoords[static_cast<size_t>(x) * 3 + 2] = static_cast<float>(((x + 0.25) - outRefState.refPosX) * step);
+                }
+                if (!EnsureTypedSrvBuffer(
+                        hostColCoords.size(), 4, DXGI_FORMAT_R32_FLOAT,
+                        colCoordsBuf, colCoordsSrv, colCoordsCapFloats) ||
+                    !UploadBufferDiscard(
+                        colCoordsBuf.Get(), hostColCoords.data(), hostColCoords.size() * sizeof(float)))
+                {
+                    return PrepResult::Fallback;
+                }
+                hasUploadedCols = true;
+                uploadedColMode = outMode;
+                uploadedColWidth = width;
+                uploadedColOrigin = outRefState.refPosX;
+                uploadedColStep = step;
             }
+
             hostRowCoords.resize(static_cast<size_t>(height) * 3);
             for (int y = 0; y < height; ++y)
             {
@@ -317,13 +382,8 @@ namespace Mandelbrot
             }
 
             if (!EnsureTypedSrvBuffer(
-                    hostColCoords.size(), 4, DXGI_FORMAT_R32_FLOAT,
-                    colCoordsBuf, colCoordsSrv, colCoordsCapFloats) ||
-                !EnsureTypedSrvBuffer(
                     hostRowCoords.size(), 4, DXGI_FORMAT_R32_FLOAT,
                     rowCoordsBuf, rowCoordsSrv, rowCoordsCapFloats) ||
-                !UploadBufferDiscard(
-                    colCoordsBuf.Get(), hostColCoords.data(), hostColCoords.size() * sizeof(float)) ||
                 !UploadBufferDiscard(
                     rowCoordsBuf.Get(), hostRowCoords.data(), hostRowCoords.size() * sizeof(float)))
             {
@@ -343,7 +403,8 @@ namespace Mandelbrot
         double juliaBailout2,
         uint32_t rowOffset,
         uint32_t outRowOffset,
-        uint32_t subTotal)
+        uint32_t subTotal,
+        uint32_t stageIterLimit)
     {
         switch (mode)
         {
@@ -398,6 +459,7 @@ namespace Mandelbrot
             cb.refCy = static_cast<float>(refState.refCyDouble);
             cb.checkCardioid = (config.zoom < 1e6) ? 1u : 0u;
             cb.outRowOffset = outRowOffset;
+            cb.stageIterLimit = (stageIterLimit > 0u) ? stageIterLimit : cb.maxIter;
             return UploadBufferDiscard(constantBuffer.Get(), &cb, sizeof(cb));
         }
         case GpuShaderMode::PerturbDeepExp:
@@ -419,6 +481,7 @@ namespace Mandelbrot
             cb.refCx = static_cast<float>(refState.refCxDouble);
             cb.refCy = static_cast<float>(refState.refCyDouble);
             cb.outRowOffset = outRowOffset;
+            cb.stageIterLimit = (stageIterLimit > 0u) ? stageIterLimit : cb.maxIter;
             return UploadBufferDiscard(constantBuffer.Get(), &cb, sizeof(cb));
         }
         }

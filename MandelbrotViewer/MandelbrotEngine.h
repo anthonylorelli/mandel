@@ -64,6 +64,13 @@ namespace Mandelbrot
             const FractalConfig& config,
             const std::atomic<bool>* cancelToken = nullptr);
 
+        // Configures a precision floor and optional fixed target anchor for deep-zoom movie export.
+        void SetMovieReferenceHint(
+            double maxZoom,
+            const BigFloat* anchorX = nullptr,
+            const BigFloat* anchorY = nullptr) noexcept;
+        void ClearMovieReferenceHint() noexcept;
+
         // Fused GPU movie frame rendering helpers (boundary detection, DispatchIndirect 4x
         // subpixels, supersampled palette coloring, and linear-light temporal blending on GPU).
         bool CanUseGpu(const FractalConfig& config);

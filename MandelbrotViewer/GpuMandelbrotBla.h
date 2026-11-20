@@ -13,9 +13,14 @@ namespace Mandelbrot::detail
     class GpuMandelbrotBlaBuilder
     {
     public:
-        struct BlockD
+        struct BlockExpD
         {
-            double ar{}, ai{}, br{}, bi{}, radius{};
+            double ar{}, ai{};
+            double br{}, bi{};
+            double radMant{};
+            int32_t aExp{ kZeroExpSentinel };
+            int32_t bExp{ kZeroExpSentinel };
+            int32_t radExp{ kZeroExpSentinel };
         };
 
         std::vector<GpuBlaBlockF32> blocksF32;
@@ -28,6 +33,11 @@ namespace Mandelbrot::detail
         bool fitsFloat32{ true };
 
         void Clear() noexcept;
-        void Build(const ComplexOrbitPoint* orbit, int refLength, double cMax, const std::atomic<bool>* cancel);
+        void Build(
+            const ComplexOrbitPoint* orbit,
+            int refLength,
+            double cMax,
+            const std::atomic<bool>* cancel,
+            bool forceDeepExp = false);
     };
 }

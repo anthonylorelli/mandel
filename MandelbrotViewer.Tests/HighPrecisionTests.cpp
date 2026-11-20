@@ -67,3 +67,34 @@ TEST_CASE(HighPrecision, BigFloat_EqualityOperator)
     ASSERT_TRUE(a != c);
     ASSERT_TRUE(z1 == z2);
 }
+
+TEST_CASE(HighPrecision, BigFloat_64BitLimbSqrAndPrecision)
+{
+    // Verify 1024+ bits preserved even when limbs[0] == 1 (63 leading zero bits)
+    const BigFloat one(1.0);
+    const BigFloat tiny(1e-290);
+    const BigFloat recovered = (one + tiny) - one;
+    ASSERT_NEAR(1e-290, recovered.ToDouble(), 1e-302);
+
+    // Verify Reciprocal reaches full 1024-bit accuracy
+    const BigFloat inv7 = BigFloat(1.0) / BigFloat(7.0);
+    ASSERT_LT(std::abs((inv7 * BigFloat(7.0) - one).ToDouble()), 1e-290);
+
+    // Verify dedicated Sqr matches Mul bit-for-bit across all-ones 64-bit limbs and partial activeLimbs
+    BigFloat allOnes;
+    allOnes.isZero = false;
+    allOnes.sign = true;
+    allOnes.exp = 0;
+    for (int w = 0; w < BigFloat::W; ++w) allOnes.limbs[w] = UINT64_MAX;
+    for (int limbs : { 4, 6, 14, 24, 32 })
+    {
+        ASSERT_TRUE(allOnes.Sqr(limbs) == allOnes.Mul(allOnes, limbs));
+    }
+
+    // Verify activeLimbs-aware Add/Sub preserve precision at deep zoom
+    const BigFloat x("-1.749759145130366516130633058415226389506262666801809093836100185");
+    const BigFloat y("0.000000003685137949292318500001859506262666801809093836100185");
+    ASSERT_NEAR((x + y).ToDouble(), x.Add(y, 14).ToDouble(), 1e-15);
+    ASSERT_NEAR((x - y).ToDouble(), x.Sub(y, 14).ToDouble(), 1e-15);
+    ASSERT_TRUE((x.Add(y, 24).Sub(x, 24) - y).Abs().ToDouble() < 1e-150);
+}

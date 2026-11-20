@@ -642,7 +642,7 @@ cbuffer Params : register(b0)
     float refCx;
     float refCy;
     float pad0;
-    uint checkCardioid, outRowOffset, pad3, pad4;
+    uint checkCardioid, outRowOffset, stageIterLimit, pad4;
 };
 
 struct GpuBlaBlockF32
@@ -651,6 +651,14 @@ struct GpuBlaBlockF32
     float br, bi;
     float radius;
     float pad0, pad1, pad2;
+};
+
+struct GpuPerturbState
+{
+    float x, y;
+    int exp;
+    uint m;
+    uint iter;
 };
 
 Buffer<float2> OrbitFast : register(t0);
@@ -662,12 +670,21 @@ Buffer<uint> SubpixelIndices : register(t5);
 Buffer<uint> SubpixelCountSrv : register(t7);
 RWStructuredBuffer<float> OutIters : register(u0);
 RWStructuredBuffer<float> OutSubpixelsFlat : register(u1);
+RWStructuredBuffer<GpuPerturbState> ActiveState : register(u2);
+RWBuffer<uint> OutActiveIndices : register(u3);
+RWBuffer<uint> OutActiveCount : register(u4);
 
 groupshared float2 s_orbit[LDS_ORBIT_SIZE];
+groupshared uint s_groupCount;
+groupshared uint s_groupBase;
 
-float EvalPerturbLdsBla(float dcx, float dcy, uint sharedLim)
+bool StepPerturbLdsBla(
+    float dcx, float dcy, uint sharedLim, uint iterLimit,
+    inout float dx, inout float dy, inout uint m, inout uint iter,
+    out float outResult)
 {
-    if (checkCardioid != 0u)
+    outResult = -1.0f;
+    if (iter == 0u && checkCardioid != 0u)
     {
         float cx = refCx + dcx;
         float cy = refCy + dcy;
@@ -675,23 +692,26 @@ float EvalPerturbLdsBla(float dcx, float dcy, uint sharedLim)
         float y2 = cy * cy;
         float q = xm * xm + y2;
         if (q * (q + xm) <= 0.25f * y2 - 2e-6f || ((cx + 1.0f) * (cx + 1.0f) + y2) <= 0.0625f - 2e-6f)
-            return -1.0f;
+            return true;
     }
 
-    float dx = 0.0f, dy = 0.0f;
-    uint m = 0u;
-    uint iter = 0u;
     float escZx = 0.0f, escZy = 0.0f;
+    bool escaped = false;
     uint ldsStop = min(refLen, LDS_ORBIT_SIZE);
     float blaBurstFloor = max(blaMaxRadius, 1e-15f);
+    uint stopIter = min(iterLimit, maxIter);
+
+    // Exact cycle check on m == 0 rebases (zero instructions inside tight inner loops)
+    float chkDx = 1e30f, chkDy = 1e30f;
+    uint rebasePeriod = 4u, rebasesSince = 0u;
 
     [loop]
-    while (iter < maxIter)
+    while (iter < stopIter)
     {
         float maxD = max(abs(dx), abs(dy));
         if (maxD >= blaBurstFloor && m > 0u && m < ldsStop)
         {
-            uint endIter = iter + min(maxIter - iter, ldsStop - m);
+            uint endIter = iter + min(stopIter - iter, ldsStop - m);
             [loop]
             while (iter < endIter)
             {
@@ -709,7 +729,7 @@ float EvalPerturbLdsBla(float dcx, float dcy, uint sharedLim)
                 ++m;
                 ++iter;
             }
-            if (iter >= maxIter) break;
+            if (iter >= stopIter) break;
             maxD = max(abs(dx), abs(dy));
         }
 
@@ -718,7 +738,7 @@ float EvalPerturbLdsBla(float dcx, float dcy, uint sharedLim)
         float zx = rx + dx;
         float zy = ry + dy;
         float mod2 = zx * zx + zy * zy;
-        if (mod2 > 16.0f) { escZx = zx; escZy = zy; break; }
+        if (mod2 > 16.0f) { escZx = zx; escZy = zy; escaped = true; break; }
 
         bool doRebase = (m == refLen);
         if (!doRebase && m > 0u && max(abs(rx), abs(ry)) < 3.0f * maxD && maxD > 0.0f)
@@ -735,9 +755,20 @@ float EvalPerturbLdsBla(float dcx, float dcy, uint sharedLim)
         {
             dx = zx; dy = zy; m = 0u; rx = 0.0f; ry = 0.0f;
             maxD = max(abs(dx), abs(dy));
+            if (dx == chkDx && dy == chkDy)
+            {
+                iter = maxIter;
+                return true;
+            }
+            if (++rebasesSince >= rebasePeriod)
+            {
+                chkDx = dx; chkDy = dy;
+                rebasesSince = 0u;
+                if (rebasePeriod < 256u) rebasePeriod <<= 1u;
+            }
         }
 
-        if (m >= 1u && (maxIter - iter) >= 4u && ((m - 1u) & 3u) == 0u && m + 4u <= refLen && maxD < blaMaxRadius)
+        if (m >= 1u && (stopIter - iter) >= 4u && ((m - 1u) & 3u) == 0u && m + 4u <= refLen && maxD < blaMaxRadius)
         {
             uint start = m - 1u;
             uint aligned = (start != 0u) ? firstbitlow(start) : 30u;
@@ -746,7 +777,7 @@ float EvalPerturbLdsBla(float dcx, float dcy, uint sharedLim)
             for (int lv = int(top); lv >= 2; --lv)
             {
                 uint len = 1u << uint(lv);
-                if (len > (maxIter - iter) || m + len > refLen) continue;
+                if (len > (stopIter - iter) || m + len > refLen) continue;
                 uint2 meta = BlaMeta[lv];
                 uint idx = start >> uint(lv);
                 if (idx >= meta.y) continue;
@@ -775,8 +806,17 @@ float EvalPerturbLdsBla(float dcx, float dcy, uint sharedLim)
         ++iter;
     }
 
-    if (iter >= maxIter) return -1.0f;
-    if (smoothFlag == 0u) return float(iter);
+    if (!escaped)
+    {
+        if (iter >= maxIter) return true;
+        return false;
+    }
+
+    if (smoothFlag == 0u)
+    {
+        outResult = float(iter);
+        return true;
+    }
 
     float cxApprox = refCx + dcx;
     float cyApprox = refCy + dcy;
@@ -791,7 +831,17 @@ float EvalPerturbLdsBla(float dcx, float dcy, uint sharedLim)
         zi2 = zi * zi;
         ++sIter;
     }
-    return max(0.0f, float(sIter) + 1.0f - log2(log(zr2 + zi2) * 0.5f));
+    outResult = max(0.0f, float(sIter) + 1.0f - log2(log(zr2 + zi2) * 0.5f));
+    return true;
+}
+
+float EvalPerturbLdsBla(float dcx, float dcy, uint sharedLim)
+{
+    float dx = 0.0f, dy = 0.0f;
+    uint m = 0u, iter = 0u;
+    float res = -1.0f;
+    StepPerturbLdsBla(dcx, dcy, sharedLim, maxIter, dx, dy, m, iter, res);
+    return res;
 }
 
 [numthreads(32, 16, 1)]
@@ -805,6 +855,116 @@ void CSPrimary(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
     uint py = tid.y + rowOffset;
     if (tid.x >= width || py >= height) return;
     OutIters[(tid.y + outRowOffset) * width + tid.x] = EvalPerturbLdsBla(ColCoords[tid.x * 3u + 1u], RowCoords[py * 3u + 1u], sharedLim);
+}
+
+[numthreads(32, 16, 1)]
+void CSPrimaryStage0(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
+{
+    if (gi == 0u) s_groupCount = 0u;
+    uint sharedLim = min(refLen + 1u, LDS_ORBIT_SIZE);
+    for (uint i = gi; i < sharedLim; i += 512u)
+        s_orbit[i] = OrbitFast[i];
+    GroupMemoryBarrierWithGroupSync();
+
+    uint py = tid.y + rowOffset;
+    bool valid = (tid.x < width && py < height);
+    bool keepAlive = false;
+    uint fullIdx = py * width + tid.x;
+
+    if (valid)
+    {
+        float dx = 0.0f, dy = 0.0f;
+        uint m = 0u, iter = 0u;
+        float res = -1.0f;
+        bool done = StepPerturbLdsBla(ColCoords[tid.x * 3u + 1u], RowCoords[py * 3u + 1u], sharedLim, stageIterLimit, dx, dy, m, iter, res);
+        if (done)
+        {
+            OutIters[fullIdx] = res;
+        }
+        else
+        {
+            GpuPerturbState st;
+            st.x = dx; st.y = dy; st.exp = 0; st.m = m; st.iter = iter;
+            ActiveState[fullIdx] = st;
+            keepAlive = true;
+        }
+    }
+
+    uint localOffset = 0u;
+    if (keepAlive)
+    {
+        InterlockedAdd(s_groupCount, 1u, localOffset);
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    if (gi == 0u && s_groupCount > 0u)
+    {
+        InterlockedAdd(OutActiveCount[0], s_groupCount, s_groupBase);
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    if (keepAlive)
+    {
+        OutActiveIndices[s_groupBase + localOffset] = fullIdx;
+    }
+}
+
+[numthreads(512, 1, 1)]
+void CSPrimaryResume(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
+{
+    if (gi == 0u) s_groupCount = 0u;
+    uint sharedLim = min(refLen + 1u, LDS_ORBIT_SIZE);
+    for (uint i = gi; i < sharedLim; i += 512u)
+        s_orbit[i] = OrbitFast[i];
+    GroupMemoryBarrierWithGroupSync();
+
+    uint activeTotal = SubpixelCountSrv[0];
+    bool valid = (tid.x < activeTotal);
+    bool keepAlive = false;
+    uint pix = 0u;
+
+    if (valid)
+    {
+        pix = SubpixelIndices[tid.x];
+        uint py = pix / width;
+        uint px = pix - py * width;
+        GpuPerturbState st = ActiveState[pix];
+        float dx = st.x, dy = st.y;
+        uint m = st.m, iter = st.iter;
+        float res = -1.0f;
+        bool done = StepPerturbLdsBla(ColCoords[px * 3u + 1u], RowCoords[py * 3u + 1u], sharedLim, stageIterLimit, dx, dy, m, iter, res);
+        if (done)
+        {
+            OutIters[pix] = res;
+        }
+        else
+        {
+            st.x = dx; st.y = dy; st.m = m; st.iter = iter;
+            ActiveState[pix] = st;
+            keepAlive = true;
+        }
+    }
+
+    if (stageIterLimit < maxIter)
+    {
+        uint localOffset = 0u;
+        if (keepAlive)
+        {
+            InterlockedAdd(s_groupCount, 1u, localOffset);
+        }
+        GroupMemoryBarrierWithGroupSync();
+
+        if (gi == 0u && s_groupCount > 0u)
+        {
+            InterlockedAdd(OutActiveCount[0], s_groupCount, s_groupBase);
+        }
+        GroupMemoryBarrierWithGroupSync();
+
+        if (keepAlive)
+        {
+            OutActiveIndices[s_groupBase + localOffset] = pix;
+        }
+    }
 }
 
 [numthreads(512, 1, 1)]

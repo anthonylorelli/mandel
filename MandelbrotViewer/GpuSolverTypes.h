@@ -17,6 +17,7 @@ namespace Mandelbrot::detail
     inline constexpr uint32_t kMovieShutterTapCount = 7;
     inline constexpr size_t kPaletteLutSize = 4096;
     inline constexpr int kZeroExpSentinel = -1073741824;
+    inline constexpr uint32_t kMultiPassMinMaxIter = 2048;
 
     enum class GpuShaderMode
     {
@@ -32,6 +33,15 @@ namespace Mandelbrot::detail
         float weight;
     };
     static_assert(sizeof(GpuPixelSubInfo) == 8);
+
+    struct GpuPerturbState
+    {
+        float x, y;
+        int32_t exp;
+        uint32_t m;
+        uint32_t iter;
+    };
+    static_assert(sizeof(GpuPerturbState) == 20);
 
     struct GpuBlaBlockF32
     {
@@ -53,12 +63,11 @@ namespace Mandelbrot::detail
 
     struct GpuOrbitPointExp
     {
-        float rx, ry;
         float rmx, rmy;
         int32_t rExp;
-        int32_t pad0, pad1, pad2;
+        int32_t pad0;
     };
-    static_assert(sizeof(GpuOrbitPointExp) == 32);
+    static_assert(sizeof(GpuOrbitPointExp) == 16);
 
     struct GpuCoordExp
     {
@@ -91,7 +100,7 @@ namespace Mandelbrot::detail
         uint32_t width, height, maxIter, refLen;
         uint32_t smoothFlag, blaNumLevels, rowOffset, subpixelTotal;
         float blaMaxRadius, refCx, refCy, pad0;
-        uint32_t checkCardioid, outRowOffset, pad3, pad4;
+        uint32_t checkCardioid, outRowOffset, stageIterLimit, pad4;
     };
     static_assert(sizeof(PerturbLdsBlaCb) == 64);
 
@@ -105,7 +114,8 @@ namespace Mandelbrot::detail
         float refCx;
         float refCy;
         uint32_t outRowOffset;
-        float pad1, pad2;
+        uint32_t stageIterLimit;
+        float pad2;
     };
     static_assert(sizeof(PerturbDeepExpCb) == 64);
 

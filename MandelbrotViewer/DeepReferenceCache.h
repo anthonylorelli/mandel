@@ -24,6 +24,13 @@ namespace Mandelbrot
     class DeepReferenceCache
     {
     public:
+        void SetMovieHint(
+            double maxZoom,
+            const BigFloat* anchorX = nullptr,
+            const BigFloat* anchorY = nullptr) noexcept;
+
+        void ClearMovieHint() noexcept;
+
         void Prepare(
             const FractalConfig& config,
             ExecutionMode executionMode,
@@ -38,6 +45,10 @@ namespace Mandelbrot
             const std::atomic<bool>* cancelToken = nullptr);
 
     private:
+        int m_minActiveLimbs{ 0 };
+        bool m_hasPreferredAnchor{ false };
+        BigFloat m_anchorX{};
+        BigFloat m_anchorY{};
         bool m_hasCachedOrbit{ false };
         FractalType m_cachedType{ FractalType::Mandelbrot };
         BigFloat m_cachedRefX{};

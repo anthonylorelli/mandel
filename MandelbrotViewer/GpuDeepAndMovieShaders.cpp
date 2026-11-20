@@ -5,8 +5,11 @@ namespace Mandelbrot::detail
 {
     namespace
     {
-        // Shader 4: Ultra-Deep FloatExp Perturbation + FloatExp BLA (zoom >= 1e32 .. 1e300).
+        // Shader 4: Ultra-Deep FloatExp Perturbation + FloatExp BLA (zoom >= 1e30 .. 1e300).
         constexpr const char* kPerturbDeepExpShaderSrc = R"(
+#define DEEP_LDS_FAST_SIZE 1024u
+#define DEEP_LDS_EXP_SIZE 512u
+
 cbuffer Params : register(b0)
 {
     uint width;
@@ -23,15 +26,15 @@ cbuffer Params : register(b0)
     float refCx;
     float refCy;
     uint outRowOffset;
-    float pad1, pad2;
+    uint stageIterLimit;
+    float pad2;
 };
 
 struct GpuOrbitPointExp
 {
-    float rx, ry;
     float rmx, rmy;
     int rExp;
-    int pad0, pad1, pad2;
+    int pad0;
 };
 
 struct GpuCoordExp
@@ -48,6 +51,14 @@ struct GpuBlaBlockExp
     int aExp, bExp, radExp;
 };
 
+struct GpuPerturbState
+{
+    float x, y;
+    int exp;
+    uint m;
+    uint iter;
+};
+
 Buffer<float2> OrbitFast : register(t0);
 StructuredBuffer<GpuOrbitPointExp> OrbitFull : register(t1);
 StructuredBuffer<GpuCoordExp> ColCoordsExp : register(t2);
@@ -58,6 +69,15 @@ Buffer<uint> SubpixelIndices : register(t6);
 Buffer<uint> SubpixelCountSrv : register(t7);
 RWStructuredBuffer<float> OutIters : register(u0);
 RWStructuredBuffer<float> OutSubpixelsFlat : register(u1);
+RWStructuredBuffer<GpuPerturbState> ActiveState : register(u2);
+RWBuffer<uint> OutActiveIndices : register(u3);
+RWBuffer<uint> OutActiveCount : register(u4);
+
+groupshared float2 s_orbitFast[DEEP_LDS_FAST_SIZE];
+groupshared float2 s_orbitRm[DEEP_LDS_EXP_SIZE];
+groupshared int s_orbitExp[DEEP_LDS_EXP_SIZE];
+groupshared uint s_groupCount;
+groupshared uint s_groupBase;
 
 void Renorm2(inout float mx, inout float my, inout int e)
 {
@@ -82,19 +102,19 @@ void Renorm2(inout float mx, inout float my, inout int e)
 
 void FloatExpAdd(float ax, float ay, int ae, float bx, float by, int be, out float ox, out float oy, out int oe)
 {
-    if (ae <= -100000000) { ox = bx; oy = by; oe = be; return; }
-    if (be <= -100000000) { ox = ax; oy = ay; oe = ae; return; }
+    if (ae <= -100000000) { ox = bx; oy = by; oe = be; Renorm2(ox, oy, oe); return; }
+    if (be <= -100000000) { ox = ax; oy = ay; oe = ae; Renorm2(ox, oy, oe); return; }
     if (ae >= be)
     {
         int diff = ae - be;
-        if (diff >= 30) { ox = ax; oy = ay; oe = ae; return; }
+        if (diff >= 30) { ox = ax; oy = ay; oe = ae; Renorm2(ox, oy, oe); return; }
         float s = asfloat(uint(127 - diff) << 23);
         ox = ax + bx * s; oy = ay + by * s; oe = ae;
     }
     else
     {
         int diff = be - ae;
-        if (diff >= 30) { ox = bx; oy = by; oe = be; return; }
+        if (diff >= 30) { ox = bx; oy = by; oe = be; Renorm2(ox, oy, oe); return; }
         float s = asfloat(uint(127 - diff) << 23);
         ox = bx + ax * s; oy = by + ay * s; oe = be;
     }
@@ -109,11 +129,16 @@ bool FloatExpLess(float dmx, float dmy, int de, float radMant, int radExp)
     if (diff < -1) return true;
     if (diff > 1) return false;
     float s = asfloat(uint(127 + diff) << 23);
-    return sqrt(dmx * dmx + dmy * dmy) * s < radMant;
+    return (dmx * dmx + dmy * dmy) * (s * s) < (radMant * radMant);
 }
 
-float EvalDeepExp(GpuCoordExp cx, GpuCoordExp cy)
+bool StepDeepExp(
+    GpuCoordExp cx, GpuCoordExp cy, uint fastLim, uint expLim, uint iterLimit,
+    inout float dmx, inout float dmy, inout int dExp, inout uint m, inout uint iter,
+    out float outResult)
 {
+    outResult = -1.0f;
+
     float dcMx = 0.0f, dcMy = 0.0f;
     int dcExp = -1073741824;
     if (cx.exp > -100000000 || cy.exp > -100000000)
@@ -130,26 +155,35 @@ float EvalDeepExp(GpuCoordExp cx, GpuCoordExp cy)
 
     float dcxF = (dcExp > -126) ? (dcMx * asfloat(uint(clamp(127 + dcExp, 1, 254)) << 23)) : 0.0f;
     float dcyF = (dcExp > -126) ? (dcMy * asfloat(uint(clamp(127 + dcExp, 1, 254)) << 23)) : 0.0f;
+    float blaMaxRadF = (useBla != 0u && blaMaxRadExp >= -120 && blaMaxRadExp <= 10)
+        ? (blaMaxRadMant * asfloat(uint(127 + blaMaxRadExp) << 23))
+        : 0.0f;
+    float fastRebaseExitFloor = max(blaMaxRadF, 1e-12f);
 
-    uint m = 0u;
-    uint iter = 0u;
+    uint stopIter = min(iterLimit, maxIter);
     float escZx = 0.0f, escZy = 0.0f;
-    float dmx = 0.0f, dmy = 0.0f;
-    int dExp = -1073741824;
+    bool escaped = false;
+
+    // Exact cycle check on m == 0 rebases (zero instructions inside tight inner loops)
+    float chkMx = 2.0f, chkMy = 2.0f;
+    int chkExp = -1073741823;
+    uint rebasePeriod = 4u, rebasesSince = 0u;
 
     [loop]
-    while (iter < maxIter)
+    while (iter < stopIter)
     {
-        if (dExp >= -45 && dExp <= 10 && m > 0u)
+        // Only enter the un-accelerated float32 fast loop once |dz| is above all BLA block radii.
+        if (dExp >= -45 && dExp <= 10 && m > 0u &&
+            (useBla == 0u || !FloatExpLess(dmx, dmy, dExp, blaMaxRadMant, blaMaxRadExp)))
         {
             float initScale = asfloat(uint(127 + dExp) << 23);
             float dx = dmx * initScale;
             float dy = dmy * initScale;
-            bool escaped = false;
+            bool leftFast = false;
             [loop]
-            while (iter < maxIter)
+            while (iter < stopIter)
             {
-                float2 r = OrbitFast[m];
+                float2 r = (m < fastLim) ? s_orbitFast[m] : OrbitFast[m];
                 float rx = r.x, ry = r.y;
                 float zx = rx + dx;
                 float zy = ry + dy;
@@ -159,10 +193,11 @@ float EvalDeepExp(GpuCoordExp cx, GpuCoordExp cy)
                 if (m == refLen || (m > 0u && mod2 < dz2))
                 {
                     dx = zx; dy = zy; m = 0u; rx = 0.0f; ry = 0.0f;
-                    if (max(abs(dx), abs(dy)) < 1e-12f)
+                    if (max(abs(dx), abs(dy)) < fastRebaseExitFloor)
                     {
-                        dmx = dx * 1.0842022e19f; dmy = dy * 1.0842022e19f; dExp = -63;
+                        dmx = dx; dmy = dy; dExp = 0;
                         Renorm2(dmx, dmy, dExp);
+                        leftFast = true;
                         break;
                     }
                 }
@@ -175,30 +210,62 @@ float EvalDeepExp(GpuCoordExp cx, GpuCoordExp cy)
                 ++iter;
                 if (max(abs(dx), abs(dy)) < 2.842171e-14f)
                 {
-                    dmx = dx * 1.0842022e19f; dmy = dy * 1.0842022e19f; dExp = -63;
+                    dmx = dx; dmy = dy; dExp = 0;
                     Renorm2(dmx, dmy, dExp);
+                    leftFast = true;
                     break;
                 }
             }
-            if (escaped || iter >= maxIter) break;
+            if (escaped) break;
+            if (!leftFast)
+            {
+                // Stage limit reached while inside float32 fast loop: pack back into FloatExp state.
+                dmx = dx; dmy = dy; dExp = 0;
+                Renorm2(dmx, dmy, dExp);
+                break;
+            }
             continue;
         }
 
-        GpuOrbitPointExp op = OrbitFull[m];
-        if (op.rExp >= 2)
+        float rmx, rmy;
+        int rExp;
+        if (m < expLim)
         {
+            float2 rm = s_orbitRm[m];
+            rmx = rm.x;
+            rmy = rm.y;
+            rExp = s_orbitExp[m];
+        }
+        else
+        {
+            GpuOrbitPointExp op = OrbitFull[m];
+            rmx = op.rmx;
+            rmy = op.rmy;
+            rExp = op.rExp;
+        }
+
+        if (dExp > 10)
+        {
+            escZx = dmx * 1024.0f;
+            escZy = dmy * 1024.0f;
+            escaped = true;
+            break;
+        }
+        if (rExp >= 2 || dExp >= 2)
+        {
+            float rScale = (rExp >= -125 && rExp <= 10) ? asfloat(uint(127 + rExp) << 23) : 0.0f;
             float dScale = (dExp >= -125 && dExp <= 10) ? asfloat(uint(127 + dExp) << 23) : 0.0f;
-            float zx = op.rx + dmx * dScale;
-            float zy = op.ry + dmy * dScale;
-            if (zx * zx + zy * zy > 16.0f) { escZx = zx; escZy = zy; break; }
+            float zx = rmx * rScale + dmx * dScale;
+            float zy = rmy * rScale + dmy * dScale;
+            if (zx * zx + zy * zy > 16.0f) { escZx = zx; escZy = zy; escaped = true; break; }
         }
 
         bool doRebase = (m == refLen);
         float zmx = 0.0f, zmy = 0.0f;
         int zExp = -1073741824;
-        if (doRebase || (m > 0u && op.rExp <= dExp + 2))
+        if (doRebase || (m > 0u && rExp <= dExp + 2))
         {
-            FloatExpAdd(op.rmx, op.rmy, op.rExp, dmx, dmy, dExp, zmx, zmy, zExp);
+            FloatExpAdd(rmx, rmy, rExp, dmx, dmy, dExp, zmx, zmy, zExp);
             if (!doRebase && m > 0u)
             {
                 int cExp = max(zExp, dExp);
@@ -215,10 +282,21 @@ float EvalDeepExp(GpuCoordExp cx, GpuCoordExp cy)
         if (doRebase)
         {
             dmx = zmx; dmy = zmy; dExp = zExp; m = 0u;
-            op.rx = 0.0f; op.ry = 0.0f; op.rmx = 0.0f; op.rmy = 0.0f; op.rExp = -1073741824;
+            rmx = 0.0f; rmy = 0.0f; rExp = -1073741824;
+            if (dExp == chkExp && dmx == chkMx && dmy == chkMy)
+            {
+                iter = maxIter;
+                return true;
+            }
+            if (++rebasesSince >= rebasePeriod)
+            {
+                chkMx = dmx; chkMy = dmy; chkExp = dExp;
+                rebasesSince = 0u;
+                if (rebasePeriod < 256u) rebasePeriod <<= 1u;
+            }
         }
 
-        if (useBla != 0u && m >= 1u && (maxIter - iter) >= 4u && ((m - 1u) & 3u) == 0u && m + 4u <= refLen &&
+        if (useBla != 0u && m >= 1u && (stopIter - iter) >= 4u && ((m - 1u) & 3u) == 0u && m + 4u <= refLen &&
             FloatExpLess(dmx, dmy, dExp, blaMaxRadMant, blaMaxRadExp))
         {
             uint start = m - 1u;
@@ -228,7 +306,7 @@ float EvalDeepExp(GpuCoordExp cx, GpuCoordExp cy)
             for (int lv = int(top); lv >= 2; --lv)
             {
                 uint len = 1u << uint(lv);
-                if (len > (maxIter - iter) || m + len > refLen) continue;
+                if (len > (stopIter - iter) || m + len > refLen) continue;
                 uint2 meta = BlaMeta[lv];
                 uint idx = start >> uint(lv);
                 if (idx >= meta.y) continue;
@@ -237,13 +315,11 @@ float EvalDeepExp(GpuCoordExp cx, GpuCoordExp cy)
 
                 float azx = blk.ar * dmx - blk.ai * dmy;
                 float azy = blk.ar * dmy + blk.ai * dmx;
-                int azExp = (dExp > -100000000) ? (blk.aExp + dExp) : -1073741824;
-                Renorm2(azx, azy, azExp);
+                int azExp = (dExp > -100000000 && blk.aExp > -100000000) ? (blk.aExp + dExp) : -1073741824;
 
                 float bcx = blk.br * dcMx - blk.bi * dcMy;
                 float bcy = blk.br * dcMy + blk.bi * dcMx;
-                int bcExp = (dcExp > -100000000) ? (blk.bExp + dcExp) : -1073741824;
-                Renorm2(bcx, bcy, bcExp);
+                int bcExp = (dcExp > -100000000 && blk.bExp > -100000000) ? (blk.bExp + dcExp) : -1073741824;
 
                 FloatExpAdd(azx, azy, azExp, bcx, bcy, bcExp, dmx, dmy, dExp);
                 skipped = len;
@@ -254,21 +330,29 @@ float EvalDeepExp(GpuCoordExp cx, GpuCoordExp cy)
 
         float smx = dmx, smy = dmy;
         int sExp = dExp;
-        if (op.rExp > -100000000)
+        if (rExp > -100000000)
         {
-            FloatExpAdd(op.rmx, op.rmy, op.rExp + 1, dmx, dmy, dExp, smx, smy, sExp);
+            FloatExpAdd(rmx, rmy, rExp + 1, dmx, dmy, dExp, smx, smy, sExp);
         }
         float prodX = smx * dmx - smy * dmy;
         float prodY = smx * dmy + smy * dmx;
         int prodExp = (sExp > -100000000 && dExp > -100000000) ? (sExp + dExp) : -1073741824;
-        Renorm2(prodX, prodY, prodExp);
         FloatExpAdd(prodX, prodY, prodExp, dcMx, dcMy, dcExp, dmx, dmy, dExp);
         ++m;
         ++iter;
     }
 
-    if (iter >= maxIter) return -1.0f;
-    if (smoothFlag == 0u) return float(iter);
+    if (!escaped)
+    {
+        if (iter >= maxIter) return true;
+        return false;
+    }
+
+    if (smoothFlag == 0u)
+    {
+        outResult = float(iter);
+        return true;
+    }
 
     float zr = escZx, zi = escZy;
     float zr2 = zr * zr, zi2 = zi * zi;
@@ -281,20 +365,163 @@ float EvalDeepExp(GpuCoordExp cx, GpuCoordExp cy)
         zi2 = zi * zi;
         ++sIter;
     }
-    return max(0.0f, float(sIter) + 1.0f - log2(log(zr2 + zi2) * 0.5f));
+    outResult = max(0.0f, float(sIter) + 1.0f - log2(log(zr2 + zi2) * 0.5f));
+    return true;
+}
+
+float EvalDeepExp(GpuCoordExp cx, GpuCoordExp cy, uint fastLim, uint expLim)
+{
+    float dmx = 0.0f, dmy = 0.0f;
+    int dExp = -1073741824;
+    uint m = 0u, iter = 0u;
+    float res = -1.0f;
+    StepDeepExp(cx, cy, fastLim, expLim, maxIter, dmx, dmy, dExp, m, iter, res);
+    return res;
+}
+
+void LoadDeepLds(uint gi, out uint fastLim, out uint expLim)
+{
+    fastLim = min(refLen + 1u, DEEP_LDS_FAST_SIZE);
+    expLim = min(refLen + 1u, DEEP_LDS_EXP_SIZE);
+    for (uint i = gi; i < fastLim; i += 256u)
+        s_orbitFast[i] = OrbitFast[i];
+    for (uint j = gi; j < expLim; j += 256u)
+    {
+        GpuOrbitPointExp pt = OrbitFull[j];
+        s_orbitRm[j] = float2(pt.rmx, pt.rmy);
+        s_orbitExp[j] = pt.rExp;
+    }
 }
 
 [numthreads(16, 16, 1)]
-void CSPrimary(uint3 tid : SV_DispatchThreadID)
+void CSPrimary(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
 {
+    uint fastLim, expLim;
+    LoadDeepLds(gi, fastLim, expLim);
+    GroupMemoryBarrierWithGroupSync();
+
     uint py = tid.y + rowOffset;
     if (tid.x >= width || py >= height) return;
-    OutIters[(tid.y + outRowOffset) * width + tid.x] = EvalDeepExp(ColCoordsExp[tid.x * 3u + 1u], RowCoordsExp[py * 3u + 1u]);
+    OutIters[(tid.y + outRowOffset) * width + tid.x] = EvalDeepExp(ColCoordsExp[tid.x * 3u + 1u], RowCoordsExp[py * 3u + 1u], fastLim, expLim);
+}
+
+[numthreads(16, 16, 1)]
+void CSPrimaryStage0(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
+{
+    if (gi == 0u) s_groupCount = 0u;
+    uint fastLim, expLim;
+    LoadDeepLds(gi, fastLim, expLim);
+    GroupMemoryBarrierWithGroupSync();
+
+    uint py = tid.y + rowOffset;
+    bool valid = (tid.x < width && py < height);
+    bool keepAlive = false;
+    uint fullIdx = py * width + tid.x;
+
+    if (valid)
+    {
+        float dmx = 0.0f, dmy = 0.0f;
+        int dExp = -1073741824;
+        uint m = 0u, iter = 0u;
+        float res = -1.0f;
+        bool done = StepDeepExp(ColCoordsExp[tid.x * 3u + 1u], RowCoordsExp[py * 3u + 1u], fastLim, expLim, stageIterLimit, dmx, dmy, dExp, m, iter, res);
+        if (done)
+        {
+            OutIters[fullIdx] = res;
+        }
+        else
+        {
+            GpuPerturbState st;
+            st.x = dmx; st.y = dmy; st.exp = dExp; st.m = m; st.iter = iter;
+            ActiveState[fullIdx] = st;
+            keepAlive = true;
+        }
+    }
+
+    uint localOffset = 0u;
+    if (keepAlive)
+    {
+        InterlockedAdd(s_groupCount, 1u, localOffset);
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    if (gi == 0u && s_groupCount > 0u)
+    {
+        InterlockedAdd(OutActiveCount[0], s_groupCount, s_groupBase);
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    if (keepAlive)
+    {
+        OutActiveIndices[s_groupBase + localOffset] = fullIdx;
+    }
 }
 
 [numthreads(256, 1, 1)]
-void CSSubpixels(uint3 tid : SV_DispatchThreadID)
+void CSPrimaryResume(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
 {
+    if (gi == 0u) s_groupCount = 0u;
+    uint fastLim, expLim;
+    LoadDeepLds(gi, fastLim, expLim);
+    GroupMemoryBarrierWithGroupSync();
+
+    uint activeTotal = SubpixelCountSrv[0];
+    bool valid = (tid.x < activeTotal);
+    bool keepAlive = false;
+    uint pix = 0u;
+
+    if (valid)
+    {
+        pix = SubpixelIndices[tid.x];
+        uint py = pix / width;
+        uint px = pix - py * width;
+        GpuPerturbState st = ActiveState[pix];
+        float dmx = st.x, dmy = st.y;
+        int dExp = st.exp;
+        uint m = st.m, iter = st.iter;
+        float res = -1.0f;
+        bool done = StepDeepExp(ColCoordsExp[px * 3u + 1u], RowCoordsExp[py * 3u + 1u], fastLim, expLim, stageIterLimit, dmx, dmy, dExp, m, iter, res);
+        if (done)
+        {
+            OutIters[pix] = res;
+        }
+        else
+        {
+            st.x = dmx; st.y = dmy; st.exp = dExp; st.m = m; st.iter = iter;
+            ActiveState[pix] = st;
+            keepAlive = true;
+        }
+    }
+
+    if (stageIterLimit < maxIter)
+    {
+        uint localOffset = 0u;
+        if (keepAlive)
+        {
+            InterlockedAdd(s_groupCount, 1u, localOffset);
+        }
+        GroupMemoryBarrierWithGroupSync();
+
+        if (gi == 0u && s_groupCount > 0u)
+        {
+            InterlockedAdd(OutActiveCount[0], s_groupCount, s_groupBase);
+        }
+        GroupMemoryBarrierWithGroupSync();
+
+        if (keepAlive)
+        {
+            OutActiveIndices[s_groupBase + localOffset] = pix;
+        }
+    }
+}
+
+[numthreads(256, 1, 1)]
+void CSSubpixels(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
+{
+    uint fastLim, expLim;
+    LoadDeepLds(gi, fastLim, expLim);
+    GroupMemoryBarrierWithGroupSync();
+
     uint activeTotal = (subpixelTotal == 0xFFFFFFFFu) ? (SubpixelCountSrv[0] * 4u) : subpixelTotal;
     uint sIdx = tid.x;
     if (sIdx >= activeTotal) return;
@@ -304,7 +531,7 @@ void CSSubpixels(uint3 tid : SV_DispatchThreadID)
     uint px = pix - py * width;
     uint kx = (corner & 1u) ? 2u : 0u;
     uint ky = (corner & 2u) ? 2u : 0u;
-    OutSubpixelsFlat[sIdx] = EvalDeepExp(ColCoordsExp[px * 3u + kx], RowCoordsExp[py * 3u + ky]);
+    OutSubpixelsFlat[sIdx] = EvalDeepExp(ColCoordsExp[px * 3u + kx], RowCoordsExp[py * 3u + ky], fastLim, expLim);
 }
 )";
 
@@ -447,6 +674,15 @@ void CSBuildIndirectArgs(uint3 tid : SV_DispatchThreadID)
 {
     uint subTotal = InSubCounter[0] * 4u;
     OutSubpixelIndices[0] = (subTotal > 0u) ? ((subTotal + subGroupThreads - 1u) / subGroupThreads) : 0u;
+    OutSubpixelIndices[1] = 1u;
+    OutSubpixelIndices[2] = 1u;
+}
+
+[numthreads(1, 1, 1)]
+void CSBuildActiveIndirectArgs(uint3 tid : SV_DispatchThreadID)
+{
+    uint activeTotal = InSubCounter[0];
+    OutSubpixelIndices[0] = (activeTotal > 0u) ? ((activeTotal + subGroupThreads - 1u) / subGroupThreads) : 0u;
     OutSubpixelIndices[1] = 1u;
     OutSubpixelIndices[2] = 1u;
 }

@@ -6,6 +6,44 @@
 
 namespace Mandelbrot
 {
+    void DeepReferenceCache::SetMovieHint(
+        double maxZoom,
+        const BigFloat* anchorX,
+        const BigFloat* anchorY) noexcept
+    {
+        if (std::isfinite(maxZoom) && maxZoom >= 16.0)
+        {
+            const double clampedMax = std::clamp(maxZoom, MinZoom, MaxZoom);
+            const int rawLimbs = static_cast<int>(std::ceil((std::log2(clampedMax) + 96.0) / 32.0));
+            m_minActiveLimbs = std::clamp((rawLimbs + 1) & ~1, 4, BigFloat::N);
+        }
+        else
+        {
+            m_minActiveLimbs = 0;
+        }
+
+        if (anchorX && anchorY)
+        {
+            m_hasPreferredAnchor = true;
+            m_anchorX = *anchorX;
+            m_anchorY = *anchorY;
+        }
+        else
+        {
+            m_hasPreferredAnchor = false;
+            m_anchorX.SetZero();
+            m_anchorY.SetZero();
+        }
+    }
+
+    void DeepReferenceCache::ClearMovieHint() noexcept
+    {
+        m_minActiveLimbs = 0;
+        m_hasPreferredAnchor = false;
+        m_anchorX.SetZero();
+        m_anchorY.SetZero();
+    }
+
     void DeepReferenceCache::Prepare(
         const FractalConfig& config,
         ExecutionMode executionMode,
@@ -57,7 +95,7 @@ namespace Mandelbrot
         const double stepY = spanY / static_cast<double>(height);
 
         const int rawLimbs = static_cast<int>(std::ceil((std::log2(clampedZoom) + 96.0) / 32.0));
-        const int activeLimbs = std::clamp((rawLimbs + 1) & ~1, 4, BigFloat::N);
+        const int activeLimbs = std::clamp(std::max((rawLimbs + 1) & ~1, m_minActiveLimbs), 4, BigFloat::N);
 
         constexpr double bailoutRadius2 = 16.0;
         const double centerPosX = (static_cast<double>(width) - 1.0) * 0.5;
@@ -114,46 +152,46 @@ namespace Mandelbrot
                 const BigFloat Zx2 = ioZx.Sqr(activeLimbs);
                 const BigFloat Zy2 = ioZy.Sqr(activeLimbs);
                 const BigFloat Zxy = ioZx.Mul(ioZy, activeLimbs);
-                const BigFloat twoZxy = Zxy + Zxy;
+                const BigFloat twoZxy = Zxy.Add(Zxy, activeLimbs);
 
                 if (type == FractalType::Mandelbrot)
                 {
-                    ioZy = twoZxy + cRefY;
-                    ioZx = Zx2 - Zy2 + cRefX;
+                    ioZy = twoZxy.Add(cRefY, activeLimbs);
+                    ioZx = Zx2.Sub(Zy2, activeLimbs).Add(cRefX, activeLimbs);
                 }
                 else if (type == FractalType::BurningShip)
                 {
-                    ioZy = -twoZxy.Abs() + cRefY;
-                    ioZx = Zx2 - Zy2 + cRefX;
+                    ioZy = (-twoZxy.Abs()).Add(cRefY, activeLimbs);
+                    ioZx = Zx2.Sub(Zy2, activeLimbs).Add(cRefX, activeLimbs);
                 }
                 else if (type == FractalType::Tricorn)
                 {
-                    ioZy = -twoZxy + cRefY;
-                    ioZx = Zx2 - Zy2 + cRefX;
+                    ioZy = (-twoZxy).Add(cRefY, activeLimbs);
+                    ioZx = Zx2.Sub(Zy2, activeLimbs).Add(cRefX, activeLimbs);
                 }
                 else if (type == FractalType::Celtic)
                 {
-                    ioZy = twoZxy + cRefY;
-                    ioZx = (Zx2 - Zy2).Abs() + cRefX;
+                    ioZy = twoZxy.Add(cRefY, activeLimbs);
+                    ioZx = Zx2.Sub(Zy2, activeLimbs).Abs().Add(cRefX, activeLimbs);
                 }
                 else if (type == FractalType::Buffalo)
                 {
-                    ioZy = -twoZxy.Abs() + cRefY;
-                    ioZx = (Zx2 - Zy2).Abs() + cRefX;
+                    ioZy = (-twoZxy.Abs()).Add(cRefY, activeLimbs);
+                    ioZx = Zx2.Sub(Zy2, activeLimbs).Abs().Add(cRefX, activeLimbs);
                 }
                 else if (type == FractalType::CubicMultibrot)
                 {
-                    const BigFloat threeZx2 = Zx2 + Zx2 + Zx2;
-                    const BigFloat threeZy2 = Zy2 + Zy2 + Zy2;
-                    const BigFloat nextZx = ioZx.Mul(Zx2 - threeZy2, activeLimbs) + cRefX;
-                    const BigFloat nextZy = ioZy.Mul(threeZx2 - Zy2, activeLimbs) + cRefY;
+                    const BigFloat threeZx2 = Zx2.Add(Zx2, activeLimbs).Add(Zx2, activeLimbs);
+                    const BigFloat threeZy2 = Zy2.Add(Zy2, activeLimbs).Add(Zy2, activeLimbs);
+                    const BigFloat nextZx = ioZx.Mul(Zx2.Sub(threeZy2, activeLimbs), activeLimbs).Add(cRefX, activeLimbs);
+                    const BigFloat nextZy = ioZy.Mul(threeZx2.Sub(Zy2, activeLimbs), activeLimbs).Add(cRefY, activeLimbs);
                     ioZx = nextZx;
                     ioZy = nextZy;
                 }
                 else // FractalType::Phoenix
                 {
-                    const BigFloat nextZx = Zx2 - Zy2 + phoenixC - prevZx.Mul(phoenixHalf, activeLimbs);
-                    const BigFloat nextZy = twoZxy - prevZy.Mul(phoenixHalf, activeLimbs);
+                    const BigFloat nextZx = Zx2.Sub(Zy2, activeLimbs).Add(phoenixC, activeLimbs).Sub(prevZx.Mul(phoenixHalf, activeLimbs), activeLimbs);
+                    const BigFloat nextZy = twoZxy.Sub(prevZy.Mul(phoenixHalf, activeLimbs), activeLimbs);
                     prevZx = ioZx;
                     prevZy = ioZy;
                     ioZx = nextZx;
@@ -161,6 +199,11 @@ namespace Mandelbrot
                 }
             }
             return len;
+        };
+
+        auto extendTarget = [](int iterBudget) noexcept -> int
+        {
+            return std::max(iterBudget + 256, iterBudget + iterBudget / 8);
         };
 
         double refPosX = centerPosX;
@@ -187,7 +230,7 @@ namespace Mandelbrot
             {
                 if (maxIter > m_cachedMaxIter)
                 {
-                    const int targetExtendIter = maxIter + 32;
+                    const int targetExtendIter = extendTarget(maxIter);
                     bool escapedNow = false;
                     m_cachedRefLen = stepBigFloatOrbit(
                         m_cachedRefX,
@@ -198,6 +241,11 @@ namespace Mandelbrot
                         m_cachedEndZy,
                         m_cachedOrbit,
                         escapedNow);
+                    if (cancelToken && cancelToken->load(std::memory_order_relaxed))
+                    {
+                        m_hasCachedOrbit = false;
+                        return false;
+                    }
                     m_cachedMaxIter = targetExtendIter;
                     m_cachedEscaped = escapedNow;
                     ++m_cachedOrbitVersion;
@@ -207,7 +255,9 @@ namespace Mandelbrot
                 {
                     refPosX = centerPosX + diffX / stepX;
                     refPosY = centerPosY - diffY / stepY;
-                    bestRefLen = maxIter;
+                    bestRefLen = (!m_cachedEscaped && m_cachedRefLen >= maxIter && m_cachedRefLen <= maxIter * 2 + 512)
+                        ? m_cachedRefLen
+                        : maxIter;
                     reusedUnescapedCache = true;
                 }
             }
@@ -215,8 +265,8 @@ namespace Mandelbrot
                      std::abs(diffX) <= spanX * 0.45 &&
                      std::abs(diffY) <= cacheSpanY * 0.45 &&
                      m_cachedSearchZoom > 0.0 &&
-                     clampedZoom >= m_cachedSearchZoom * 0.65 &&
-                     clampedZoom <= m_cachedSearchZoom * 1.50)
+                     clampedZoom >= m_cachedSearchZoom * 0.50 &&
+                     clampedZoom <= m_cachedSearchZoom * 2.00)
             {
                 // Reuse the best reference orbit already found for this exterior neighborhood across consecutive
                 // zoom frames and bands so we don't re-run the 8x8 search and 1024-bit BigFloat orbits.
@@ -234,6 +284,10 @@ namespace Mandelbrot
             BigFloat bestEndZx(0.0);
             BigFloat bestEndZy(0.0);
             bool bestEscaped = false;
+            const int initTargetMaxIter = (m_minActiveLimbs > 0 && maxIter >= 64)
+                ? extendTarget(maxIter)
+                : maxIter;
+            int bestComputedMaxIter = initTargetMaxIter;
 
             const double cachedDiffX = m_hasCachedOrbit ? (m_cachedRefX - centerX).ToDouble() : 1e300;
             const double cachedDiffY = m_hasCachedOrbit ? (m_cachedRefY - centerY).ToDouble() : 1e300;
@@ -249,7 +303,7 @@ namespace Mandelbrot
             {
                 if (!m_cachedEscaped && maxIter > m_cachedMaxIter)
                 {
-                    const int targetExtendIter = maxIter + 32;
+                    const int targetExtendIter = extendTarget(maxIter);
                     m_cachedRefLen = stepBigFloatOrbit(
                         m_cachedRefX,
                         m_cachedRefY,
@@ -259,6 +313,11 @@ namespace Mandelbrot
                         m_cachedEndZy,
                         m_cachedOrbit,
                         m_cachedEscaped);
+                    if (cancelToken && cancelToken->load(std::memory_order_relaxed))
+                    {
+                        m_hasCachedOrbit = false;
+                        return false;
+                    }
                     m_cachedMaxIter = targetExtendIter;
                     ++m_cachedOrbitVersion;
                 }
@@ -266,29 +325,49 @@ namespace Mandelbrot
                 bestRefCy = m_cachedRefY;
                 refPosX = centerPosX + cachedDiffX / stepX;
                 refPosY = centerPosY - cachedDiffY / stepY;
-                bestRefLen = std::min(m_cachedRefLen, maxIter);
+                bestRefLen = (!m_cachedEscaped && m_cachedRefLen >= maxIter && m_cachedRefLen <= maxIter * 2 + 512)
+                    ? m_cachedRefLen
+                    : std::min(m_cachedRefLen, maxIter);
                 bestEndZx = m_cachedEndZx;
                 bestEndZy = m_cachedEndZy;
                 bestEscaped = (bestRefLen < maxIter) && m_cachedEscaped;
+                bestComputedMaxIter = m_cachedMaxIter;
             }
             else
             {
+                // For fixed-target zoom movies, anchor the reference orbit directly on the final
+                // zoom target once it lies inside the viewport so it stays reusable for all deeper frames.
+                if (m_hasPreferredAnchor)
+                {
+                    const double anchorDiffX = (m_anchorX - centerX).ToDouble();
+                    const double anchorDiffY = (m_anchorY - centerY).ToDouble();
+                    if (std::abs(anchorDiffX) <= spanX * 0.45 && std::abs(anchorDiffY) <= spanY * 0.45)
+                    {
+                        bestRefCx = m_anchorX;
+                        bestRefCy = m_anchorY;
+                        refPosX = centerPosX + anchorDiffX / stepX;
+                        refPosY = centerPosY - anchorDiffY / stepY;
+                    }
+                }
+
                 bestEndZx.SetZero();
                 bestEndZy.SetZero();
                 bestRefLen = stepBigFloatOrbit(
-                    centerX,
-                    centerY,
+                    bestRefCx,
+                    bestRefCy,
                     0,
-                    maxIter,
+                    initTargetMaxIter,
                     bestEndZx,
                     bestEndZy,
                     m_cachedOrbit,
                     bestEscaped);
                 ++m_cachedOrbitVersion;
+                bestComputedMaxIter = initTargetMaxIter;
             }
 
             if (cancelToken && cancelToken->load(std::memory_order_relaxed))
             {
+                m_hasCachedOrbit = false;
                 return false;
             }
 
@@ -296,28 +375,78 @@ namespace Mandelbrot
             // (up to 2 upgrades) to find a reference pixel genuinely inside the |z| < 2 disk (mod2 < 4.0) at m == bestRefLen.
             if (bestRefLen < maxIter && width >= 4 && height >= 4)
             {
-                std::vector<ComplexOrbitPoint> candidateOrbit(static_cast<size_t>(maxIter) + 1);
+                std::vector<ComplexOrbitPoint> candidateOrbit(static_cast<size_t>(initTargetMaxIter) + 1);
                 constexpr int gridN = 8;
+                constexpr int gridTotal = gridN * gridN;
 
                 for (int attempt = 0; attempt < 2 && bestRefLen < maxIter; ++attempt)
                 {
-                    int nextCandPx = -1;
-                    int nextCandPy = -1;
-                    double minMod2AtRefEnd = 4.0;
-                    const ComplexOrbitPoint* orbitPtr = m_cachedOrbit.data();
-
-                    for (int gy = 0; gy < gridN; ++gy)
+                    double candMod2[gridTotal];
+                    int candPxArr[gridTotal];
+                    int candPyArr[gridTotal];
+                    for (int g = 0; g < gridTotal; ++g)
                     {
-                        if (cancelToken && cancelToken->load(std::memory_order_relaxed)) return false;
+                        candMod2[g] = 4.0;
+                        candPxArr[g] = -1;
+                        candPyArr[g] = -1;
+                    }
+                    const ComplexOrbitPoint* orbitPtr = m_cachedOrbit.data();
+                    const int curRefLen = bestRefLen;
+
+                    #pragma omp parallel for schedule(dynamic, 1)
+                    for (int g = 0; g < gridTotal; ++g)
+                    {
+                        if (cancelToken && cancelToken->load(std::memory_order_relaxed)) continue;
+                        const int gy = g / gridN;
+                        const int gx = g % gridN;
                         const int spy = ((2 * gy + 1) * height) / (2 * gridN);
+                        const int spx = ((2 * gx + 1) * width) / (2 * gridN);
                         const double dcy = (refPosY - static_cast<double>(spy)) * stepY;
+                        const double dcx = (static_cast<double>(spx) - refPosX) * stepX;
+                        if (dcx == 0.0 && dcy == 0.0) continue;
 
-                        for (int gx = 0; gx < gridN; ++gx)
+                        if (type == FractalType::Mandelbrot)
                         {
-                            const int spx = ((2 * gx + 1) * width) / (2 * gridN);
-                            const double dcx = (static_cast<double>(spx) - refPosX) * stepX;
-                            if (dcx == 0.0 && dcy == 0.0) continue;
-
+                            double dx = 0.0, dy = 0.0;
+                            int m = 0;
+                            int iter = 0;
+                            while (iter < maxIter)
+                            {
+                                double rx = orbitPtr[m].x;
+                                double ry = orbitPtr[m].y;
+                                const double zx = rx + dx;
+                                const double zy = ry + dy;
+                                const double mod2 = zx * zx + zy * zy;
+                                if (mod2 > bailoutRadius2) break;
+                                if (m == curRefLen)
+                                {
+                                    if (mod2 < 4.0)
+                                    {
+                                        candMod2[g] = mod2;
+                                        candPxArr[g] = spx;
+                                        candPyArr[g] = spy;
+                                    }
+                                    break;
+                                }
+                                const double dz2 = dx * dx + dy * dy;
+                                if (m > 0 && mod2 < dz2)
+                                {
+                                    dx = zx;
+                                    dy = zy;
+                                    m = 0;
+                                    continue;
+                                }
+                                const double sx = rx + zx;
+                                const double sy = ry + zy;
+                                const double nextDx = sx * dx - sy * dy + dcx;
+                                dy = sx * dy + sy * dx + dcy;
+                                dx = nextDx;
+                                ++m;
+                                ++iter;
+                            }
+                        }
+                        else
+                        {
                             double dx = (type == FractalType::Phoenix) ? dcy : 0.0;
                             double dy = (type == FractalType::Phoenix) ? dcx : 0.0;
                             double prevDx = 0.0;
@@ -338,13 +467,13 @@ namespace Mandelbrot
                                     break;
                                 }
 
-                                if (m == bestRefLen)
+                                if (m == curRefLen)
                                 {
-                                    if (mod2 < minMod2AtRefEnd)
+                                    if (mod2 < 4.0)
                                     {
-                                        minMod2AtRefEnd = mod2;
-                                        nextCandPx = spx;
-                                        nextCandPy = spy;
+                                        candMod2[g] = mod2;
+                                        candPxArr[g] = spx;
+                                        candPyArr[g] = spy;
                                     }
                                     break;
                                 }
@@ -367,6 +496,24 @@ namespace Mandelbrot
                         }
                     }
 
+                    if (cancelToken && cancelToken->load(std::memory_order_relaxed))
+                    {
+                        return false;
+                    }
+
+                    int nextCandPx = -1;
+                    int nextCandPy = -1;
+                    double minMod2AtRefEnd = 4.0;
+                    for (int g = 0; g < gridTotal; ++g)
+                    {
+                        if (candPxArr[g] >= 0 && candMod2[g] < minMod2AtRefEnd)
+                        {
+                            minMod2AtRefEnd = candMod2[g];
+                            nextCandPx = candPxArr[g];
+                            nextCandPy = candPyArr[g];
+                        }
+                    }
+
                     if (nextCandPx < 0)
                     {
                         break;
@@ -384,7 +531,7 @@ namespace Mandelbrot
                         candCx,
                         candCy,
                         0,
-                        maxIter,
+                        initTargetMaxIter,
                         candEndZx,
                         candEndZy,
                         candidateOrbit,
@@ -407,6 +554,7 @@ namespace Mandelbrot
                         bestEndZx = candEndZx;
                         bestEndZy = candEndZy;
                         bestEscaped = candEscaped;
+                        bestComputedMaxIter = initTargetMaxIter;
                     }
                     else
                     {
@@ -423,7 +571,7 @@ namespace Mandelbrot
             m_cachedEndZy = bestEndZy;
             m_cachedActiveLimbs = activeLimbs;
             m_cachedRefLen = bestRefLen;
-            m_cachedMaxIter = std::max(maxIter, m_cachedMaxIter);
+            m_cachedMaxIter = bestComputedMaxIter;
             m_cachedSearchZoom = clampedZoom;
             m_cachedEscaped = bestEscaped;
         }

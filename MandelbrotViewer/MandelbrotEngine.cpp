@@ -287,6 +287,19 @@ namespace Mandelbrot
         m_deepCache.Prepare(config, cpuMode, cancelToken);
     }
 
+    void MandelbrotEngine::SetMovieReferenceHint(
+        double maxZoom,
+        const BigFloat* anchorX,
+        const BigFloat* anchorY) noexcept
+    {
+        m_deepCache.SetMovieHint(maxZoom, anchorX, anchorY);
+    }
+
+    void MandelbrotEngine::ClearMovieReferenceHint() noexcept
+    {
+        m_deepCache.ClearMovieHint();
+    }
+
     bool MandelbrotEngine::CanUseGpu(const FractalConfig& config)
     {
         return m_executionMode == ExecutionMode::Gpu && EnsureGpuSolver().CanSupportConfig(config);
