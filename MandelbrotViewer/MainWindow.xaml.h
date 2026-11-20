@@ -118,9 +118,9 @@ namespace winrt::MandelbrotViewer::implementation
             wchar_t const* stopAutoName = nullptr);
         std::unique_ptr<Mandelbrot::BackgroundRenderer> CreateBackgroundRenderer(void (MainWindow::*onCompleted)());
         void SyncMaxIterationsUi(int value, int sliderThreshold = 0);
-        void ApplyBookmark(const Mandelbrot::FractalBookmark& bookmark, bool selectComboIndex = false, int comboIndex = 0);
+        void ApplyBookmark(const Mandelbrot::BookmarkLocation& bookmark, bool selectComboIndex = false, int comboIndex = 0);
         void CopyTextToClipboard(
-            winrt::hstring const& text,
+            std::wstring const& text,
             winrt::Microsoft::UI::Xaml::Controls::TextBlock const& statusTarget,
             wchar_t const* successMessage);
 

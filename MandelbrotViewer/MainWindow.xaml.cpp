@@ -106,7 +106,7 @@ namespace winrt::MandelbrotViewer::implementation
         IterationsValueText().Text(winrt::to_hstring(value));
     }
 
-    void MainWindow::ApplyBookmark(const Mandelbrot::FractalBookmark& bookmark, bool selectComboIndex, int comboIndex)
+    void MainWindow::ApplyBookmark(const Mandelbrot::BookmarkLocation& bookmark, bool selectComboIndex, int comboIndex)
     {
         m_config.SetCenter(bookmark.centerX, bookmark.centerY);
         m_config.zoom = bookmark.zoom;
@@ -119,7 +119,7 @@ namespace winrt::MandelbrotViewer::implementation
     }
 
     void MainWindow::CopyTextToClipboard(
-        winrt::hstring const& text,
+        std::wstring const& text,
         TextBlock const& statusTarget,
         wchar_t const* successMessage)
     {
