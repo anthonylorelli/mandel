@@ -42,6 +42,9 @@ namespace Mandelbrot
         m_hasPreferredAnchor = false;
         m_anchorX.SetZero();
         m_anchorY.SetZero();
+        m_preparedStepX = 0.0;
+        m_preparedSpanX = 0.0;
+        m_preparedSpanY = 0.0;
     }
 
     void DeepReferenceCache::Invalidate() noexcept
@@ -51,6 +54,9 @@ namespace Mandelbrot
         m_cachedBlaVersion = 0;
         m_cachedBlaRefLen = 0;
         m_cachedBlaCMax = 0.0;
+        m_preparedStepX = 0.0;
+        m_preparedSpanX = 0.0;
+        m_preparedSpanY = 0.0;
     }
 
     void DeepReferenceCache::Prepare(
@@ -75,7 +81,15 @@ namespace Mandelbrot
         config.ResolveHpCenter(hpX, hpY);
 
         DeepReferenceState unusedState{};
-        Ensure(config, hpX, hpY, executionMode, unusedState, cancelToken);
+        if (Ensure(config, hpX, hpY, executionMode, unusedState, cancelToken))
+        {
+            const double clampedZoom = std::clamp(config.zoom, MinZoom, MaxZoom);
+            const double spanX = 3.0 / clampedZoom;
+            const double aspect = static_cast<double>(config.height) / static_cast<double>(config.width);
+            m_preparedSpanX = spanX;
+            m_preparedSpanY = spanX * aspect;
+            m_preparedStepX = spanX / static_cast<double>(config.width);
+        }
     }
 
     bool DeepReferenceCache::Ensure(
@@ -214,9 +228,14 @@ namespace Mandelbrot
         double refPosY = centerPosY;
         int bestRefLen = 0;
         bool reusedUnescapedCache = false;
-        // Include full-frame vertical span and 8x8 search candidate margin (+/- 0.4375 * span)
-        // so reference orbits selected near the outer grid columns/rows are reused across all bands.
-        const double cacheSpanY = std::max(spanY * 2.0, spanX * 2.0);
+        // Include full-frame horizontal/vertical span and 8x8 search candidate margin (+/- 0.4375 * span)
+        // so reference orbits prepared for a full frame/keyframe are reused across all bands and side strips.
+        const bool samePreparedGrid =
+            (m_preparedStepX > 0.0 && std::abs(stepX - m_preparedStepX) <= m_preparedStepX * 1e-4);
+        const double maxReuseDiffX = samePreparedGrid ? std::max(spanX * 0.48, m_preparedSpanX) : (spanX * 0.48);
+        const double maxReuseDiffY = samePreparedGrid
+            ? std::max({ spanY * 0.96, spanX * 0.96, m_preparedSpanY })
+            : (std::max(spanY * 2.0, spanX * 2.0) * 0.48);
 
         // Check if we can reuse or incrementally extend the cached reference orbit from the previous frame/band
         if (m_hasCachedOrbit &&
@@ -228,8 +247,8 @@ namespace Mandelbrot
             const double diffY = (m_cachedRefY - centerY).ToDouble();
 
             if (!m_cachedEscaped &&
-                std::abs(diffX) <= spanX * 0.48 &&
-                std::abs(diffY) <= cacheSpanY * 0.48 &&
+                std::abs(diffX) <= maxReuseDiffX &&
+                std::abs(diffY) <= maxReuseDiffY &&
                 (type != FractalType::Phoenix || maxIter <= m_cachedMaxIter))
             {
                 if (maxIter > m_cachedMaxIter)
@@ -266,11 +285,12 @@ namespace Mandelbrot
                 }
             }
             else if (m_cachedEscaped &&
-                     std::abs(diffX) <= spanX * 0.45 &&
-                     std::abs(diffY) <= cacheSpanY * 0.45 &&
-                     m_cachedSearchZoom > 0.0 &&
-                     clampedZoom >= m_cachedSearchZoom * 0.50 &&
-                     clampedZoom <= m_cachedSearchZoom * 2.00)
+                     std::abs(diffX) <= maxReuseDiffX &&
+                     std::abs(diffY) <= maxReuseDiffY &&
+                     (samePreparedGrid ||
+                      (m_cachedSearchZoom > 0.0 &&
+                       clampedZoom >= m_cachedSearchZoom * 0.50 &&
+                       clampedZoom <= m_cachedSearchZoom * 2.00)))
             {
                 // Reuse the best reference orbit already found for this exterior neighborhood across consecutive
                 // zoom frames and bands so we don't re-run the 8x8 search and 1024-bit BigFloat orbits.
@@ -303,7 +323,7 @@ namespace Mandelbrot
                 !m_cachedOrbit.empty() &&
                 (type != FractalType::Phoenix || maxIter <= m_cachedMaxIter) &&
                 ((m_cachedRefX == centerX && m_cachedRefY == centerY) ||
-                 (std::abs(cachedDiffX) <= spanX * 0.45 && std::abs(cachedDiffY) <= cacheSpanY * 0.45)))
+                 (std::abs(cachedDiffX) <= maxReuseDiffX && std::abs(cachedDiffY) <= maxReuseDiffY)))
             {
                 if (!m_cachedEscaped && maxIter > m_cachedMaxIter)
                 {

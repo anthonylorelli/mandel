@@ -3,6 +3,7 @@
 #include "MoviePlan.h"
 #include "MovieWriter.h"
 #include "MovieExport.h"
+#include "MovieZoomPyramid.h"
 #include "VideoBitstream.h"
 #include "Mp4Muxer.h"
 #include <filesystem>
@@ -584,4 +585,224 @@ TEST_CASE(Movie, ConvertBgraToNv12IgnoresInvalidDimensionsAndNullBuffers)
     detail::ConvertBgraToNv12FullRangeBT709(bgra.data(), 4, 4, nv12.data(), 0, 4);
     ASSERT_TRUE(nv12 == untouched);
 }
+
+TEST_CASE(Movie, ZoomPyramidPlansZoomInZoomOutAndBreakEven)
+{
+    // 1. Zoom-in movie (4s @ 30fps = 120 frames, 6 octaves -> 20 frames/octave) enables pyramid with strong savings.
+    MoviePlan zoomIn = SmallMovie();
+    zoomIn.width = 160; zoomIn.height = 120;
+    zoomIn.fps = 30; zoomIn.seconds = 4;
+    zoomIn.start.zoom = 1.0; zoomIn.endZoom = 64.0;
+    zoomIn.start.SetCenter(-0.7436438870371587, 0.1318259042053119);
+    zoomIn.targetX = zoomIn.start.hpCenterX;
+    zoomIn.targetY = zoomIn.start.hpCenterY;
+    zoomIn.motionSmoothing = true;
+
+    const auto inPlan = PlanZoomKeyframes(zoomIn);
+    ASSERT_TRUE(inPlan.enabled);
+    ASSERT_TRUE(inPlan.zoomIn);
+    ASSERT_GT(inPlan.keyframes.size(), 2u);
+    ASSERT_EQ(zoomIn.FrameCount(), static_cast<uint32_t>(inPlan.frames.size()));
+    ASSERT_LT(inPlan.estimatedKeyframePixels * 3, inPlan.directPixels);
+
+    // Every frame must be covered by its primary (and optional crossfade secondary) keyframe without upscaling.
+    for (uint32_t f = 0; f < zoomIn.FrameCount(); ++f)
+    {
+        const auto& a = inPlan.frames[f];
+        ASSERT_GE(a.primaryKeyframe, 0);
+        const auto cam = zoomIn.CameraAt(static_cast<double>(f));
+        ASSERT_TRUE(KeyframeCoversCamera(inPlan.keyframes[a.primaryKeyframe].camera, cam, 2.5, 0.999));
+        if (a.secondaryKeyframe >= 0)
+        {
+            ASSERT_EQ(a.primaryKeyframe + 1, a.secondaryKeyframe);
+            ASSERT_GT(a.blendWeight, 0.0f);
+            ASSERT_LT(a.blendWeight, 1.0f);
+            ASSERT_TRUE(KeyframeCoversCamera(inPlan.keyframes[a.secondaryKeyframe].camera, cam, 2.5, 0.999));
+        }
+    }
+
+    // 2. Zoom-out movie reverses ordering (deepest keyframe first) and enables concentric inner reuse.
+    MoviePlan zoomOut = zoomIn;
+    zoomOut.start.zoom = 64.0; zoomOut.endZoom = 1.0;
+    const auto outPlan = PlanZoomKeyframes(zoomOut);
+    ASSERT_TRUE(outPlan.enabled);
+    ASSERT_FALSE(outPlan.zoomIn);
+    ASSERT_GT(outPlan.keyframes.size(), 2u);
+    ASSERT_GT(outPlan.keyframes.front().camera.zoom, outPlan.keyframes.back().camera.zoom);
+    const auto innerZoomOut = ComputeInnerSkipRect(outPlan.keyframes[1].camera, outPlan.keyframes[0].camera);
+    ASSERT_TRUE(innerZoomOut.valid);
+
+    // 3. Static or sub-octave movie cleanly disables pyramid via break-even check.
+    MoviePlan tiny = SmallMovie();
+    tiny.start.zoom = 1.0; tiny.endZoom = 1.3;
+    ASSERT_FALSE(PlanZoomKeyframes(tiny).enabled);
+
+    // 4. Deep-zoom movie (1e150 -> 1e154) avoids double overflow in transforms and inner-rect calculation.
+    MoviePlan deep = zoomIn;
+    deep.start.zoom = 1e150; deep.endZoom = 1e154;
+    const auto deepPlan = PlanZoomKeyframes(deep);
+    ASSERT_TRUE(deepPlan.enabled);
+    ASSERT_GT(deepPlan.keyframes.size(), 2u);
+    const auto deepInner = ComputeInnerSkipRect(deepPlan.keyframes[0].camera, deepPlan.keyframes[1].camera);
+    ASSERT_TRUE(deepInner.valid);
+}
+
+TEST_CASE(Movie, ZoomPyramidResampleMatchesDirectRender)
+{
+    MoviePlan p = SmallMovie();
+    p.width = 128; p.height = 96;
+    p.fps = 30; p.seconds = 4;
+    p.start.SetCenter(-0.75, 0.12);
+    p.targetX = p.start.hpCenterX; p.targetY = p.start.hpCenterY;
+    p.start.zoom = 2.0; p.endZoom = 32.0;
+    p.start.maxIterations = 250;
+    p.motionSmoothing = false;
+
+    const auto pyramid = PlanZoomKeyframes(p);
+    ASSERT_TRUE(pyramid.enabled);
+    ASSERT_GE(pyramid.keyframes.size(), 2u);
+
+    std::atomic<bool> cancel{};
+    MandelbrotEngine engine(ExecutionMode::Automatic);
+    const auto kf0Pixels = RenderMovieKeyframe(p, pyramid.keyframes[0].camera, nullptr, cancel, {}, 64, &engine);
+    const auto kf1Pixels = RenderMovieKeyframe(p, pyramid.keyframes[1].camera, nullptr, cancel, {}, 64, &engine);
+    ASSERT_FALSE(kf0Pixels.empty());
+    ASSERT_FALSE(kf1Pixels.empty());
+
+    // Compare resampled frame inside keyframe 0 against direct RenderMovieFrame.
+    const uint32_t testFrame = (pyramid.keyframes[0].firstFrame + pyramid.keyframes[0].lastFrame) / 2;
+    const auto direct = RenderMovieFrame(p, testFrame, cancel, {}, 64, &engine);
+    std::vector<uint32_t> resampled;
+    ResampleKeyframeFrame(
+        kf0Pixels, pyramid.keyframes[0].camera,
+        nullptr, nullptr, 0.0f,
+        p.CameraAt(testFrame), nullptr,
+        resampled, cancel);
+    ASSERT_EQ(direct.size(), resampled.size());
+    for (uint32_t px : resampled) ASSERT_EQ(0xFFu, (px >> 24) & 0xFFu);
+    ASSERT_LT(FilteredPixelError(direct, resampled, p.width, p.height), 7.0);
+
+    // Crossfade frame on the overlap between keyframe 0 and keyframe 1 must also match closely.
+    const uint32_t ovFrame = pyramid.keyframes[1].firstFrame;
+    const auto directOv = RenderMovieFrame(p, ovFrame, cancel, {}, 64, &engine);
+    std::vector<uint32_t> blended;
+    ResampleKeyframeFrame(
+        kf0Pixels, pyramid.keyframes[0].camera,
+        &kf1Pixels, &pyramid.keyframes[1].camera, 0.5f,
+        p.CameraAt(ovFrame), nullptr,
+        blended, cancel);
+    ASSERT_LT(FilteredPixelError(directOv, blended, p.width, p.height), 7.0);
+
+    // Fused shutter-blur resampling path also produces finite opaque pixels matching direct motion-smoothed render.
+    p.motionSmoothing = true;
+    const auto directShutter = RenderMovieFrame(p, testFrame, cancel, {}, 64, &engine);
+    GpuMovieShutterParams shutter{};
+    shutter.tapCount = 7;
+    constexpr std::array<double, 7> kTapOffsets{ -0.25, -1.0 / 6.0, -1.0 / 12.0, 0.0, 1.0 / 12.0, 1.0 / 6.0, 0.25 };
+    const auto cam0 = p.CameraAt(testFrame);
+    const BigFloat invStep0(cam0.zoom * (static_cast<double>(p.width) / 3.0));
+    for (size_t k = 0; k < 7; ++k)
+    {
+        const auto camTau = p.CameraAt(static_cast<double>(testFrame) + kTapOffsets[k]);
+        shutter.shiftX[k] = static_cast<float>((camTau.hpCenterX - cam0.hpCenterX).Mul(invStep0).ToDouble());
+        shutter.shiftY[k] = static_cast<float>(-(camTau.hpCenterY - cam0.hpCenterY).Mul(invStep0).ToDouble());
+        shutter.scale[k] = static_cast<float>(cam0.zoom / camTau.zoom);
+    }
+    std::vector<uint32_t> resampledShutter;
+    ResampleKeyframeFrame(
+        kf0Pixels, pyramid.keyframes[0].camera,
+        nullptr, nullptr, 0.0f,
+        cam0, &shutter,
+        resampledShutter, cancel);
+    ASSERT_EQ(directShutter.size(), resampledShutter.size());
+    ASSERT_LT(FilteredPixelError(directShutter, resampledShutter, p.width, p.height), 7.0);
+}
+
+TEST_CASE(Movie, ZoomPyramidFourStripInnerReuseMatchesFullKeyframe)
+{
+    for (double baseZoom : { 2.0, 1e20 })
+    {
+        MoviePlan p = SmallMovie();
+        p.width = 96; p.height = 72;
+        p.fps = 30; p.seconds = 4;
+        p.start.SetCenter(-0.7436438870371587, 0.1318259042053119);
+        p.targetX = p.start.hpCenterX; p.targetY = p.start.hpCenterY;
+        p.start.zoom = baseZoom; p.endZoom = baseZoom * 16.0;
+        p.start.maxIterations = (baseZoom > 1e10) ? 500 : 250;
+        p.motionSmoothing = false;
+
+        const auto pyramid = PlanZoomKeyframes(p);
+        ASSERT_TRUE(pyramid.enabled);
+        ASSERT_GE(pyramid.keyframes.size(), 2u);
+
+        const auto& outerKf = pyramid.keyframes[0].camera;
+        const auto& innerKf = pyramid.keyframes[1].camera;
+        const auto innerRect = ComputeInnerSkipRect(outerKf, innerKf);
+        ASSERT_TRUE(innerRect.valid);
+
+        std::atomic<bool> cancel{};
+        MandelbrotEngine engine(ExecutionMode::Automatic);
+        const auto fullOuter = RenderMovieKeyframe(p, outerKf, nullptr, cancel, {}, 64, &engine);
+        const auto innerPixels = RenderMovieKeyframe(p, innerKf, nullptr, cancel, {}, 64, &engine);
+        auto strippedOuter = RenderMovieKeyframe(p, outerKf, &innerRect, cancel, {}, 64, &engine);
+        CompositeInnerKeyframe(strippedOuter, outerKf, innerPixels, innerKf, innerRect, cancel);
+
+        ASSERT_EQ(fullOuter.size(), strippedOuter.size());
+        // Outside the blend rectangle, the 4-strip render uses identical halos and must closely match fullOuter.
+        double outerMaxDiff = 0.0;
+        for (int y = 0; y < outerKf.height; ++y)
+        {
+            for (int x = 0; x < outerKf.width; ++x)
+            {
+                if (x >= innerRect.blendX0 && x < innerRect.blendX1 &&
+                    y >= innerRect.blendY0 && y < innerRect.blendY1)
+                    continue;
+                const size_t i = static_cast<size_t>(y) * outerKf.width + x;
+                for (int shift : { 0, 8, 16 })
+                {
+                    outerMaxDiff = std::max(outerMaxDiff,
+                        std::abs(static_cast<double>((fullOuter[i] >> shift) & 255) -
+                                 static_cast<double>((strippedOuter[i] >> shift) & 255)));
+                }
+            }
+        }
+        ASSERT_LE(outerMaxDiff, 2.0);
+        // Across the entire keyframe (including inner reuse and feathered seam), visual error must stay tiny.
+        ASSERT_LT(FilteredPixelError(fullOuter, strippedOuter, outerKf.width, outerKf.height), 4.5);
+    }
+}
+
+TEST_CASE(Movie, ZoomPyramidEndToEndExportZoomInAndZoomOut)
+{
+    for (bool zoomIn : { true, false })
+    {
+        File file;
+        MoviePlan p = SmallMovie();
+        p.width = 160; p.height = 96;
+        p.fps = 30; p.seconds = 3; // 90 frames across 4 octaves -> pyramid enabled
+        p.start.SetCenter(-0.75, 0.12);
+        p.targetX = p.start.hpCenterX; p.targetY = p.start.hpCenterY;
+        p.start.zoom = zoomIn ? 1.0 : 16.0;
+        p.endZoom = zoomIn ? 16.0 : 1.0;
+        p.start.maxIterations = 200;
+        p.motionSmoothing = true;
+
+        ASSERT_TRUE(PlanZoomKeyframes(p).enabled);
+
+        MovieExporter exporter(p, file.path.wstring());
+        WaitFor(exporter);
+        const auto status = exporter.Progress();
+        ASSERT_TRUE(status.error.empty());
+        ASSERT_FALSE(status.canceled);
+        ASSERT_EQ(p.FrameCount(), status.completed);
+        ASSERT_TRUE(exporter.TakePreview().has_value());
+        ASSERT_FALSE(Read(file.path).empty());
+
+        std::atomic<bool> cancel{};
+        const auto expectedFirst = RenderMovieFrame(p, 0, cancel);
+        const auto decodedFirst = DecodePlayerFrame(file.path, p.width, p.height);
+        ASSERT_LT(FilteredPixelError(expectedFirst, decodedFirst, p.width, p.height), 9.0);
+    }
+}
+
 
