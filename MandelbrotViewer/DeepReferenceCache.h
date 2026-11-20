@@ -67,5 +67,8 @@ namespace Mandelbrot
         uint64_t m_cachedBlaVersion{ 0 };
         int m_cachedBlaRefLen{ 0 };
         double m_cachedBlaCMax{ 0.0 };
+        double m_preparedStepX{ 0.0 };
+        double m_preparedSpanX{ 0.0 };
+        double m_preparedSpanY{ 0.0 };
     };
 }
