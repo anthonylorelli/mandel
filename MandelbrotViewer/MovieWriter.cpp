@@ -48,47 +48,96 @@ namespace Mandelbrot
             }
         }
 
-        struct Apartment
+        struct ScopedComInit
         {
-            HRESULT status{CoInitializeEx(nullptr, COINIT_MULTITHREADED)};
-            Apartment() { if (status != RPC_E_CHANGED_MODE) Check(status, "COM initialization failed"); }
-            ~Apartment() { if (SUCCEEDED(status)) CoUninitialize(); }
+            HRESULT status{ CoInitializeEx(nullptr, COINIT_MULTITHREADED) };
+            DWORD ownerThread{ GetCurrentThreadId() };
+
+            bool Ok() const noexcept
+            {
+                return SUCCEEDED(status) || status == RPC_E_CHANGED_MODE;
+            }
+
+            ~ScopedComInit() noexcept
+            {
+                if (SUCCEEDED(status) && GetCurrentThreadId() == ownerThread)
+                {
+                    CoUninitialize();
+                }
+            }
         };
 
         struct MediaFoundationSession
         {
-            HRESULT status{MFStartup(MF_VERSION)};
+            HRESULT status{ MFStartup(MF_VERSION) };
             MediaFoundationSession() { Check(status, "Media Foundation initialization failed"); }
-            ~MediaFoundationSession() { if (SUCCEEDED(status)) MFShutdown(); }
+            ~MediaFoundationSession() noexcept { if (SUCCEEDED(status)) MFShutdown(); }
+        };
+
+        struct ScopedActivate
+        {
+            IMFActivate* activate{ nullptr };
+
+            void Reset(IMFActivate* next = nullptr) noexcept
+            {
+                if (activate)
+                {
+                    activate->ShutdownObject();
+                    activate->Release();
+                }
+                activate = next;
+            }
+
+            ~ScopedActivate() noexcept { Reset(); }
+        };
+
+        struct ActivateListGuard
+        {
+            IMFActivate** list{ nullptr };
+            UINT32 count{ 0 };
+
+            ~ActivateListGuard() noexcept
+            {
+                if (list)
+                {
+                    for (UINT32 i = 0; i < count; ++i)
+                    {
+                        if (list[i]) list[i]->Release();
+                    }
+                    CoTaskMemFree(list);
+                }
+            }
         };
     }
 
     struct MovieWriter::Impl
     {
-        Apartment apartment;
+        // Member declaration order enforces reverse teardown:
+        // eventGen -> mft -> chosenActivate -> D3D/DXGI -> mfSession -> comInit.
+        ScopedComInit comInit;
         MediaFoundationSession mfSession;
         ComPtr<ID3D11Device> d3dDevice;
         ComPtr<ID3D11DeviceContext> d3dContext;
         ComPtr<IMFDXGIDeviceManager> dxgiManager;
+        ScopedActivate chosenActivate;
         ComPtr<IMFTransform> mft;
         ComPtr<IMFMediaEventGenerator> eventGen;
-        IMFActivate* chosenActivate{};
 
         Mp4FileWriter muxer;
         int width{}, height{}, codedW{}, codedH{}, fps{};
-        MovieCodec activeCodec{MovieCodec::H264};
-        bool isHardware{};
+        MovieCodec activeCodec{ MovieCodec::H264 };
         bool isAsync{};
         bool providesSamples{};
         bool streamingStarted{};
         bool finished{};
         DWORD inId{}, outId{};
-        DWORD outBufSize{4 * 1024 * 1024};
+        DWORD outBufSize{ 4 * 1024 * 1024 };
         uint32_t needInputCount{};
         uint64_t submittedFrames{};
 
         std::vector<uint8_t> vps, sps, pps;
         std::vector<std::pair<const uint8_t*, size_t>> scratchNalus;
+        std::vector<uint8_t> scratchMp4Sample;
 
         bool ConfigureMftTypes(IMFTransform* candidate, DWORD candIn, DWORD candOut, MovieCodec codec, int tryW, int tryH)
         {
@@ -104,7 +153,7 @@ namespace Mandelbrot
             auto buildOutput = [&](UINT32 bitrate, bool withProfile, bool withColor) -> ComPtr<IMFMediaType>
             {
                 ComPtr<IMFMediaType> outType;
-                Check(MFCreateMediaType(&outType));
+                if (FAILED(MFCreateMediaType(&outType))) return {};
                 outType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
                 outType->SetGUID(MF_MT_SUBTYPE, subtype);
                 outType->SetUINT32(MF_MT_AVG_BITRATE, bitrate);
@@ -135,7 +184,7 @@ namespace Mandelbrot
                     std::pair{true, true}, std::pair{false, true}, std::pair{true, false}, std::pair{false, false}})
                 {
                     auto outType = buildOutput(bitrate, withProf, withColor);
-                    if (SUCCEEDED(candidate->SetOutputType(candOut, outType.Get(), 0)))
+                    if (outType && SUCCEEDED(candidate->SetOutputType(candOut, outType.Get(), 0)))
                     {
                         outputConfigured = true;
                         break;
@@ -146,7 +195,7 @@ namespace Mandelbrot
             if (!outputConfigured) return false;
 
             ComPtr<IMFMediaType> inType;
-            Check(MFCreateMediaType(&inType));
+            if (FAILED(MFCreateMediaType(&inType))) return false;
             inType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
             inType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
             inType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
@@ -176,25 +225,27 @@ namespace Mandelbrot
             const int mbW = (evenW + 15) & ~15;
             const int mbH = (evenH + 15) & ~15;
 
-            MFT_REGISTER_TYPE_INFO outInfo{MFMediaType_Video, subtype};
+            MFT_REGISTER_TYPE_INFO outInfo{ MFMediaType_Video, subtype };
             const UINT32 flags = hw
                 ? (MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER)
                 : (MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_ASYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER);
-            IMFActivate** activates = nullptr;
-            UINT32 count = 0;
-            if (FAILED(MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, flags, nullptr, &outInfo, &activates, &count)) || count == 0)
+            ActivateListGuard activates;
+            if (FAILED(MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, flags, nullptr, &outInfo, &activates.list, &activates.count)) ||
+                activates.count == 0)
+            {
                 return false;
+            }
 
             const std::array<std::pair<int, int>, 2> dimCandidates{{{evenW, evenH}, {mbW, mbH}}};
             const size_t numDimCandidates = (evenW == mbW && evenH == mbH) ? 1u : 2u;
 
-            for (UINT32 i = 0; i < count; ++i)
+            for (UINT32 i = 0; i < activates.count; ++i)
             {
                 for (size_t d = 0; d < numDimCandidates; ++d)
                 {
                     const auto [tryW, tryH] = dimCandidates[d];
                     ComPtr<IMFTransform> candidate;
-                    if (FAILED(activates[i]->ActivateObject(IID_PPV_ARGS(&candidate))))
+                    if (FAILED(activates.list[i]->ActivateObject(IID_PPV_ARGS(&candidate))))
                         break;
 
                     ComPtr<IMFAttributes> attrs;
@@ -234,39 +285,55 @@ namespace Mandelbrot
                         codecApi->SetValue(&CODECAPI_AVEncCommonLowLatency, &lowLat);
                     }
 
+                    auto rejectCandidate = [&]()
+                    {
+                        eventGen.Reset();
+                        mft.Reset();
+                        candidate.Reset();
+                        vps.clear();
+                        sps.clear();
+                        pps.clear();
+                        activates.list[i]->ShutdownObject();
+                    };
+
                     if (!ConfigureMftTypes(candidate.Get(), candIn, candOut, codec, tryW, tryH))
                     {
-                        candidate.Reset();
-                        activates[i]->ShutdownObject();
+                        rejectCandidate();
+                        continue;
+                    }
+
+                    ComPtr<IMFMediaEventGenerator> candEventGen;
+                    if (asyncFlag != 0 && FAILED(candidate.As(&candEventGen)))
+                    {
+                        rejectCandidate();
                         continue;
                     }
 
                     codedW = tryW;
                     codedH = tryH;
                     activeCodec = codec;
-                    isHardware = hw;
                     isAsync = (asyncFlag != 0);
                     inId = candIn;
                     outId = candOut;
                     mft = candidate;
-                    if (isAsync) Check(mft.As(&eventGen));
+                    eventGen = candEventGen;
 
                     UpdateOutputStreamInfo();
                     CaptureSequenceHeader();
-                    Check(mft->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0));
-                    Check(mft->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0));
+                    if (FAILED(mft->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)) ||
+                        FAILED(mft->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)))
+                    {
+                        rejectCandidate();
+                        continue;
+                    }
                     streamingStarted = true;
 
-                    chosenActivate = activates[i];
-                    chosenActivate->AddRef();
-                    for (UINT32 j = 0; j < count; ++j) activates[j]->Release();
-                    CoTaskMemFree(activates);
+                    activates.list[i]->AddRef();
+                    chosenActivate.Reset(activates.list[i]);
                     return true;
                 }
             }
 
-            for (UINT32 j = 0; j < count; ++j) activates[j]->Release();
-            CoTaskMemFree(activates);
             return false;
         }
 
@@ -320,13 +387,13 @@ namespace Mandelbrot
             BYTE* raw = nullptr;
             DWORD len = 0;
             Check(buf->Lock(&raw, nullptr, &len));
-            struct UnlockGuard { IMFMediaBuffer* b; ~UnlockGuard() { b->Unlock(); } } unlock{buf.Get()};
+            struct UnlockGuard { IMFMediaBuffer* b; ~UnlockGuard() { b->Unlock(); } } unlock{ buf.Get() };
             if (len == 0) return;
 
             SplitAnnexB(raw, len, scratchNalus);
 
-            std::vector<uint8_t> mp4Sample;
-            mp4Sample.reserve(static_cast<size_t>(len) + 16);
+            scratchMp4Sample.clear();
+            scratchMp4Sample.reserve(static_cast<size_t>(len) + 16);
             bool isKey = false;
             UINT32 cleanPoint = 0;
             if (SUCCEEDED(sample->GetUINT32(MFSampleExtension_CleanPoint, &cleanPoint)) && cleanPoint != 0)
@@ -350,14 +417,14 @@ namespace Mandelbrot
                 }
 
                 const uint32_t sz = static_cast<uint32_t>(n);
-                mp4Sample.push_back(static_cast<uint8_t>(sz >> 24));
-                mp4Sample.push_back(static_cast<uint8_t>(sz >> 16));
-                mp4Sample.push_back(static_cast<uint8_t>(sz >> 8));
-                mp4Sample.push_back(static_cast<uint8_t>(sz));
-                mp4Sample.insert(mp4Sample.end(), ptr, ptr + n);
+                scratchMp4Sample.push_back(static_cast<uint8_t>(sz >> 24));
+                scratchMp4Sample.push_back(static_cast<uint8_t>(sz >> 16));
+                scratchMp4Sample.push_back(static_cast<uint8_t>(sz >> 8));
+                scratchMp4Sample.push_back(static_cast<uint8_t>(sz));
+                scratchMp4Sample.insert(scratchMp4Sample.end(), ptr, ptr + n);
             }
 
-            if (mp4Sample.empty()) return;
+            if (scratchMp4Sample.empty()) return;
             if (!muxer.HasSamples()) isKey = true;
 
             const int64_t dtsIndex = static_cast<int64_t>(muxer.SampleCount());
@@ -367,15 +434,17 @@ namespace Mandelbrot
                 ptsIndex = std::llround(static_cast<double>(sampleTime) * fps / 10'000'000.0);
 
             muxer.WriteSample(
-                mp4Sample.data(),
-                mp4Sample.size(),
+                scratchMp4Sample.data(),
+                scratchMp4Sample.size(),
                 static_cast<int32_t>(ptsIndex - dtsIndex),
                 isKey);
         }
 
-        void PullOneAsyncOutput()
+        // Pulls a single output buffer from the MFT. Returns false if the MFT needs more input.
+        bool PullOneOutput(const char* errorContext)
         {
             MFT_OUTPUT_DATA_BUFFER odb{};
+            odb.dwStreamID = outId;
             ComPtr<IMFSample> allocSample;
             if (!providesSamples)
             {
@@ -394,8 +463,9 @@ namespace Mandelbrot
                 bool release;
                 IMFSample* s;
                 ~SampleReleaseGuard() { if (release && s) s->Release(); }
-            } relGuard{providesSamples, odb.pSample};
+            } relGuard{ providesSamples, odb.pSample };
 
+            if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) return false;
             if (hr == MF_E_TRANSFORM_STREAM_CHANGE)
             {
                 ComPtr<IMFMediaType> newOut;
@@ -403,19 +473,22 @@ namespace Mandelbrot
                 Check(mft->SetOutputType(outId, newOut.Get(), 0));
                 UpdateOutputStreamInfo();
                 CaptureSequenceHeader();
-                return;
+                return true;
             }
-            if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) return;
-            Check(hr, "Hardware video encoder output failed");
+            Check(hr, errorContext);
             HandleEncodedSample(odb.pSample);
+            return true;
+        }
+
+        void PullOneAsyncOutput()
+        {
+            PullOneOutput("Hardware video encoder output failed");
         }
 
         void WaitAsyncInputReady()
         {
-            while (needInputCount == 0)
+            auto processEvent = [&](IMFMediaEvent* ev)
             {
-                ComPtr<IMFMediaEvent> ev;
-                Check(eventGen->GetEvent(0, &ev), "Hardware video encoder event wait failed");
                 MediaEventType met = MEUnknown;
                 Check(ev->GetType(&met));
                 HRESULT evStatus = S_OK;
@@ -424,63 +497,37 @@ namespace Mandelbrot
                 if (met == METransformNeedInput) ++needInputCount;
                 else if (met == METransformHaveOutput) PullOneAsyncOutput();
                 else if (met == MEError) Check(E_FAIL, "Hardware video encoder stream error");
+            };
+
+            while (needInputCount == 0)
+            {
+                ComPtr<IMFMediaEvent> ev;
+                Check(eventGen->GetEvent(0, &ev), "Hardware video encoder event wait failed");
+                processEvent(ev.Get());
             }
 
             for (;;)
             {
                 ComPtr<IMFMediaEvent> ev;
                 const HRESULT hr = eventGen->GetEvent(MF_EVENT_FLAG_NO_WAIT, &ev);
-                if (hr == MF_E_NO_EVENTS_AVAILABLE || FAILED(hr) || !ev) break;
-                MediaEventType met = MEUnknown;
-                ev->GetType(&met);
-                if (met == METransformNeedInput) ++needInputCount;
-                else if (met == METransformHaveOutput) PullOneAsyncOutput();
+                if (hr == MF_E_NO_EVENTS_AVAILABLE) break;
+                Check(hr, "Hardware video encoder event poll failed");
+                if (!ev) break;
+                processEvent(ev.Get());
             }
         }
 
         void DrainSyncOutputs()
         {
-            for (;;)
+            while (PullOneOutput("Video encoder ProcessOutput failed"))
             {
-                MFT_OUTPUT_DATA_BUFFER odb{};
-                ComPtr<IMFSample> allocSample;
-                if (!providesSamples)
-                {
-                    ComPtr<IMFMediaBuffer> obuf;
-                    Check(MFCreateMemoryBuffer(outBufSize, &obuf));
-                    Check(MFCreateSample(&allocSample));
-                    Check(allocSample->AddBuffer(obuf.Get()));
-                    odb.pSample = allocSample.Get();
-                }
-
-                DWORD status = 0;
-                const HRESULT hr = mft->ProcessOutput(0, 1, &odb, &status);
-                if (odb.pEvents) odb.pEvents->Release();
-                struct SampleReleaseGuard
-                {
-                    bool release;
-                    IMFSample* s;
-                    ~SampleReleaseGuard() { if (release && s) s->Release(); }
-                } relGuard{providesSamples, odb.pSample};
-
-                if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) break;
-                if (hr == MF_E_TRANSFORM_STREAM_CHANGE)
-                {
-                    ComPtr<IMFMediaType> newOut;
-                    Check(mft->GetOutputAvailableType(outId, 0, &newOut));
-                    Check(mft->SetOutputType(outId, newOut.Get(), 0));
-                    UpdateOutputStreamInfo();
-                    CaptureSequenceHeader();
-                    continue;
-                }
-                Check(hr, "Video encoder ProcessOutput failed");
-                HandleEncodedSample(odb.pSample);
             }
         }
 
         Impl(const std::wstring& path, int w, int h, int rate, MovieCodec requestedCodec)
             : width(w), height(h), fps(rate), activeCodec(requestedCodec)
         {
+            if (!comInit.Ok()) Check(comInit.status, "COM initialization failed");
             if (w < 1 || h < 1 || w > 7680 || h > 4320 || rate < 1 || rate > 120)
                 throw std::invalid_argument("Invalid movie writer dimensions or frame rate.");
 
@@ -511,9 +558,9 @@ namespace Mandelbrot
             muxer.Open(path, activeCodec);
         }
 
-        ~Impl()
+        ~Impl() noexcept
         {
-            Apartment threadApartment;
+            ScopedComInit threadCom;
             if (mft && streamingStarted && !finished)
             {
                 mft->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
@@ -521,12 +568,7 @@ namespace Mandelbrot
             }
             eventGen.Reset();
             mft.Reset();
-            if (chosenActivate)
-            {
-                chosenActivate->ShutdownObject();
-                chosenActivate->Release();
-                chosenActivate = nullptr;
-            }
+            chosenActivate.Reset();
             dxgiManager.Reset();
             d3dContext.Reset();
             d3dDevice.Reset();
@@ -539,7 +581,8 @@ namespace Mandelbrot
             if (submittedFrames == 3600ULL * 120ULL)
                 throw std::runtime_error("Movie exceeds the supported duration.");
 
-            Apartment threadApartment;
+            ScopedComInit threadCom;
+            if (!threadCom.Ok()) Check(threadCom.status, "COM initialization failed");
             const DWORD nv12Bytes = static_cast<DWORD>(static_cast<size_t>(codedW) * codedH * 3 / 2);
             ComPtr<IMFMediaBuffer> buffer;
             Check(MFCreateAlignedMemoryBuffer(nv12Bytes, MF_16_BYTE_ALIGNMENT, &buffer));
@@ -583,7 +626,8 @@ namespace Mandelbrot
             if (finished) return;
             if (submittedFrames == 0) throw std::runtime_error("Cannot save a movie with no frames.");
 
-            Apartment threadApartment;
+            ScopedComInit threadCom;
+            if (!threadCom.Ok()) Check(threadCom.status, "COM initialization failed");
             Check(mft->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, inId));
             Check(mft->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0));
             if (isAsync)
@@ -620,5 +664,4 @@ namespace Mandelbrot
     void MovieWriter::WriteFrame(const std::vector<uint32_t>& bgra) { m_impl->Write(bgra); }
     void MovieWriter::Finish() { m_impl->Finish(); }
     MovieCodec MovieWriter::ActiveCodec() const noexcept { return m_impl->activeCodec; }
-    bool MovieWriter::IsHardwareAccelerated() const noexcept { return m_impl->isHardware; }
 }

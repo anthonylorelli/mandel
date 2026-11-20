@@ -111,10 +111,6 @@ namespace Mandelbrot
         ComPtr<ID3D11UnorderedAccessView> shutterPixelsUav;
         size_t shutterPixelsCapElems{ 0 };
 
-        ComPtr<ID3D11Buffer> prevBandBuf;
-        ComPtr<ID3D11ShaderResourceView> prevBandSrv;
-        size_t prevBandCapElems{ 0 };
-
         ComPtr<ID3D11Buffer> colCoordsBuf, rowCoordsBuf;
         ComPtr<ID3D11ShaderResourceView> colCoordsSrv, rowCoordsSrv;
         size_t colCoordsCapFloats{ 0 }, rowCoordsCapFloats{ 0 };
@@ -176,6 +172,17 @@ namespace Mandelbrot
         explicit Impl(bool allowSoftwareAdapter);
 
         bool CanSupportConfig(const FractalConfig& config) const noexcept;
+
+        bool EnsureBufferImpl(
+            size_t neededElems,
+            UINT elemBytes,
+            DXGI_FORMAT format,
+            bool structured,
+            bool dynamicUpload,
+            ComPtr<ID3D11Buffer>& buf,
+            ComPtr<ID3D11UnorderedAccessView>* uav,
+            ComPtr<ID3D11ShaderResourceView>* srv,
+            size_t& capElems);
 
         bool EnsureTypedSrvBuffer(
             size_t neededElems,

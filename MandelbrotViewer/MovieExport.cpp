@@ -15,25 +15,6 @@ namespace Mandelbrot
 {
     namespace
     {
-        struct ColorSpace
-        {
-            std::array<float, 256> decode{};
-            std::array<uint8_t, 4097> encode{};
-            ColorSpace()
-            {
-                for (size_t i = 0; i < decode.size(); ++i)
-                {
-                    const float v = static_cast<float>(i) / 255;
-                    decode[i] = v <= 0.04045f ? v / 12.92f : std::pow((v + .055f) / 1.055f, 2.4f);
-                }
-                for (size_t i = 0; i < encode.size(); ++i)
-                {
-                    const float v = static_cast<float>(i) / 4096;
-                    const float s = v <= .0031308f ? 12.92f * v : 1.055f * std::pow(v, 1 / 2.4f) - .055f;
-                    encode[i] = static_cast<uint8_t>(std::clamp(s * 255 + .5f, 0.0f, 255.0f));
-                }
-            }
-        };
         struct Canceled {};
         void ThrowIfCanceled(const std::atomic<bool>& cancel) { if (cancel.load(std::memory_order_relaxed)) throw Canceled{}; }
 
@@ -101,7 +82,7 @@ namespace Mandelbrot
             int width,
             int height,
             const GpuMovieShutterParams& shutter,
-            const ColorSpace& colors,
+            const detail::LinearSrgbTables& colors,
             const std::atomic<bool>& cancel)
         {
             const uint32_t tapCount = shutter.tapCount;
@@ -271,7 +252,7 @@ namespace Mandelbrot
         plan.Validate();
         if (bandRows < 1) throw std::invalid_argument("Invalid movie render band size.");
         if (cancel.load(std::memory_order_relaxed)) return {};
-        static const ColorSpace colors;
+        const auto& colors = detail::LinearSrgbTables::Instance();
         const ExecutionMode requestedMode = plan.useGpu ? ExecutionMode::Gpu : ExecutionMode::Automatic;
         std::optional<MandelbrotEngine> localEngine;
         if (!sharedEngine)
@@ -347,7 +328,7 @@ namespace Mandelbrot
 
                 uint32_t* outBand = bandTargetBase + static_cast<size_t>(row) * plan.width;
                 gpuOk = engine.RenderGpuMovieBand(
-                    band, topHalo, rows, row, 0,
+                    band, topHalo, rows, row,
                     plan.theme, plan.frequency, plan.phase, plan.invert, plan.interior,
                     outBand, &cancel);
                 if (cancel.load(std::memory_order_relaxed)) return {};

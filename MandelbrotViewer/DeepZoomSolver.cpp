@@ -251,7 +251,7 @@ namespace Mandelbrot
                         smoothVal = static_cast<float>(std::max(0.0, iter - frac));
                     }
                 }
-                return rootIndex * 1000000.0f + smoothVal;
+                return rootIndex * NewtonRootStride + smoothVal;
             };
 
             detail::ExecuteRenderPass(

@@ -30,6 +30,7 @@ namespace Mandelbrot
             const BigFloat* anchorY = nullptr) noexcept;
 
         void ClearMovieHint() noexcept;
+        void Invalidate() noexcept;
 
         void Prepare(
             const FractalConfig& config,

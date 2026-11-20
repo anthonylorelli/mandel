@@ -3,6 +3,8 @@
 #include "MoviePlan.h"
 #include "MovieWriter.h"
 #include "MovieExport.h"
+#include "VideoBitstream.h"
+#include "Mp4Muxer.h"
 #include <filesystem>
 #include <fstream>
 #include <wincodec.h>
@@ -537,3 +539,49 @@ TEST_CASE(Movie, MovieHintReusesDeepReferenceAcrossLimbBoundaries)
     ASSERT_EQ(initialVersion, s1.orbitVersion);
     ASSERT_EQ(s0.refLen, s1.refLen);
 }
+
+TEST_CASE(Movie, VideoBitstreamMalformedSpsFallsBackSafely)
+{
+    // Truncated / all-zero H.264 and HEVC SPS payloads must return original bytes without UB or hang.
+    const std::vector<uint8_t> shortH264 = { 0x67, 0x64, 0x00, 0x1F };
+    ASSERT_TRUE(detail::PatchH264Sps(shortH264.data(), shortH264.size(), 64, 64) == shortH264);
+
+    const std::vector<uint8_t> zeroH264(16, 0x00);
+    ASSERT_TRUE(detail::PatchH264Sps(zeroH264.data(), zeroH264.size(), 64, 64) == zeroH264);
+
+    const std::vector<uint8_t> shortHevc = { 0x42, 0x01, 0x01 };
+    ASSERT_TRUE(detail::PatchHevcSps(shortHevc.data(), shortHevc.size(), 64, 64) == shortHevc);
+
+    const std::vector<uint8_t> zeroHevc(24, 0x00);
+    ASSERT_TRUE(detail::PatchHevcSps(zeroHevc.data(), zeroHevc.size(), 64, 64) == zeroHevc);
+
+    // Crafted H.264 High profile (100) with chroma_format_idc > 3 (exp-golomb 4 = 00101) must bail out cleanly.
+    const std::vector<uint8_t> badChromaH264 = { 0x67, 100, 0x00, 0x28, 0xAC, 0x28, 0x00, 0x00 };
+    ASSERT_TRUE(detail::PatchH264Sps(badChromaH264.data(), badChromaH264.size(), 64, 64) == badChromaH264);
+}
+
+TEST_CASE(Movie, ConvertBgraToNv12IgnoresInvalidDimensionsAndNullBuffers)
+{
+    std::vector<uint32_t> bgra(16, 0xFF804020);
+    std::vector<uint8_t> nv12(32, 0x5A);
+    const auto untouched = nv12;
+
+    detail::ConvertBgraToNv12FullRangeBT709(nullptr, 4, 4, nv12.data(), 4, 4);
+    ASSERT_TRUE(nv12 == untouched);
+
+    detail::ConvertBgraToNv12FullRangeBT709(bgra.data(), 4, 4, nullptr, 4, 4);
+
+    // Odd coded dimensions or non-positive dimensions must be rejected without writing out of bounds.
+    detail::ConvertBgraToNv12FullRangeBT709(bgra.data(), 4, 4, nv12.data(), 3, 4);
+    ASSERT_TRUE(nv12 == untouched);
+
+    detail::ConvertBgraToNv12FullRangeBT709(bgra.data(), 4, 4, nv12.data(), 4, 3);
+    ASSERT_TRUE(nv12 == untouched);
+
+    detail::ConvertBgraToNv12FullRangeBT709(bgra.data(), 0, 4, nv12.data(), 4, 4);
+    ASSERT_TRUE(nv12 == untouched);
+
+    detail::ConvertBgraToNv12FullRangeBT709(bgra.data(), 4, 4, nv12.data(), 0, 4);
+    ASSERT_TRUE(nv12 == untouched);
+}
+

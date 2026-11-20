@@ -73,14 +73,9 @@ namespace Mandelbrot
 
         if (m_executionMode == ExecutionMode::Gpu)
         {
-            BigFloat hpX = config.hpCenterX;
-            BigFloat hpY = config.hpCenterY;
-            if (std::abs(hpX.ToDouble() - config.centerX) > 1e-14 ||
-                std::abs(hpY.ToDouble() - config.centerY) > 1e-14)
-            {
-                hpX = BigFloat(config.centerX);
-                hpY = BigFloat(config.centerY);
-            }
+            BigFloat hpX;
+            BigFloat hpY;
+            config.ResolveHpCenter(hpX, hpY);
             double gpuElapsedMs = 0.0;
             if (EnsureGpuSolver().TryCompute(
                 config, hpX, hpY, m_deepCache, m_sampleWeights,
@@ -100,15 +95,9 @@ namespace Mandelbrot
 
         if (config.zoom >= DeepZoomThreshold)
         {
-            BigFloat hpX = config.hpCenterX;
-            BigFloat hpY = config.hpCenterY;
-            // Sync if caller only modified double centerX / centerY
-            if (std::abs(hpX.ToDouble() - config.centerX) > 1e-14 ||
-                std::abs(hpY.ToDouble() - config.centerY) > 1e-14)
-            {
-                hpX = BigFloat(config.centerX);
-                hpY = BigFloat(config.centerY);
-            }
+            BigFloat hpX;
+            BigFloat hpY;
+            config.ResolveHpCenter(hpX, hpY);
             return ComputeDeepZoom(config, hpX, hpY, outIterations, cancelToken, subpixelSamples);
         }
 
@@ -300,6 +289,11 @@ namespace Mandelbrot
         m_deepCache.ClearMovieHint();
     }
 
+    void MandelbrotEngine::InvalidateDeepCache() noexcept
+    {
+        m_deepCache.Invalidate();
+    }
+
     bool MandelbrotEngine::CanUseGpu(const FractalConfig& config)
     {
         return m_executionMode == ExecutionMode::Gpu && EnsureGpuSolver().CanSupportConfig(config);
@@ -316,7 +310,6 @@ namespace Mandelbrot
         int topHalo,
         int visibleRows,
         int destRowOffset,
-        int temporalStep,
         const ColorTheme& theme,
         float frequency,
         float phaseOffset,
@@ -330,14 +323,9 @@ namespace Mandelbrot
             return false;
         }
 
-        BigFloat hpX = bandConfig.hpCenterX;
-        BigFloat hpY = bandConfig.hpCenterY;
-        if (std::abs(hpX.ToDouble() - bandConfig.centerX) > 1e-14 ||
-            std::abs(hpY.ToDouble() - bandConfig.centerY) > 1e-14)
-        {
-            hpX = BigFloat(bandConfig.centerX);
-            hpY = BigFloat(bandConfig.centerY);
-        }
+        BigFloat hpX;
+        BigFloat hpY;
+        bandConfig.ResolveHpCenter(hpX, hpY);
 
         GpuMovieColorParams colorParams{};
         colorParams.lutData = theme.Lut().data();
@@ -355,7 +343,6 @@ namespace Mandelbrot
             topHalo,
             visibleRows,
             destRowOffset,
-            temporalStep,
             colorParams,
             ioBandPixels,
             cancelToken);

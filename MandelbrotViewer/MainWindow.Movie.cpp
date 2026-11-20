@@ -13,32 +13,22 @@ namespace winrt::MandelbrotViewer::implementation
 {
     namespace
     {
-        hstring FootageTime(uint32_t frames, int fps)
+        hstring FormatTenthsTimecode(uint64_t tenths)
         {
-            const auto tenths = static_cast<uint64_t>(frames) * 10 / fps;
             std::wostringstream text;
             text << std::setfill(L'0') << std::setw(2) << tenths / 36000 << L":"
                 << std::setw(2) << tenths / 600 % 60 << L":" << std::setw(2) << tenths / 10 % 60 << L"." << tenths % 10;
             return hstring(text.str());
+        }
+
+        hstring FootageTime(uint32_t frames, int fps)
+        {
+            return FormatTenthsTimecode(static_cast<uint64_t>(frames) * 10 / fps);
         }
 
         hstring ElapsedTime(double seconds)
         {
-            const auto tenths = static_cast<uint64_t>(std::max(0.0, std::floor(seconds * 10.0 + 0.5)));
-            std::wostringstream text;
-            text << std::setfill(L'0') << std::setw(2) << tenths / 36000 << L":"
-                << std::setw(2) << tenths / 600 % 60 << L":" << std::setw(2) << tenths / 10 % 60 << L"." << tenths % 10;
-            return hstring(text.str());
-        }
-
-        std::wstring FormatMovieZoom(double zoom)
-        {
-            std::wostringstream ss;
-            if (zoom < 1e4)
-                ss << std::fixed << std::setprecision(1) << zoom << L"x";
-            else
-                ss << std::scientific << std::setprecision(2) << zoom << L"x";
-            return ss.str();
+            return FormatTenthsTimecode(static_cast<uint64_t>(std::max(0.0, std::floor(seconds * 10.0 + 0.5))));
         }
     }
 
@@ -95,23 +85,43 @@ namespace winrt::MandelbrotViewer::implementation
             TextBox targetY; targetY.Header(box_value(L"Target center Y")); targetY.Text(targetYText); settings.Children().Append(targetY);
             const double startZoom = plan.start.zoom;
             const bool isJulia = plan.start.juliaSet;
-            const auto updateZoomAndTargets = [duration, direction, zoomSpeed, zoomSummary, autoTarget, targetX, targetY, startZoom, isJulia]()
+            // Capture dialog controls weakly so event subscriptions never create COM reference cycles.
+            const auto updateZoomAndTargets = [
+                weakDuration = make_weak(duration),
+                weakDirection = make_weak(direction),
+                weakZoomSpeed = make_weak(zoomSpeed),
+                weakZoomSummary = make_weak(zoomSummary),
+                weakAutoTarget = make_weak(autoTarget),
+                weakTargetX = make_weak(targetX),
+                weakTargetY = make_weak(targetY),
+                startZoom, isJulia]()
             {
-                const bool zoomIn = direction.SelectedIndex() == 0;
-                const double speed = std::clamp(std::round(zoomSpeed.Value() * 10.0) / 10.0,
+                auto durationCtrl = weakDuration.get();
+                auto directionCtrl = weakDirection.get();
+                auto zoomSpeedCtrl = weakZoomSpeed.get();
+                auto zoomSummaryCtrl = weakZoomSummary.get();
+                auto autoTargetCtrl = weakAutoTarget.get();
+                auto targetXCtrl = weakTargetX.get();
+                auto targetYCtrl = weakTargetY.get();
+                if (!durationCtrl || !directionCtrl || !zoomSpeedCtrl || !zoomSummaryCtrl ||
+                    !autoTargetCtrl || !targetXCtrl || !targetYCtrl)
+                    return;
+
+                const bool zoomIn = directionCtrl.SelectedIndex() == 0;
+                const double speed = std::clamp(std::round(zoomSpeedCtrl.Value() * 10.0) / 10.0,
                     Mandelbrot::MinMovieZoomSpeed, Mandelbrot::MaxMovieZoomSpeed);
                 std::wostringstream speedHeader;
                 speedHeader << L"Zoom speed (" << std::fixed << std::setprecision(1) << speed << L"x)";
-                zoomSpeed.Header(box_value(speedHeader.str()));
-                const int secs = std::isfinite(duration.Value())
-                    ? std::clamp(static_cast<int>(std::floor(duration.Value())), 1, 3600) : 30;
+                zoomSpeedCtrl.Header(box_value(speedHeader.str()));
+                const int secs = std::isfinite(durationCtrl.Value())
+                    ? std::clamp(static_cast<int>(std::floor(durationCtrl.Value())), 1, 3600) : 30;
                 const double previewEndZoom = Mandelbrot::MoviePlan::EndZoomForSpeed(startZoom, zoomIn, speed, secs);
-                zoomSummary.Text(hstring(L"Zoom range: " + FormatMovieZoom(startZoom) + L" \u2192 " + FormatMovieZoom(previewEndZoom)));
+                zoomSummaryCtrl.Text(hstring(L"Zoom range: ") + FormatZoom(startZoom) + L" \u2192 " + FormatZoom(previewEndZoom));
                 const bool canAutoTarget = zoomIn && !isJulia;
-                if (!canAutoTarget && autoTarget.IsChecked().GetBoolean()) autoTarget.IsChecked(false);
-                autoTarget.IsEnabled(canAutoTarget);
-                const bool manual = !canAutoTarget || !autoTarget.IsChecked().GetBoolean();
-                targetX.IsEnabled(manual); targetY.IsEnabled(manual);
+                if (!canAutoTarget && autoTargetCtrl.IsChecked().GetBoolean()) autoTargetCtrl.IsChecked(false);
+                autoTargetCtrl.IsEnabled(canAutoTarget);
+                const bool manual = !canAutoTarget || !autoTargetCtrl.IsChecked().GetBoolean();
+                targetXCtrl.IsEnabled(manual); targetYCtrl.IsEnabled(manual);
             };
             updateZoomAndTargets();
             duration.ValueChanged([updateZoomAndTargets](auto&&, auto&&) { updateZoomAndTargets(); });
@@ -183,8 +193,7 @@ namespace winrt::MandelbrotViewer::implementation
                     m_renderer->Cancel(); if (m_juliaRenderer) m_juliaRenderer->Cancel();
                     m_movieFps = plan.fps;
                     m_movieExporter = std::make_unique<Mandelbrot::MovieExporter>(std::move(plan), std::wstring(path.get()));
-                    m_movieExporting = true;
-                    ViewportGrid().Visibility(Visibility::Collapsed); SidebarBorder().Visibility(Visibility::Collapsed);
+                    ViewportLayout().Visibility(Visibility::Collapsed); SidebarBorder().Visibility(Visibility::Collapsed);
                     MoviePreviewImage().Source(nullptr);
                     MoviePreviewText().Text(L"The first rendered frame will appear here. Preview refreshes about every 15 seconds.");
                     MovieCancelButton().Content(box_value(L"Cancel Export")); MovieCancelButton().IsEnabled(true);
@@ -207,7 +216,7 @@ namespace winrt::MandelbrotViewer::implementation
         m_movieSetup = false;
         if (!m_isClosed)
         {
-            ExportMovieButton().IsEnabled(true);
+            ExportMovieButton().IsEnabled(m_movieExporter == nullptr);
             if (!m_movieExporter) { RenderFractal(); if (m_juliaVisible) RenderJulia(); }
         }
     }
@@ -251,10 +260,11 @@ namespace winrt::MandelbrotViewer::implementation
         }
         else
         {
-            m_movieExporter.reset(); m_movieExporting = false;
+            m_movieExporter.reset();
             MovieProgressOverlay().Visibility(Visibility::Collapsed);
-            ViewportGrid().Visibility(Visibility::Visible);
+            ViewportLayout().Visibility(Visibility::Visible);
             SidebarBorder().Visibility(m_isSidebarVisible ? Visibility::Visible : Visibility::Collapsed);
+            ExportMovieButton().IsEnabled(true);
             RenderFractal(); if (m_juliaVisible) RenderJulia();
         }
     }

@@ -1,12 +1,14 @@
 #pragma once
 #include "FractalCatalog.h"
 #include "HighPrecision.h"
+#include <cmath>
 
 namespace Mandelbrot
 {
     inline constexpr double DeepZoomThreshold = 1e11;
     inline constexpr double MaxZoom = 1e300;
     inline constexpr double MinZoom = 0.15;
+    inline constexpr float NewtonRootStride = 1000000.0f;
 
     // Automatic selects supported CPU optimizations, including guarded deep-zoom
     // iteration skipping. Scalar retains unaccelerated reference arithmetic.
@@ -56,6 +58,28 @@ namespace Mandelbrot
             hpCenterY = y;
             centerX = x.ToDouble();
             centerY = y.ToDouble();
+        }
+
+        // Syncs each high-precision coordinate independently when a caller only modified
+        // double centerX or centerY, preserving high-precision bits on the untouched axis.
+        void ResolveHpCenter(BigFloat& outX, BigFloat& outY) const noexcept
+        {
+            if (std::abs(hpCenterX.ToDouble() - centerX) > 1e-14)
+            {
+                outX = BigFloat(centerX);
+            }
+            else if (&outX != &hpCenterX)
+            {
+                outX = hpCenterX;
+            }
+            if (std::abs(hpCenterY.ToDouble() - centerY) > 1e-14)
+            {
+                outY = BigFloat(centerY);
+            }
+            else if (&outY != &hpCenterY)
+            {
+                outY = hpCenterY;
+            }
         }
     };
 }

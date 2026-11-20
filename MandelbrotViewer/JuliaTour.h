@@ -42,10 +42,7 @@ namespace Mandelbrot
             m_bulb = false;
             if (bounded && q * (q + x - 0.25) <= 0.25 * y * y)
             {
-                const Point root = std::sqrt(Point(1.0) - 4.0 * c);
-                m_from = std::abs(Point(1.0) - root) <= std::abs(Point(1.0) + root)
-                    ? Point(1.0) - root : Point(1.0) + root;
-                m_from = InDisk(m_from, 1.0);
+                m_from = InDisk(CardioidMultiplier(c), 1.0);
             }
             else if (bounded && std::abs(c + Point(1.0)) <= 0.25)
             {
@@ -58,9 +55,7 @@ namespace Mandelbrot
                 if (bounded)
                 {
                     // Preserve a stopped tour's exterior parameter when restarting nearby.
-                    const Point root = std::sqrt(Point(1.0) - 4.0 * c);
-                    const Point cardioid = std::abs(Point(1.0) - root) <= std::abs(Point(1.0) + root)
-                        ? Point(1.0) - root : Point(1.0) + root;
+                    const Point cardioid = CardioidMultiplier(c);
                     const Point bulb = 4.0 * (c + Point(1.0));
                     m_bulb = std::abs(bulb) < std::abs(cardioid);
                     const Point selected = m_bulb ? bulb : cardioid;
@@ -123,6 +118,18 @@ namespace Mandelbrot
         }
 
     private:
+        static Point CardioidMultiplier(Point c)
+        {
+            const Point root = std::sqrt(Point(1.0) - 4.0 * c);
+            return std::abs(Point(1.0) - root) <= std::abs(Point(1.0) + root)
+                ? Point(1.0) - root : Point(1.0) + root;
+        }
+
+        static double QuinticSmoothstep(double progress) noexcept
+        {
+            return progress * progress * progress * (10.0 + progress * (-15.0 + 6.0 * progress));
+        }
+
         int BurningShipEscapeIterations(Point c, int maxIter = 512) const
         {
             double zr = 0.0, zi = 0.0;
@@ -193,8 +200,9 @@ namespace Mandelbrot
                         bestExterior = mid;
                         bestExtIter = iter;
                     }
-                    if (iter >= 64) hi = mid;
-                    else lo = mid;
+                    // lo tracks the interior/high-iteration side, hi tracks the escaping exterior side.
+                    if (iter >= 64) lo = mid;
+                    else hi = mid;
                 }
             }
             if (wantInterior) return lo;
@@ -328,9 +336,7 @@ namespace Mandelbrot
                 for (int iter = 0; iter < 512; ++iter)
                 {
                     const double nextR = zr * zr - zi * zi + c.real();
-                    zi = (m_fractalType == FractalType::BurningShip)
-                        ? (-2.0 * std::abs(zr * zi) + c.imag())
-                        : (2.0 * zr * zi + c.imag());
+                    zi = 2.0 * zr * zi + c.imag();
                     zr = nextR;
                     if (zr * zr + zi * zi > 4.0) { escapes = true; break; }
                 }
@@ -351,7 +357,7 @@ namespace Mandelbrot
             {
                 if (progress <= 0.0) return m_fromPoint;
                 if (progress >= 1.0) return m_targetPoint;
-                const double t = progress * progress * progress * (10.0 + progress * (-15.0 + 6.0 * progress));
+                const double t = QuinticSmoothstep(progress);
                 const double u = 1.0 - t;
                 return u * u * m_fromPoint + 2.0 * u * t * m_controlPoint + t * t * m_targetPoint;
             }
@@ -360,7 +366,7 @@ namespace Mandelbrot
             // Vary radius and angle together for edge stretches and inward/outward detours.
             // Interpolated radii stay in the bounded tour neighborhood. Quintic easing keeps
             // velocity and acceleration zero at joins, giving shapes time to settle into view.
-            const double t = progress * progress * progress * (10.0 + progress * (-15.0 + 6.0 * progress));
+            const double t = QuinticSmoothstep(progress);
             return Parameter(std::polar(std::lerp(m_fromRadius, m_targetRadius, t),
                 std::lerp(m_fromAngle, m_targetAngle, t)));
         }

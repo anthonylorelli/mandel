@@ -25,7 +25,6 @@ namespace Mandelbrot
         void WriteFrame(const std::vector<uint32_t>& bgra);
         void Finish();
         MovieCodec ActiveCodec() const noexcept;
-        bool IsHardwareAccelerated() const noexcept;
     private:
         struct Impl;
         std::unique_ptr<Impl> m_impl;

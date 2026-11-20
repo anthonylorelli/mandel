@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 namespace Mandelbrot
@@ -94,7 +95,10 @@ namespace Mandelbrot
         double progress = 1.0;
         auto constrain = [&](double start, double end)
         {
-            if (end < 0.0) progress = std::min(progress, std::max(0.0, start) / (start - end));
+            if (end < 0.0 && end < start)
+            {
+                progress = (start <= 0.0) ? 0.0 : std::min(progress, start / (start - end));
+            }
         };
         constrain(MaxPresentationScale - a.scale, MaxPresentationScale - b.scale);
         constrain(-a.x, -b.x);
@@ -115,8 +119,24 @@ namespace Mandelbrot
     inline std::vector<uint8_t> SnapshotViewport(
         const uint8_t* source, const MandelbrotConfig& frame, const MandelbrotConfig& view)
     {
+        if (view.width <= 0 || view.height <= 0) return {};
+        const size_t byteCount = static_cast<size_t>(view.width) * view.height * 4;
+        std::vector<uint8_t> pixels(byteCount, 0);
+        if (!source || frame.width <= 0 || frame.height <= 0 || !(frame.zoom > 0.0) || !(view.zoom > 0.0))
+        {
+            return pixels;
+        }
         const auto t = FrameToViewport(frame, view);
-        std::vector<uint8_t> pixels(static_cast<size_t>(view.width) * view.height * 4);
+        if (!std::isfinite(t.scale) || !(t.scale > 0.0) || !std::isfinite(t.x) || !std::isfinite(t.y))
+        {
+            return pixels;
+        }
+        if (frame.width == view.width && frame.height == view.height &&
+            std::abs(t.scale - 1.0) < 1e-9 && std::abs(t.x) < 1e-9 && std::abs(t.y) < 1e-9)
+        {
+            std::memcpy(pixels.data(), source, byteCount);
+            return pixels;
+        }
         for (int y = 0; y < view.height; ++y)
         {
             const double sy = std::clamp(((y + 0.5) - t.y) / t.scale - 0.5, 0.0, frame.height - 1.0);

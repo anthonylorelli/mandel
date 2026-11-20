@@ -14,6 +14,17 @@ namespace Mandelbrot
         Stop();
     }
 
+    void BackgroundRenderer::DiscardCompletedLocked() noexcept
+    {
+        if (m_completed)
+        {
+            // A completed frame means the worker is idle and the back buffer is available.
+            m_workBuffer = std::move(m_completed->iterations);
+            m_workSamples = std::move(m_completed->samples);
+            m_completed.reset();
+        }
+    }
+
     uint64_t BackgroundRenderer::Submit(const MandelbrotConfig& config, bool supersede)
     {
         std::lock_guard lock(m_mutex);
@@ -22,13 +33,7 @@ namespace Mandelbrot
         {
             ++m_generation;
             m_cancel.store(true, std::memory_order_relaxed);
-            if (m_completed)
-            {
-                // A completed frame means the worker is idle and the back buffer is available.
-                m_workBuffer = std::move(m_completed->iterations);
-                m_workSamples = std::move(m_completed->samples);
-                m_completed.reset();
-            }
+            DiscardCompletedLocked();
         }
         const uint64_t id = ++m_nextId;
         m_pending = Request{ config, id, m_generation };
@@ -82,12 +87,7 @@ namespace Mandelbrot
         ++m_generation;
         m_cancel.store(true, std::memory_order_relaxed);
         m_pending.reset();
-        if (m_completed)
-        {
-            m_workBuffer = std::move(m_completed->iterations);
-            m_workSamples = std::move(m_completed->samples);
-            m_completed.reset();
-        }
+        DiscardCompletedLocked();
     }
 
     void BackgroundRenderer::Run()
@@ -104,7 +104,9 @@ namespace Mandelbrot
             m_cancel.store(false, std::memory_order_relaxed);
             lock.unlock();
 
-            RenderResult result{ request.config, request.id };
+            RenderResult result{};
+            result.config = request.config;
+            result.requestId = request.id;
             m_workSamples.clear();
             try
             {
@@ -121,9 +123,16 @@ namespace Mandelbrot
             if (m_stopping) return;
             if (m_cancel.load(std::memory_order_relaxed) || request.generation != m_generation || result.error)
             {
-                // A canceled deep render may have partially modified the reference cache.
-                m_engine = MandelbrotEngine{};
-                if (!result.error || request.generation != m_generation) continue;
+                const bool discard = !result.error || request.generation != m_generation;
+                if (!m_compute && (request.config.zoom >= DeepZoomThreshold || result.error))
+                {
+                    // A canceled or failed deep render may have partially modified the reference cache.
+                    lock.unlock();
+                    m_engine.InvalidateDeepCache();
+                    lock.lock();
+                    if (m_stopping) return;
+                }
+                if (discard || request.generation != m_generation) continue;
             }
             m_completed = Completed{ std::move(result), std::move(m_workBuffer), std::move(m_workSamples) };
             lock.unlock();
