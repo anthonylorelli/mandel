@@ -551,9 +551,8 @@ cbuffer PostParams : register(b0)
     float phaseOffset;
     uint interiorColor;
     uint avgRgb;
-    uint temporalMode;
     uint subGroupThreads;
-    uint pad0, pad1;
+    uint pad0, pad1, pad2;
 };
 
 struct GpuPixelSubInfo
@@ -688,7 +687,20 @@ void CSBuildActiveIndirectArgs(uint3 tid : SV_DispatchThreadID)
 }
 )";
 
-        // Shader 6: Fused GPU 4x Supersampled Palette Coloring + Linear-Light Temporal Blending.
+#define MANDEL_HLSL_SRGB_HELPERS \
+"\nfloat SrgbByteToLinear(uint byteVal)\n" \
+"{\n" \
+"    float v = float(byteVal) * (1.0f / 255.0f);\n" \
+"    return (v <= 0.04045f) ? (v * (1.0f / 12.92f)) : pow((v + 0.055f) * (1.0f / 1.055f), 2.4f);\n" \
+"}\n\n" \
+"uint LinearToSrgbByte(float lin)\n" \
+"{\n" \
+"    float v = floor(clamp(lin * 4096.0f + 0.5f, 0.0f, 4096.0f)) * (1.0f / 4096.0f);\n" \
+"    float s = (v <= 0.0031308f) ? (12.92f * v) : (1.055f * pow(max(v, 0.0f), 1.0f / 2.4f) - 0.055f);\n" \
+"    return uint(clamp(s * 255.0f + 0.5f, 0.0f, 255.0f));\n" \
+"}\n"
+
+        // Shader 6: Fused GPU 4x Supersampled Palette Coloring.
         constexpr const char* kPostResolveShaderSrc = R"(
 cbuffer PostParams : register(b0)
 {
@@ -704,9 +716,8 @@ cbuffer PostParams : register(b0)
     float phaseOffset;
     uint interiorColor;
     uint avgRgb;
-    uint temporalMode;
     uint subGroupThreads;
-    uint pad0, pad1;
+    uint pad0, pad1, pad2;
 };
 
 struct GpuPixelSubInfo
@@ -719,7 +730,6 @@ StructuredBuffer<float> InIters : register(t0);
 StructuredBuffer<GpuPixelSubInfo> InPixelSubInfo : register(t1);
 StructuredBuffer<float> InSubpixelsFlat : register(t2);
 Buffer<uint> PaletteLut : register(t3);
-StructuredBuffer<uint> PrevBandPixels : register(t4);
 
 RWStructuredBuffer<uint> OutAccumPixels : register(u0);
 
@@ -794,20 +804,7 @@ uint ColorIterationGpu(float value)
     }
     return SamplePaletteLut(MapIterToPhase(value) + phaseOffset);
 }
-
-float SrgbByteToLinear(uint byteVal)
-{
-    float v = float(byteVal) * (1.0f / 255.0f);
-    return (v <= 0.04045f) ? (v * (1.0f / 12.92f)) : pow((v + 0.055f) * (1.0f / 1.055f), 2.4f);
-}
-
-uint LinearToSrgbByte(float lin)
-{
-    float v = floor(clamp(lin * 4096.0f + 0.5f, 0.0f, 4096.0f)) * (1.0f / 4096.0f);
-    float s = (v <= 0.0031308f) ? (12.92f * v) : (1.055f * pow(max(v, 0.0f), 1.0f / 2.4f) - 0.055f);
-    return uint(clamp(s * 255.0f + 0.5f, 0.0f, 255.0f));
-}
-
+)" MANDEL_HLSL_SRGB_HELPERS R"(
 [numthreads(16, 16, 1)]
 void CSResolveAndBlend(uint3 tid : SV_DispatchThreadID)
 {
@@ -894,34 +891,8 @@ void CSResolveAndBlend(uint3 tid : SV_DispatchThreadID)
         }
     }
 
-    uint localIdx = tid.y * width + tid.x;
     uint dstIdx = (destRowOffset + tid.y) * width + tid.x;
-
-    if (temporalMode == 0u)
-    {
-        OutAccumPixels[dstIdx] = resolvedColor;
-    }
-    else
-    {
-        uint c0 = (temporalMode == 1u) ? OutAccumPixels[dstIdx] : PrevBandPixels[localIdx];
-        if (c0 != resolvedColor)
-        {
-            uint blended = 0xFF000000u;
-            [unroll]
-            for (uint ch = 0u; ch < 3u; ++ch)
-            {
-                uint sh = ch * 8u;
-                float avg = (SrgbByteToLinear((c0 >> sh) & 255u) +
-                             SrgbByteToLinear((resolvedColor >> sh) & 255u)) * 0.5f;
-                blended |= LinearToSrgbByte(avg) << sh;
-            }
-            OutAccumPixels[dstIdx] = blended;
-        }
-    else if (temporalMode == 2u)
-    {
-        OutAccumPixels[dstIdx] = c0;
-    }
-    }
+    OutAccumPixels[dstIdx] = resolvedColor;
 }
 )";
 
@@ -938,20 +909,7 @@ cbuffer ShutterParams : register(b0)
 
 StructuredBuffer<uint> InRawPixels : register(t0);
 RWStructuredBuffer<uint> OutShutterPixels : register(u0);
-
-float SrgbByteToLinear(uint byteVal)
-{
-    float v = float(byteVal) * (1.0f / 255.0f);
-    return (v <= 0.04045f) ? (v * (1.0f / 12.92f)) : pow((v + 0.055f) * (1.0f / 1.055f), 2.4f);
-}
-
-uint LinearToSrgbByte(float lin)
-{
-    float v = floor(clamp(lin * 4096.0f + 0.5f, 0.0f, 4096.0f)) * (1.0f / 4096.0f);
-    float s = (v <= 0.0031308f) ? (12.92f * v) : (1.055f * pow(max(v, 0.0f), 1.0f / 2.4f) - 0.055f);
-    return uint(clamp(s * 255.0f + 0.5f, 0.0f, 255.0f));
-}
-
+)" MANDEL_HLSL_SRGB_HELPERS R"(
 float3 DecodeBgraLinear(uint c)
 {
     return float3(
@@ -1048,6 +1006,7 @@ void CSShutterMotionBlur(uint3 tid : SV_DispatchThreadID)
         | LinearToSrgbByte(avgLin.x);
 }
 )";
+#undef MANDEL_HLSL_SRGB_HELPERS
     }
 
     const char* GetPerturbDeepExpShaderSource() noexcept

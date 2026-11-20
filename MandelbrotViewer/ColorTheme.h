@@ -1,12 +1,44 @@
 #pragma once
-#include <vector>
-#include <string>
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstdint>
+#include <string>
+#include <vector>
+#include "FractalCatalog.h"
 #include "PixelSampling.h"
 
 namespace Mandelbrot
 {
-    enum class FractalType;
+    namespace detail
+    {
+        struct LinearSrgbTables
+        {
+            std::array<float, 256> decode{};
+            std::array<uint8_t, 4097> encode{};
+
+            LinearSrgbTables()
+            {
+                for (size_t i = 0; i < decode.size(); ++i)
+                {
+                    const float s = static_cast<float>(i) / 255.0f;
+                    decode[i] = (s <= 0.04045f) ? (s / 12.92f) : std::pow((s + 0.055f) / 1.055f, 2.4f);
+                }
+                for (size_t i = 0; i < encode.size(); ++i)
+                {
+                    const float linear = static_cast<float>(i) / static_cast<float>(encode.size() - 1);
+                    const float s = (linear <= 0.0031308f) ? (12.92f * linear) : (1.055f * std::pow(linear, 1.0f / 2.4f) - 0.055f);
+                    encode[i] = static_cast<uint8_t>(std::clamp(s * 255.0f + 0.5f, 0.0f, 255.0f));
+                }
+            }
+
+            static const LinearSrgbTables& Instance()
+            {
+                static const LinearSrgbTables tables;
+                return tables;
+            }
+        };
+    }
 
     struct GradientStop
     {
@@ -67,7 +99,7 @@ namespace Mandelbrot
             float phaseOffset,
             bool invert,
             uint32_t interiorColor = 0xFF000000,
-            FractalType fractalType = static_cast<FractalType>(0),
+            FractalType fractalType = FractalType::Mandelbrot,
             int width = 0,
             const std::vector<SubpixelSamples>* subpixelSamples = nullptr,
             bool filterPalette = true) const;
@@ -80,7 +112,7 @@ namespace Mandelbrot
 
     private:
         uint32_t ColorIteration(float iter, float frequency, float phaseOffset, bool invert,
-            uint32_t interiorColor, FractalType fractalType, float deltaU = 0.0f) const;
+            uint32_t interiorColor, FractalType fractalType) const;
         uint32_t ColorAtPhase(float basePhase, float phaseOffset, bool invert, float deltaU) const;
         PresetTheme m_currentPreset{ PresetTheme::ElectricBlue };
         std::vector<GradientStop> m_stops;

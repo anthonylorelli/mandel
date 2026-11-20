@@ -49,7 +49,6 @@ namespace Mandelbrot
         int topHalo,
         int visibleRows,
         int destRowOffset,
-        int temporalStep,
         const GpuMovieColorParams& colorParams,
         uint32_t* ioBandPixels,
         const std::atomic<bool>* cancelToken)
@@ -127,17 +126,6 @@ namespace Mandelbrot
                     m_impl->accumPixelsStaging, m_impl->accumPixelsStagingCapBytes))
             {
                 return false;
-            }
-            if (temporalStep > 0)
-            {
-                if (!m_impl->EnsureStructuredSrvBuffer(
-                        visiblePixels, sizeof(uint32_t),
-                        m_impl->prevBandBuf, m_impl->prevBandSrv, m_impl->prevBandCapElems) ||
-                    !m_impl->UploadBufferDiscard(
-                        m_impl->prevBandBuf.Get(), ioBandPixels, visiblePixels * sizeof(uint32_t)))
-                {
-                    return false;
-                }
             }
         }
 
@@ -320,7 +308,6 @@ namespace Mandelbrot
         postCb.phaseOffset = colorParams.phaseOffset;
         postCb.interiorColor = colorParams.interiorColor;
         postCb.avgRgb = colorParams.avgRgb;
-        postCb.temporalMode = (temporalStep == 0) ? 0u : (m_impl->movieFullFrameAccum ? 1u : 2u);
         postCb.subGroupThreads =
             (mode == GpuShaderMode::PerturbLds || mode == GpuShaderMode::PerturbLdsBla) ? 512u : 256u;
 
@@ -363,7 +350,7 @@ namespace Mandelbrot
         m_impl->SetSubpixelShader(mode);
         m_impl->context->DispatchIndirect(m_impl->indirectArgsBuf.Get(), 0);
 
-        // Step E: Fused 4x supersampled palette coloring + linear-light temporal shutter blend
+        // Step E: Fused 4x supersampled palette coloring into the full-frame (or strip) BGRA buffer
         m_impl->context->CSSetShaderResources(0, 8, nullSrvs8);
         ID3D11UnorderedAccessView* resolveUavs[3]{ m_impl->accumPixelsUav.Get(), nullptr, nullptr };
         m_impl->context->CSSetUnorderedAccessViews(0, 3, resolveUavs, nullptr);
@@ -373,7 +360,7 @@ namespace Mandelbrot
             m_impl->pixelSubInfoSrv.Get(),
             m_impl->subOutSrv.Get(),
             m_impl->paletteLutSrv.Get(),
-            (!m_impl->movieFullFrameAccum && temporalStep > 0) ? m_impl->prevBandSrv.Get() : nullptr,
+            nullptr,
             nullptr,
             nullptr,
             nullptr
@@ -391,8 +378,7 @@ namespace Mandelbrot
         m_impl->UnbindComputeResources();
 
         // For 8K+ frames exceeding single-buffer full-frame accumulation, read back only this strip;
-        // otherwise flush queued GPU dispatches immediately so CPU reference/BLA prep for the next
-        // temporal sample overlaps with GPU execution.
+        // otherwise flush queued GPU dispatches immediately so CPU band setup overlaps with GPU execution.
         if (!m_impl->movieFullFrameAccum)
         {
             const size_t stripBytes = visiblePixels * sizeof(uint32_t);

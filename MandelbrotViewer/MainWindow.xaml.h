@@ -33,7 +33,7 @@ namespace winrt::MandelbrotViewer::implementation
         void OnJuliaZoomOutClick(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::RoutedEventArgs const&);
         void OnJuliaResetClick(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::RoutedEventArgs const&);
         winrt::Windows::Foundation::IAsyncAction OnJuliaExportClick(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::RoutedEventArgs const&);
-        winrt::Windows::Foundation::IAsyncAction OnJuliaCopyCoordsClick(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::RoutedEventArgs const&);
+        void OnJuliaCopyCoordsClick(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::RoutedEventArgs const&);
 
         // Viewport interaction
         void OnViewportSizeChanged(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::SizeChangedEventArgs const& e);
@@ -94,13 +94,40 @@ namespace winrt::MandelbrotViewer::implementation
         winrt::Windows::Foundation::IAsyncAction OnExportMovieClick(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::RoutedEventArgs const&);
         void OnMovieCancelClick(winrt::Windows::Foundation::IInspectable const&, winrt::Microsoft::UI::Xaml::RoutedEventArgs const&);
         winrt::Windows::Foundation::IAsyncAction OnExportImageClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
-        winrt::Windows::Foundation::IAsyncAction OnCopyCoordsClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
+        void OnCopyCoordsClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
 
     private:
+        struct ScopedEventSuppress
+        {
+            int& depth;
+            explicit ScopedEventSuppress(int& d) noexcept : depth(d) { ++depth; }
+            ~ScopedEventSuppress() noexcept { --depth; }
+            ScopedEventSuppress(const ScopedEventSuppress&) = delete;
+            ScopedEventSuppress& operator=(const ScopedEventSuppress&) = delete;
+        };
+
+        bool IsSuppressingEvents() const noexcept { return m_suppressEventDepth > 0; }
+        static winrt::hstring FormatZoom(double zoom);
+        static void UpdatePlayStopVisual(
+            winrt::Microsoft::UI::Xaml::Controls::FontIcon const& icon,
+            winrt::Microsoft::UI::Xaml::UIElement const& button,
+            bool running,
+            wchar_t const* startTooltip,
+            wchar_t const* stopTooltip,
+            wchar_t const* startAutoName = nullptr,
+            wchar_t const* stopAutoName = nullptr);
+        std::unique_ptr<Mandelbrot::BackgroundRenderer> CreateBackgroundRenderer(void (MainWindow::*onCompleted)());
+        void SyncMaxIterationsUi(int value, int sliderThreshold = 0);
+        void ApplyBookmark(const Mandelbrot::BookmarkLocation& bookmark, bool selectComboIndex = false, int comboIndex = 0);
+        void CopyTextToClipboard(
+            std::wstring const& text,
+            winrt::Microsoft::UI::Xaml::Controls::TextBlock const& statusTarget,
+            wchar_t const* successMessage);
+
         void UpdateMovieProgress();
         std::unique_ptr<Mandelbrot::MovieExporter> m_movieExporter;
         winrt::Microsoft::UI::Xaml::DispatcherTimer m_movieProgressTimer{nullptr};
-        bool m_movieExporting{}, m_movieSetup{};
+        bool m_movieSetup{};
         int m_movieFps{30};
         void InitializeControls();
         void PopulateBookmarks();
@@ -214,7 +241,7 @@ namespace winrt::MandelbrotViewer::implementation
 
         bool m_isSidebarVisible{ true };
         bool m_sidebarVisibleBeforeFullScreen{ true };
-        bool m_suppressEvents{ true };
+        int m_suppressEventDepth{ 0 };
         bool m_isClosed{ false };
         winrt::hstring m_targetXText;
         winrt::hstring m_targetYText;

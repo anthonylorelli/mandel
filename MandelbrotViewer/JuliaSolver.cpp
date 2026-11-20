@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <mutex>
 #include <stdexcept>
 #include <utility>
 
@@ -33,28 +34,35 @@ namespace Mandelbrot
         const bool deep = zoom >= DeepZoomThreshold;
         const int limbs = std::clamp((static_cast<int>(std::ceil((2.0 * std::log2(zoom) + 96.0) / 32.0)) + 1) & ~1, 4, BigFloat::N);
         auto canceled = [&] { return cancelToken && cancelToken->load(std::memory_order_relaxed); };
-        auto centerX = config.hpCenterX, centerY = config.hpCenterY;
-        if (std::abs(centerX.ToDouble() - config.centerX) > 1e-14) centerX = BigFloat(config.centerX);
-        if (std::abs(centerY.ToDouble() - config.centerY) > 1e-14) centerY = BigFloat(config.centerY);
+        BigFloat centerX;
+        BigFloat centerY;
+        config.ResolveHpCenter(centerX, centerY);
+        constexpr double invLn2 = 1.44269504088896340736;
         auto finish = [&](double zr, double zi, int iter) -> float
         {
             if (iter >= config.maxIterations) return -1.0f;
             if (!config.smooth) return static_cast<float>(iter);
-            for (int extra = 0; extra < 3 && zr * zr + zi * zi < 1e100; ++extra)
-            {
-                const double nextR = zr * zr - zi * zi + cx;
-                zi = burningShip ? (-2.0 * std::abs(zr * zi) + cy) : (2.0 * zr * zi + cy);
-                zr = nextR;
-                ++iter;
-            }
-            const double mag = zr * zr + zi * zi;
-            if (!std::isfinite(mag)) return 0.0f;
-            return static_cast<float>(std::max(0.0, iter + 1.0 - std::log2(0.5 * std::log(mag))));
+            return detail::ComputeSmoothEscapeIteration(
+                config.fractalType, iter, zr, zi, 0.0, 0.0, cx, cy, invLn2);
         };
         auto seed = [&](double px, double py)
         {
             return std::pair{ centerX + BigFloat((px + 0.5 - config.width * 0.5) * step),
                 centerY + BigFloat((config.height * 0.5 - py - 0.5) * step) };
+        };
+        auto stepBigFloatJulia = [&](BigFloat& zr, BigFloat& zi, const BigFloat& r2, const BigFloat& i2)
+        {
+            const auto product = zr.Mul(zi, limbs);
+            zr = r2 - i2 + config.juliaX;
+            if (burningShip)
+            {
+                const auto twoAbs = (product + product).Abs();
+                zi = config.juliaY - twoAbs;
+            }
+            else
+            {
+                zi = product + product + config.juliaY;
+            }
         };
         auto exactPixel = [&](double px, double py) -> float
         {
@@ -68,17 +76,7 @@ namespace Mandelbrot
                 if (iter == 0 && config.juliaX.IsZero() && config.juliaY.IsZero() && BigFloat::CompareMagnitude(mag, one) <= 0)
                     return -1.0f;
                 if (BigFloat::CompareMagnitude(mag, limit) > 0) return finish(zr.ToDouble(), zi.ToDouble(), iter);
-                const auto product = zr.Mul(zi, limbs);
-                zr = r2 - i2 + config.juliaX;
-                if (burningShip)
-                {
-                    const auto twoAbs = (product + product).Abs();
-                    zi = config.juliaY - twoAbs;
-                }
-                else
-                {
-                    zi = product + product + config.juliaY;
-                }
+                stepBigFloatJulia(zr, zi, r2, i2);
             }
             return -1.0f;
         };
@@ -88,31 +86,36 @@ namespace Mandelbrot
         // relative orbit unreliable. This also preserves sub-double selected parameters.
         std::vector<ComplexOrbitPoint> orbit;
         std::vector<std::pair<BigFloat, BigFloat>> preciseOrbit;
+        std::once_flag preciseOrbitOnce;
         if (deep)
         {
             orbit.reserve(static_cast<size_t>(config.maxIterations) + 1);
-            preciseOrbit.reserve(static_cast<size_t>(config.maxIterations) + 1);
             auto zr = centerX, zi = centerY;
             for (int iter = 0; iter <= config.maxIterations; ++iter)
             {
                 if (canceled()) return 0.0;
                 orbit.push_back({ zr.ToDouble(), zi.ToDouble() });
-                preciseOrbit.emplace_back(zr, zi);
-                if (zr.Sqr(limbs).ToDouble() + zi.Sqr(limbs).ToDouble() > bailout2) break;
-                const auto nextR = zr.Sqr(limbs) - zi.Sqr(limbs) + config.juliaX;
-                const auto product = zr.Mul(zi, limbs);
-                if (burningShip)
-                {
-                    const auto twoAbs = (product + product).Abs();
-                    zi = config.juliaY - twoAbs;
-                }
-                else
-                {
-                    zi = product + product + config.juliaY;
-                }
-                zr = nextR;
+                const auto r2 = zr.Sqr(limbs), i2 = zi.Sqr(limbs);
+                if (r2.ToDouble() + i2.ToDouble() > bailout2) break;
+                stepBigFloatJulia(zr, zi, r2, i2);
             }
         }
+        auto ensurePreciseOrbit = [&]()
+        {
+            std::call_once(preciseOrbitOnce, [&]()
+            {
+                preciseOrbit.reserve(orbit.size());
+                auto zr = centerX, zi = centerY;
+                for (size_t iter = 0; iter < orbit.size(); ++iter)
+                {
+                    if (canceled()) break;
+                    preciseOrbit.emplace_back(zr, zi);
+                    if (iter + 1 >= orbit.size()) break;
+                    const auto r2 = zr.Sqr(limbs), i2 = zi.Sqr(limbs);
+                    stepBigFloatJulia(zr, zi, r2, i2);
+                }
+            });
+        };
         auto bigDiffAbs = [](const BigFloat& r, const BigFloat& d) -> BigFloat
         {
             if (r.IsZero()) return d.Abs();
@@ -127,6 +130,7 @@ namespace Mandelbrot
         // range. Keep that displacement separate from Z so adding it to c cannot erase it.
         auto extendedPixel = [&](double px, double py) -> float
         {
+            ensurePreciseOrbit();
             BigFloat dx((px + 0.5 - config.width * 0.5) * step);
             BigFloat dy((config.height * 0.5 - py - 0.5) * step);
             const BigFloat limit(bailout2);
@@ -217,7 +221,9 @@ namespace Mandelbrot
                 {
                     nextDy = 2.0 * (ref.x * dy + ref.y * dx + dx * dy);
                 }
-                if (nextDx == 0.0 && nextDy == 0.0 && (dx != 0.0 || dy != 0.0)) return extendedPixel(px, py);
+                // Guard before double deltas underflow into subnormals (DBL_MIN ~ 2.2e-308).
+                if (std::max(std::abs(nextDx), std::abs(nextDy)) < 1e-305 && (dx != 0.0 || dy != 0.0))
+                    return extendedPixel(px, py);
                 dy = nextDy;
                 dx = nextDx;
             }

@@ -2,6 +2,7 @@
 #include "TestHarness.h"
 #include "ColorTheme.h"
 #include "MandelbrotEngine.h"
+#include <limits>
 
 using namespace Mandelbrot;
 
@@ -241,3 +242,49 @@ TEST_CASE(ColorTheme, HighIteration_LogCompressionAndAntiAliasing)
     ASSERT_GT(r1, 40);
     ASSERT_LT(r1, 200);
 }
+
+TEST_CASE(ColorTheme, CustomStops_SanitizeNaNAndOutOfRangePositions)
+{
+    ColorTheme theme(PresetTheme::Monochrome);
+    const float nanVal = std::numeric_limits<float>::quiet_NaN();
+
+    theme.SetStops({
+        { nanVal, 10, 20, 30 },
+        { -0.5f, 40, 50, 60 },
+        { 2.5f, 200, 210, 220 }
+    });
+    ASSERT_EQ(static_cast<size_t>(3), theme.Stops().size());
+    for (const auto& stop : theme.Stops())
+    {
+        ASSERT_TRUE(std::isfinite(stop.position));
+        ASSERT_GE(stop.position, 0.0f);
+        ASSERT_LE(stop.position, 1.0f);
+    }
+
+    theme.AddStop(nanVal, 1, 2, 3);
+    theme.AddStop(-3.0f, 4, 5, 6);
+    theme.AddStop(4.0f, 7, 8, 9);
+    for (const auto& stop : theme.Stops())
+    {
+        ASSERT_TRUE(std::isfinite(stop.position));
+        ASSERT_GE(stop.position, 0.0f);
+        ASSERT_LE(stop.position, 1.0f);
+    }
+
+    theme.UpdateStop(0, nanVal, 11, 22, 33);
+    theme.UpdateStop(1, 5.0f, 44, 55, 66);
+    for (const auto& stop : theme.Stops())
+    {
+        ASSERT_TRUE(std::isfinite(stop.position));
+        ASSERT_GE(stop.position, 0.0f);
+        ASSERT_LE(stop.position, 1.0f);
+    }
+
+    // Resulting LUT must remain fully valid and opaque.
+    ASSERT_EQ(ColorTheme::LUT_SIZE, theme.Lut().size());
+    for (uint32_t color : theme.Lut())
+    {
+        ASSERT_EQ(0xFFu, (color >> 24) & 0xFFu);
+    }
+}
+

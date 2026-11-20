@@ -35,20 +35,8 @@ namespace Mandelbrot::detail
         }
         if (iter >= maxIter) return -1.0f;
         if (!smooth) return static_cast<float>(iter);
-
-        int smoothIter = iter;
-        for (int extra = 0; extra < 3 && zr2 + zi2 < 1e100; ++extra)
-        {
-            zi = 2.0 * zr * zi + cy;
-            zr = zr2 - zi2 + cx;
-            zr2 = zr * zr;
-            zi2 = zi * zi;
-            ++smoothIter;
-        }
         constexpr double invLn2 = 1.44269504088896340736;
-        const double logZn = std::log(zr2 + zi2) * 0.5;
-        const double nu = smoothIter + 1.0 - std::log(logZn) * invLn2;
-        return static_cast<float>(nu > 0.0 ? nu : 0.0);
+        return ComputeSmoothEscapeIteration(FractalType::Mandelbrot, iter, zr, zi, 0.0, 0.0, cx, cy, invLn2);
     }
 
     inline bool CertifyMandelbrotStandardInteriorStrip(double cxMid, double cy,

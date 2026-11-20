@@ -43,12 +43,7 @@ namespace Mandelbrot
         if (config.width <= 0 || config.height <= 0 || factor <= 0.0) return;
 
         // Ensure hpCenterX/Y are synced if caller only set double centerX/Y
-        if (std::abs(config.hpCenterX.ToDouble() - config.centerX) > 1e-14 ||
-            std::abs(config.hpCenterY.ToDouble() - config.centerY) > 1e-14)
-        {
-            config.hpCenterX = BigFloat(config.centerX);
-            config.hpCenterY = BigFloat(config.centerY);
-        }
+        config.ResolveHpCenter(config.hpCenterX, config.hpCenterY);
 
         const double oldZoom = std::clamp(config.zoom, MinZoom, MaxZoom);
         const double newZoom = std::clamp(oldZoom * factor, MinZoom, MaxZoom);

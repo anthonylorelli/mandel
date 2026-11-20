@@ -563,14 +563,9 @@ namespace Mandelbrot
 
         std::lock_guard lock(m_impl->mutex);
 
-        BigFloat hpX = config.hpCenterX;
-        BigFloat hpY = config.hpCenterY;
-        if (std::abs(hpX.ToDouble() - config.centerX) > 1e-14 ||
-            std::abs(hpY.ToDouble() - config.centerY) > 1e-14)
-        {
-            hpX = BigFloat(config.centerX);
-            hpY = BigFloat(config.centerY);
-        }
+        BigFloat hpX;
+        BigFloat hpY;
+        config.ResolveHpCenter(hpX, hpY);
 
         DeepReferenceState refState{};
         if (!referenceCache.Ensure(config, hpX, hpY, ExecutionMode::Gpu, refState, cancelToken))
@@ -720,97 +715,18 @@ namespace Mandelbrot
         // Pass 2: Optional 4x adaptive boundary subpixel refinement
         if (subpixelSamples && !canceled())
         {
-            const bool smooth = config.smooth;
-            const FractalType type = config.fractalType;
-            sampleWeights.resize(totalPixels);
-            std::vector<size_t> rowOffsets(static_cast<size_t>(height) + 1, 0);
-
-            #pragma omp parallel for schedule(static)
-            for (int y = 0; y < height; ++y)
-            {
-                if (canceled()) continue;
-                size_t selected = 0;
-                const int y0 = std::max(0, y - 1), y1 = std::min(height - 1, y + 1);
-                for (int x = 0; x < width; ++x)
-                {
-                    const size_t index = static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x);
-                    const float center = outIterations[index];
-                    const int x0 = std::max(0, x - 1), x1 = std::min(width - 1, x + 1);
-                    if (center < 0.0f)
-                    {
-                        bool boundary = false;
-                        for (int ny = y0; ny <= y1 && !boundary; ++ny)
-                        {
-                            const float* nRow = outIterations.data() + static_cast<size_t>(ny) * static_cast<size_t>(width);
-                            for (int nx = x0; nx <= x1; ++nx)
-                            {
-                                if (nRow[nx] >= 0.0f) { boundary = true; break; }
-                            }
-                        }
-                        sampleWeights[index] = boundary ? 1.0f : 0.0f;
-                        if (boundary) ++selected;
-                        continue;
-                    }
-                    float variation = 0.0f;
-                    bool boundary = false;
-                    const float a = (type == FractalType::Newton) ? std::fmod(center, 1000000.0f) : center;
-                    for (int ny = y0; ny <= y1; ++ny)
-                    {
-                        const float* nRow = outIterations.data() + static_cast<size_t>(ny) * static_cast<size_t>(width);
-                        for (int nx = x0; nx <= x1; ++nx)
-                        {
-                            if (nx == x && ny == y) continue;
-                            const float neighbor = nRow[nx];
-                            if (neighbor < 0.0f) { boundary = true; continue; }
-                            if (!SameBasin(center, neighbor, type) || (!smooth && center != neighbor))
-                            {
-                                boundary = true;
-                            }
-                            const float b = (type == FractalType::Newton) ? std::fmod(neighbor, 1000000.0f) : neighbor;
-                            variation = std::max(variation, std::abs(a - b) / (10.0f + std::min(a, b)));
-                        }
-                    }
-                    const float t = std::clamp((variation - 0.015f) / 0.065f, 0.0f, 1.0f);
-                    const float weight = boundary ? 1.0f : t * t * (3.0f - 2.0f * t);
-                    sampleWeights[index] = weight;
-                    if (weight > 0.0f) ++selected;
-                }
-                rowOffsets[static_cast<size_t>(y) + 1] = selected;
-            }
-
-            if (canceled())
+            if (!BuildSubpixelMask(
+                width, height, config.smooth, config.fractalType,
+                outIterations, sampleWeights, *subpixelSamples, cancelToken, &m_impl->hostSlotOfPixel))
             {
                 subpixelSamples->clear();
                 m_impl->UnbindComputeResources();
                 return true;
             }
-
-            for (int y = 0; y < height; ++y)
-            {
-                rowOffsets[static_cast<size_t>(y) + 1] += rowOffsets[static_cast<size_t>(y)];
-            }
-            const size_t subCount = rowOffsets.back();
+            const size_t subCount = subpixelSamples->size();
 
             if (subCount > 0)
             {
-                subpixelSamples->resize(subCount);
-                m_impl->hostSlotOfPixel.resize(totalPixels);
-
-                #pragma omp parallel for schedule(static)
-                for (int y = 0; y < height; ++y)
-                {
-                    if (rowOffsets[static_cast<size_t>(y)] == rowOffsets[static_cast<size_t>(y) + 1]) continue;
-                    size_t output = rowOffsets[static_cast<size_t>(y)];
-                    for (int x = 0; x < width; ++x)
-                    {
-                        const size_t index = static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x);
-                        if (sampleWeights[index] <= 0.0f) continue;
-                        m_impl->hostSlotOfPixel[index] = static_cast<uint32_t>(output);
-                        auto& sample = (*subpixelSamples)[output++];
-                        sample.pixelIndex = static_cast<uint32_t>(index);
-                        sample.weight = sampleWeights[index];
-                    }
-                }
 
                 // Group active pixels into 16x16 spatial tiles for wave coherence while preserving sorted output slots
                 const int tilesX = (width + 15) / 16;

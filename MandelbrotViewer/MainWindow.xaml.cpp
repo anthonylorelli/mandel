@@ -13,8 +13,9 @@
 
 #include <iomanip>
 #include <sstream>
-#include <winrt/Windows.ApplicationModel.DataTransfer.h>
 #include <winrt/Microsoft.UI.Dispatching.h>
+#include <winrt/Microsoft.UI.Xaml.Automation.h>
+#include <winrt/Windows.ApplicationModel.DataTransfer.h>
 
 using namespace winrt;
 using namespace Microsoft::UI::Xaml;
@@ -40,7 +41,7 @@ namespace winrt::MandelbrotViewer::implementation
         return winrt::hstring(ss.str());
     }
 
-    static winrt::hstring FormatZoom(double zoom)
+    winrt::hstring MainWindow::FormatZoom(double zoom)
     {
         std::wostringstream ss;
         if (zoom < 1e4)
@@ -54,185 +55,255 @@ namespace winrt::MandelbrotViewer::implementation
         return winrt::hstring(ss.str());
     }
 
-    MainWindow::MainWindow()
+    void MainWindow::UpdatePlayStopVisual(
+        FontIcon const& icon,
+        UIElement const& button,
+        bool running,
+        wchar_t const* startTooltip,
+        wchar_t const* stopTooltip,
+        wchar_t const* startAutoName,
+        wchar_t const* stopAutoName)
     {
-        InitializeComponent();
-        Title(L"Fractal Studio - Mandelbrot Set");
+        if (icon)
+        {
+            icon.Glyph(running ? L"\uE71A" : L"\uE768");
+            icon.Foreground(Media::SolidColorBrush(winrt::Windows::UI::Color{
+                255,
+                static_cast<uint8_t>(running ? 255 : 81),
+                static_cast<uint8_t>(running ? 107 : 207),
+                static_cast<uint8_t>(running ? 107 : 102) }));
+        }
+        if (button)
+        {
+            ToolTipService::SetToolTip(button, box_value(running ? stopTooltip : startTooltip));
+            if (startAutoName && stopAutoName)
+            {
+                Automation::AutomationProperties::SetName(button, running ? stopAutoName : startAutoName);
+            }
+        }
+    }
 
+    std::unique_ptr<Mandelbrot::BackgroundRenderer> MainWindow::CreateBackgroundRenderer(void (MainWindow::*onCompleted)())
+    {
         auto weak = get_weak();
         auto dispatcher = DispatcherQueue();
-        m_renderer = std::make_unique<Mandelbrot::BackgroundRenderer>([weak, dispatcher]
+        return std::make_unique<Mandelbrot::BackgroundRenderer>([weak, dispatcher, onCompleted]
         {
-            dispatcher.TryEnqueue([weak]
+            dispatcher.TryEnqueue([weak, onCompleted]
             {
-                if (auto window = weak.get()) window->OnRenderCompleted();
+                if (auto window = weak.get()) (window.get()->*onCompleted)();
             });
         });
-        InitializeControls();
-        Closed([this](auto&&, auto&&)
+    }
+
+    void MainWindow::SyncMaxIterationsUi(int value, int sliderThreshold)
+    {
+        if (!IterationsSlider() || !IterationsValueText()) return;
+        if (sliderThreshold > 0 && std::abs(static_cast<int>(IterationsSlider().Value()) - value) < sliderThreshold)
+            return;
+        ScopedEventSuppress suppress(m_suppressEventDepth);
+        IterationsSlider().Value(value);
+        IterationsValueText().Text(winrt::to_hstring(value));
+    }
+
+    void MainWindow::ApplyBookmark(const Mandelbrot::BookmarkLocation& bookmark, bool selectComboIndex, int comboIndex)
+    {
+        m_config.SetCenter(bookmark.centerX, bookmark.centerY);
+        m_config.zoom = bookmark.zoom;
+        m_baseIterations = bookmark.maxIterations;
+        m_config.maxIterations = bookmark.maxIterations;
+
+        ScopedEventSuppress suppress(m_suppressEventDepth);
+        SyncMaxIterationsUi(bookmark.maxIterations);
+        if (selectComboIndex) BookmarksComboBox().SelectedIndex(comboIndex);
+    }
+
+    void MainWindow::CopyTextToClipboard(
+        std::wstring const& text,
+        TextBlock const& statusTarget,
+        wchar_t const* successMessage)
+    {
+        try
         {
-            m_isClosed = true;
-            if (m_movieProgressTimer) m_movieProgressTimer.Stop();
-            if (m_movieExporter) m_movieExporter->Stop();
-            StopJuliaTravel(false);
-            m_isZoomAnimating = false;
-            m_isDragging = false;
-            FreezePresentation();
-            if (m_animateTimer) m_animateTimer.Stop();
-            if (m_zoomTimer) m_zoomTimer.Stop();
-            if (m_renderer) m_renderer->Stop();
-            if (m_juliaRenderer) m_juliaRenderer->Stop();
+            auto package = winrt::Windows::ApplicationModel::DataTransfer::DataPackage();
+            package.SetText(text);
+            winrt::Windows::ApplicationModel::DataTransfer::Clipboard::SetContent(package);
+            statusTarget.Text(successMessage);
+        }
+        catch (const winrt::hresult_error&)
+        {
+            statusTarget.Text(L"Could not access clipboard. Please try again.");
+        }
+    }
+
+    MainWindow::MainWindow()
+    {
+        {
+            ScopedEventSuppress suppress(m_suppressEventDepth);
+            InitializeComponent();
+        }
+        Title(L"Fractal Studio - Mandelbrot Set");
+
+        m_renderer = CreateBackgroundRenderer(&MainWindow::OnRenderCompleted);
+        InitializeControls();
+        auto weak = get_weak();
+        Closed([weak](auto&&, auto&&)
+        {
+            auto self = weak.get();
+            if (!self) return;
+            self->m_isClosed = true;
+            if (self->m_movieProgressTimer) self->m_movieProgressTimer.Stop();
+            if (self->m_movieExporter) self->m_movieExporter->Stop();
+            self->StopJuliaTravel(false);
+            self->m_isZoomAnimating = false;
+            self->m_isDragging = false;
+            self->FreezePresentation();
+            if (self->m_animateTimer) self->m_animateTimer.Stop();
+            if (self->m_zoomTimer) self->m_zoomTimer.Stop();
+            if (self->m_renderer) self->m_renderer->Stop();
+            if (self->m_juliaRenderer) self->m_juliaRenderer->Stop();
         });
     }
 
     void MainWindow::InitializeControls()
     {
-        m_suppressEvents = true;
-
-        // Initialize preview bitmap (256 x 1)
-        m_previewBitmap = WriteableBitmap(256, 1);
-        PalettePreviewImage().Source(m_previewBitmap);
-
-        // Populate Fractal Formulas
-        for (const auto& type : Mandelbrot::GetAllFractalTypes())
         {
-            FractalTypeComboBox().Items().Append(box_value(Mandelbrot::GetFractalTypeName(type)));
-        }
-        FractalTypeComboBox().SelectedIndex(0);
+            ScopedEventSuppress suppress(m_suppressEventDepth);
 
-        // Populate Landmark Bookmarks
-        PopulateBookmarks();
+            // Initialize preview bitmap (256 x 1)
+            m_previewBitmap = WriteableBitmap(256, 1);
+            PalettePreviewImage().Source(m_previewBitmap);
 
-        // Populate Theme Presets
-        const auto& presets = Mandelbrot::GetAllPresets();
-        for (const auto& preset : presets)
-        {
-            ThemePresetComboBox().Items().Append(box_value(Mandelbrot::GetPresetName(preset)));
-        }
-        ThemePresetComboBox().SelectedIndex(0);
-
-        // Setup live animation timer
-        m_animateTimer = DispatcherTimer();
-        m_animateTimer.Interval(std::chrono::milliseconds(25));
-        m_animateTimer.Tick([this](auto&&, auto&&)
-        {
-            m_phaseOffset = std::fmod(m_phaseOffset + 0.005f, 1.0f);
-
-            m_suppressEvents = true;
-            PhaseSlider().Value(m_phaseOffset);
-            PhaseValueText().Text(FormatFloat(m_phaseOffset, 2));
-            m_suppressEvents = false;
-
-            RecolorBuffer();
-        });
-
-        // Setup smooth continuous zoom timer
-        m_zoomTimer = DispatcherTimer();
-        m_zoomTimer.Interval(Mandelbrot::ZoomFrameDelay(std::chrono::steady_clock::duration::zero()));
-        m_zoomTimer.Tick([this](auto&&, auto&&)
-        {
-            if (!m_isZoomAnimating)
+            // Populate Fractal Formulas
+            for (const auto& type : Mandelbrot::GetAllFractalTypes())
             {
-                m_zoomTimer.Stop();
-                return;
+                FractalTypeComboBox().Items().Append(box_value(Mandelbrot::GetFractalTypeName(type)));
             }
+            FractalTypeComboBox().SelectedIndex(0);
 
-            // Calculation runs on the worker; this callback only advances the requested camera.
-            m_zoomTimer.Stop();
+            // Populate Landmark Bookmarks
+            PopulateBookmarks();
 
-            const auto now = std::chrono::steady_clock::now();
-            double dt = std::chrono::duration<double>(now - m_lastZoomFrameTime).count();
-            m_lastZoomFrameTime = now;
-            dt = std::clamp(dt, 0.008, 0.10);
-
-            // A resize or manual jump needs its first valid frame before motion can resume.
-            if (!m_hasCurrentFrame || !m_hasPresentation)
+            // Populate Theme Presets
+            const auto& presets = Mandelbrot::GetAllPresets();
+            for (const auto& preset : presets)
             {
-                m_zoomTimer.Interval(std::chrono::milliseconds(16));
-                m_zoomTimer.Start();
-                return;
+                ThemePresetComboBox().Items().Append(box_value(Mandelbrot::GetPresetName(preset)));
             }
+            ThemePresetComboBox().SelectedIndex(0);
 
-            const double speed = Mandelbrot::PresentationZoomSpeed(m_zoomSpeed, m_lastFractalTimeMs);
-            const double exponent = (m_zoomInDirection ? 1.0 : -1.0) * speed * dt;
-            const double factor = std::pow(2.0, exponent);
-
-            if (m_autoPickInterestingTarget && m_zoomInDirection && m_hasCurrentFrame)
+            // Setup live animation timer
+            auto weak = get_weak();
+            m_animateTimer = DispatcherTimer();
+            m_animateTimer.Interval(std::chrono::milliseconds(25));
+            m_animateTimer.Tick([weak](auto&&, auto&&)
             {
-                if (m_framesSinceRetarget >= 15 &&
-                    Mandelbrot::MandelbrotEngine::ShouldRetargetZoom(m_displayedConfig, m_iterations, m_zoomTargetX, m_zoomTargetY))
+                auto self = weak.get();
+                if (!self || self->m_isClosed) return;
+                self->m_phaseOffset = std::fmod(self->m_phaseOffset + 0.005f, 1.0f);
+
                 {
-                    PickAndApplyRandomTarget();
+                    ScopedEventSuppress innerSuppress(self->m_suppressEventDepth);
+                    self->PhaseSlider().Value(self->m_phaseOffset);
+                    self->PhaseValueText().Text(FormatFloat(self->m_phaseOffset, 2));
                 }
-            }
 
-            m_retargetPanProgress = std::min(1.0, m_retargetPanProgress + dt / 0.40);
-            const double s = m_retargetPanProgress;
-            const double panBlend = std::clamp(s * s * (3.0 - 2.0 * s), 0.08, 1.0);
+                self->RecolorBuffer();
+            });
 
-            auto nextCamera = m_config;
-            Mandelbrot::MandelbrotEngine::StepZoomAnimation(
-                nextCamera, m_zoomTargetX, m_zoomTargetY, factor, panBlend);
-            const double span = 3.0 / m_config.zoom;
-            const bool jump = std::abs((nextCamera.hpCenterX - m_config.hpCenterX).ToDouble()) > span * 2.0 ||
-                std::abs((nextCamera.hpCenterY - m_config.hpCenterY).ToDouble()) > span * 2.0;
-            m_config = jump ? nextCamera : Mandelbrot::LimitCameraToFrame(m_displayedConfig, m_config, nextCamera);
-            const bool canContinue = m_zoomInDirection
-                ? m_config.zoom < Mandelbrot::MandelbrotEngine::MaxZoom
-                : m_config.zoom > Mandelbrot::MandelbrotEngine::MinZoom;
-
-            if (m_autoScaleIterations)
+            // Setup smooth continuous zoom timer
+            m_zoomTimer = DispatcherTimer();
+            m_zoomTimer.Interval(Mandelbrot::ZoomFrameDelay(std::chrono::steady_clock::duration::zero()));
+            m_zoomTimer.Tick([weak](auto&&, auto&&)
             {
-                const int rawRecommended = Mandelbrot::MandelbrotEngine::RecommendMaxIterations(
-                    m_config.zoom, m_config.fractalType, m_baseIterations);
-                if (rawRecommended != m_config.maxIterations)
+                auto self = weak.get();
+                if (!self || self->m_isClosed) return;
+                if (!self->m_isZoomAnimating)
                 {
-                    m_config.maxIterations = rawRecommended;
-                    // Throttle XAML Slider layout updates to steps of >= 10 while keeping maxIterations smooth
-                    if (std::abs(static_cast<int>(IterationsSlider().Value()) - rawRecommended) >= 10)
+                    self->m_zoomTimer.Stop();
+                    return;
+                }
+
+                // Calculation runs on the worker; this callback only advances the requested camera.
+                self->m_zoomTimer.Stop();
+
+                const auto now = std::chrono::steady_clock::now();
+                double dt = std::chrono::duration<double>(now - self->m_lastZoomFrameTime).count();
+                self->m_lastZoomFrameTime = now;
+                dt = std::clamp(dt, 0.008, 0.10);
+
+                // A resize or manual jump needs its first valid frame before motion can resume.
+                if (!self->m_hasCurrentFrame || !self->m_hasPresentation)
+                {
+                    self->m_zoomTimer.Interval(std::chrono::milliseconds(16));
+                    self->m_zoomTimer.Start();
+                    return;
+                }
+
+                const double speed = Mandelbrot::PresentationZoomSpeed(self->m_zoomSpeed, self->m_lastFractalTimeMs);
+                const double exponent = (self->m_zoomInDirection ? 1.0 : -1.0) * speed * dt;
+                const double factor = std::pow(2.0, exponent);
+
+                self->m_retargetPanProgress = std::min(1.0, self->m_retargetPanProgress + dt / 0.40);
+                const double s = self->m_retargetPanProgress;
+                const double panBlend = std::clamp(s * s * (3.0 - 2.0 * s), 0.08, 1.0);
+
+                auto nextCamera = self->m_config;
+                Mandelbrot::MandelbrotEngine::StepZoomAnimation(
+                    nextCamera, self->m_zoomTargetX, self->m_zoomTargetY, factor, panBlend);
+                const double span = 3.0 / self->m_config.zoom;
+                const bool jump = std::abs((nextCamera.hpCenterX - self->m_config.hpCenterX).ToDouble()) > span * 2.0 ||
+                    std::abs((nextCamera.hpCenterY - self->m_config.hpCenterY).ToDouble()) > span * 2.0;
+                self->m_config = jump ? nextCamera : Mandelbrot::LimitCameraToFrame(self->m_displayedConfig, self->m_config, nextCamera);
+                const bool canContinue = self->m_zoomInDirection
+                    ? self->m_config.zoom < Mandelbrot::MandelbrotEngine::MaxZoom
+                    : self->m_config.zoom > Mandelbrot::MandelbrotEngine::MinZoom;
+
+                if (self->m_autoScaleIterations)
+                {
+                    const int rawRecommended = Mandelbrot::MandelbrotEngine::RecommendMaxIterations(
+                        self->m_config.zoom, self->m_config.fractalType, self->m_baseIterations);
+                    if (rawRecommended != self->m_config.maxIterations)
                     {
-                        m_suppressEvents = true;
-                        IterationsSlider().Value(rawRecommended);
-                        IterationsValueText().Text(winrt::to_hstring(rawRecommended));
-                        m_suppressEvents = false;
+                        self->m_config.maxIterations = rawRecommended;
+                        // Throttle XAML Slider layout updates to steps of >= 10 while keeping maxIterations smooth
+                        self->SyncMaxIterationsUi(rawRecommended, 10);
                     }
                 }
-            }
 
-            // Keep spatial sampling stable; PresentationZoomSpeed adapts the camera pace.
-            m_config.edgeRefine = true;
-            m_config.renderStride = 2;
+                // Keep spatial sampling stable; PresentationZoomSpeed adapts the camera pace.
+                self->m_config.edgeRefine = true;
+                self->m_config.renderStride = 2;
 
-            if (jump) RenderFractal();
-            else
-            {
-                AnimateCamera(m_config, std::chrono::milliseconds(32));
-                RenderFractal(true);
-            }
+                if (jump) self->RenderFractal();
+                else
+                {
+                    self->AnimateCamera(self->m_config, std::chrono::milliseconds(32));
+                    self->RenderFractal(true);
+                }
 
-            if (!canContinue)
-            {
-                StopZoomAnimation();
-            }
-            else if (m_isZoomAnimating)
-            {
-                m_zoomTimer.Interval(Mandelbrot::ZoomFrameDelay(std::chrono::steady_clock::now() - now));
-                m_zoomTimer.Start();
-            }
-        });
+                if (!canContinue)
+                {
+                    self->StopZoomAnimation();
+                }
+                else if (self->m_isZoomAnimating)
+                {
+                    self->m_zoomTimer.Interval(Mandelbrot::ZoomFrameDelay(std::chrono::steady_clock::now() - now));
+                    self->m_zoomTimer.Start();
+                }
+            });
 
-        // Populate custom gradient stops UI
-        PopulateStopSelector();
-        SyncTargetInputsFromCenter();
-
-        m_suppressEvents = false;
+            // Populate custom gradient stops UI
+            PopulateStopSelector();
+            SyncTargetInputsFromCenter();
+        }
 
         UpdateGradientPreview();
     }
 
     void MainWindow::PopulateBookmarks()
     {
-        m_suppressEvents = true;
+        ScopedEventSuppress suppress(m_suppressEventDepth);
         BookmarksComboBox().Items().Clear();
         const auto& bookmarks = Mandelbrot::GetBookmarks(m_config.fractalType);
         for (const auto& bm : bookmarks)
@@ -243,11 +314,11 @@ namespace winrt::MandelbrotViewer::implementation
         {
             BookmarksComboBox().SelectedIndex(0);
         }
-        m_suppressEvents = false;
     }
 
     void MainWindow::OnViewportSizeChanged(IInspectable const&, SizeChangedEventArgs const& e)
     {
+        if (e.NewSize().Width <= 0 || e.NewSize().Height <= 0) return;
         const int w = std::max(64, static_cast<int>(std::ceil(e.NewSize().Width)));
         const int h = std::max(64, static_cast<int>(std::ceil(e.NewSize().Height)));
         auto clip = Media::RectangleGeometry();
@@ -278,7 +349,7 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::RenderFractal(bool continueAnimation)
     {
-        if (m_isClosed || m_movieExporting || !m_renderer || m_currentPixelWidth <= 0 || m_currentPixelHeight <= 0) return;
+        if (m_isClosed || m_movieExporter || !m_renderer || m_currentPixelWidth <= 0 || m_currentPixelHeight <= 0) return;
         if (!continueAnimation)
         {
             FreezePresentation();
@@ -338,8 +409,13 @@ namespace winrt::MandelbrotViewer::implementation
         {
             // Retarget hysteresis counts completed frames, not timer ticks.
             ++m_framesSinceRetarget;
-            if (m_autoPickInterestingTarget && m_zoomInDirection && !m_hasActiveRandomTarget)
+            if (m_autoPickInterestingTarget && m_zoomInDirection &&
+                (!m_hasActiveRandomTarget ||
+                 (m_framesSinceRetarget >= 15 &&
+                  Mandelbrot::MandelbrotEngine::ShouldRetargetZoom(m_displayedConfig, m_iterations, m_zoomTargetX, m_zoomTargetY))))
+            {
                 PickAndApplyRandomTarget();
+            }
         }
     }
 
@@ -598,11 +674,7 @@ namespace winrt::MandelbrotViewer::implementation
             const int recommended = Mandelbrot::MandelbrotEngine::RecommendMaxIterations(
                 m_config.zoom, m_config.fractalType, m_baseIterations);
             m_config.maxIterations = recommended;
-
-            m_suppressEvents = true;
-            IterationsSlider().Value(recommended);
-            IterationsValueText().Text(winrt::to_hstring(recommended));
-            m_suppressEvents = false;
+            SyncMaxIterationsUi(recommended);
         }
 
         RenderFractal();
@@ -621,12 +693,11 @@ namespace winrt::MandelbrotViewer::implementation
         if (!TargetXTextBox() || !TargetYTextBox()) return;
 
         const size_t decimals = Mandelbrot::CoordinateDecimalPlaces(m_config.zoom);
-        m_suppressEvents = true;
+        ScopedEventSuppress suppress(m_suppressEventDepth);
         m_targetXText = winrt::hstring(m_zoomTargetX.ToWString(decimals));
         m_targetYText = winrt::hstring(m_zoomTargetY.ToWString(decimals));
         TargetXTextBox().Text(m_targetXText);
         TargetYTextBox().Text(m_targetYText);
-        m_suppressEvents = false;
     }
 
     void MainWindow::PickAndApplyRandomTarget()
@@ -651,15 +722,15 @@ namespace winrt::MandelbrotViewer::implementation
         m_zoomInDirection = zoomIn;
         if (!ZoomDirectionInToggle() || !ZoomDirectionOutToggle()) return;
 
-        m_suppressEvents = true;
+        ScopedEventSuppress suppress(m_suppressEventDepth);
         ZoomDirectionInToggle().IsChecked(zoomIn);
         ZoomDirectionOutToggle().IsChecked(!zoomIn);
-        m_suppressEvents = false;
     }
 
     void MainWindow::StartZoomAnimation()
     {
-        if (m_movieExporting) return;
+        if (m_movieExporter || m_movieSetup) return;
+        StopJuliaTravel(false);
         if (m_autoPickInterestingTarget && m_zoomInDirection)
         {
             if (!m_hasCurrentFrame || !m_hasActiveRandomTarget ||
@@ -694,7 +765,7 @@ namespace winrt::MandelbrotViewer::implementation
             m_retargetPanProgress = 1.0;
         }
 
-        // If already at zoom bound in the chosen direction, flip direction or return
+        // If already at the zoom bound in the chosen direction, return.
         if ((m_zoomInDirection && m_config.zoom >= Mandelbrot::MandelbrotEngine::MaxZoom) ||
             (!m_zoomInDirection && m_config.zoom <= Mandelbrot::MandelbrotEngine::MinZoom))
         {
@@ -707,16 +778,9 @@ namespace winrt::MandelbrotViewer::implementation
 
         if (StartZoomButton()) StartZoomButton().IsEnabled(false);
         if (StopZoomButton()) StopZoomButton().IsEnabled(true);
-        if (OverlayPlayZoomIcon())
-        {
-            OverlayPlayZoomIcon().Glyph(L"\uE71A");
-            OverlayPlayZoomIcon().Foreground(Media::SolidColorBrush(winrt::Windows::UI::Color{ 255, 255, 107, 107 }));
-        }
-        if (OverlayPlayZoomButton())
-        {
-            winrt::Microsoft::UI::Xaml::Controls::ToolTipService::SetToolTip(
-                OverlayPlayZoomButton(), box_value(L"Stop Animated Zoom"));
-        }
+        UpdatePlayStopVisual(
+            OverlayPlayZoomIcon(), OverlayPlayZoomButton(), true,
+            L"Start Animated Zoom", L"Stop Animated Zoom");
 
         if (m_zoomTimer)
         {
@@ -744,26 +808,16 @@ namespace winrt::MandelbrotViewer::implementation
 
         if (StartZoomButton()) StartZoomButton().IsEnabled(true);
         if (StopZoomButton()) StopZoomButton().IsEnabled(false);
-        if (OverlayPlayZoomIcon())
-        {
-            OverlayPlayZoomIcon().Glyph(L"\uE768");
-            OverlayPlayZoomIcon().Foreground(Media::SolidColorBrush(winrt::Windows::UI::Color{ 255, 81, 207, 102 }));
-        }
-        if (OverlayPlayZoomButton())
-        {
-            winrt::Microsoft::UI::Xaml::Controls::ToolTipService::SetToolTip(
-                OverlayPlayZoomButton(), box_value(L"Start Animated Zoom"));
-        }
+        UpdatePlayStopVisual(
+            OverlayPlayZoomIcon(), OverlayPlayZoomButton(), false,
+            L"Start Animated Zoom", L"Stop Animated Zoom");
 
         if (m_autoScaleIterations)
         {
             const int recommended = Mandelbrot::MandelbrotEngine::RecommendMaxIterations(
                 m_config.zoom, m_config.fractalType, m_baseIterations);
             m_config.maxIterations = recommended;
-            m_suppressEvents = true;
-            IterationsSlider().Value(recommended);
-            IterationsValueText().Text(winrt::to_hstring(recommended));
-            m_suppressEvents = false;
+            SyncMaxIterationsUi(recommended);
         }
 
         if (!m_autoPickInterestingTarget || !m_hasActiveRandomTarget)
@@ -796,7 +850,7 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::OnRandomTargetToggleChanged(IInspectable const&, RoutedEventArgs const&)
     {
-        if (m_suppressEvents || !RandomTargetToggle()) return;
+        if (IsSuppressingEvents() || !RandomTargetToggle()) return;
         m_autoPickInterestingTarget = RandomTargetToggle().IsOn();
         m_hasActiveRandomTarget = false;
 
@@ -808,13 +862,13 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::OnZoomDirectionInClick(IInspectable const&, RoutedEventArgs const&)
     {
-        if (m_suppressEvents) return;
+        if (IsSuppressingEvents()) return;
         SetZoomDirection(true);
     }
 
     void MainWindow::OnZoomDirectionOutClick(IInspectable const&, RoutedEventArgs const&)
     {
-        if (m_suppressEvents) return;
+        if (IsSuppressingEvents()) return;
         SetZoomDirection(false);
     }
 
@@ -829,13 +883,13 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::OnStartZoomClick(IInspectable const&, RoutedEventArgs const&)
     {
-        if (m_suppressEvents) return;
+        if (IsSuppressingEvents()) return;
         StartZoomAnimation();
     }
 
     void MainWindow::OnStopZoomClick(IInspectable const&, RoutedEventArgs const&)
     {
-        if (m_suppressEvents) return;
+        if (IsSuppressingEvents()) return;
         StopZoomAnimation();
     }
 
@@ -932,23 +986,13 @@ namespace winrt::MandelbrotViewer::implementation
     {
         if (m_isZoomAnimating)
         {
-            StopZoomAnimation();
+            StopZoomAnimation(false);
         }
 
         const auto& bookmarks = Mandelbrot::GetBookmarks(m_config.fractalType);
         if (!bookmarks.empty())
         {
-            const auto& bm = bookmarks[0];
-            m_config.SetCenter(bm.centerX, bm.centerY);
-            m_config.zoom = bm.zoom;
-            m_baseIterations = bm.maxIterations;
-            m_config.maxIterations = bm.maxIterations;
-
-            m_suppressEvents = true;
-            IterationsSlider().Value(bm.maxIterations);
-            IterationsValueText().Text(winrt::to_hstring(bm.maxIterations));
-            BookmarksComboBox().SelectedIndex(0);
-            m_suppressEvents = false;
+            ApplyBookmark(bookmarks[0], true, 0);
         }
         else
         {
@@ -956,11 +1000,7 @@ namespace winrt::MandelbrotViewer::implementation
             m_config.zoom = 1.0;
             m_baseIterations = 500;
             m_config.maxIterations = 500;
-
-            m_suppressEvents = true;
-            IterationsSlider().Value(500);
-            IterationsValueText().Text(L"500");
-            m_suppressEvents = false;
+            SyncMaxIterationsUi(500);
         }
 
         SyncTargetInputsFromCenter();
@@ -1037,6 +1077,7 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::OnFullScreenAcceleratorInvoked(winrt::Microsoft::UI::Xaml::Input::KeyboardAccelerator const&, winrt::Microsoft::UI::Xaml::Input::KeyboardAcceleratorInvokedEventArgs const& e)
     {
+        if (m_movieSetup || m_movieExporter) return;
         SetFullScreen(!IsFullScreen());
         e.Handled(true);
     }
@@ -1059,11 +1100,11 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::OnFractalTypeSelectionChanged(IInspectable const&, SelectionChangedEventArgs const&)
     {
-        if (m_suppressEvents) return;
+        if (IsSuppressingEvents()) return;
 
         if (m_isZoomAnimating)
         {
-            StopZoomAnimation();
+            StopZoomAnimation(false);
         }
 
         const int index = FractalTypeComboBox().SelectedIndex();
@@ -1085,16 +1126,7 @@ namespace winrt::MandelbrotViewer::implementation
             const auto& bookmarks = Mandelbrot::GetBookmarks(type);
             if (!bookmarks.empty())
             {
-                const auto& bm = bookmarks[0];
-                m_config.SetCenter(bm.centerX, bm.centerY);
-                m_config.zoom = bm.zoom;
-                m_baseIterations = bm.maxIterations;
-                m_config.maxIterations = bm.maxIterations;
-
-                m_suppressEvents = true;
-                IterationsSlider().Value(bm.maxIterations);
-                IterationsValueText().Text(winrt::to_hstring(bm.maxIterations));
-                m_suppressEvents = false;
+                ApplyBookmark(bookmarks[0]);
             }
 
             if (supportsJulia)
@@ -1113,28 +1145,18 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::OnBookmarkSelectionChanged(IInspectable const&, SelectionChangedEventArgs const&)
     {
-        if (m_suppressEvents) return;
+        if (IsSuppressingEvents()) return;
 
         if (m_isZoomAnimating)
         {
-            StopZoomAnimation();
+            StopZoomAnimation(false);
         }
 
         const int index = BookmarksComboBox().SelectedIndex();
         const auto& bookmarks = Mandelbrot::GetBookmarks(m_config.fractalType);
         if (index >= 0 && index < static_cast<int>(bookmarks.size()))
         {
-            const auto& bm = bookmarks[index];
-            m_config.SetCenter(bm.centerX, bm.centerY);
-            m_config.zoom = bm.zoom;
-            m_baseIterations = bm.maxIterations;
-            m_config.maxIterations = bm.maxIterations;
-
-            m_suppressEvents = true;
-            IterationsSlider().Value(bm.maxIterations);
-            IterationsValueText().Text(winrt::to_hstring(bm.maxIterations));
-            m_suppressEvents = false;
-
+            ApplyBookmark(bookmarks[index]);
             SyncTargetInputsFromCenter();
             RenderFractal();
         }
@@ -1148,7 +1170,7 @@ namespace winrt::MandelbrotViewer::implementation
             IterationsValueText().Text(winrt::to_hstring(iter));
         }
 
-        if (m_suppressEvents) return;
+        if (IsSuppressingEvents()) return;
         m_baseIterations = iter;
         m_config.maxIterations = iter;
         RenderFractal();
@@ -1156,18 +1178,14 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::OnAutoIterationsToggleChanged(IInspectable const&, RoutedEventArgs const&)
     {
-        if (m_suppressEvents || !AutoIterationsToggle() || !IterationsSlider() || !IterationsValueText()) return;
+        if (IsSuppressingEvents() || !AutoIterationsToggle() || !IterationsSlider() || !IterationsValueText()) return;
         m_autoScaleIterations = AutoIterationsToggle().IsOn();
         if (m_autoScaleIterations)
         {
             const int recommended = Mandelbrot::MandelbrotEngine::RecommendMaxIterations(
                 m_config.zoom, m_config.fractalType, m_baseIterations);
             m_config.maxIterations = recommended;
-
-            m_suppressEvents = true;
-            IterationsSlider().Value(recommended);
-            IterationsValueText().Text(winrt::to_hstring(recommended));
-            m_suppressEvents = false;
+            SyncMaxIterationsUi(recommended);
             RenderFractal();
         }
         RefreshJuliaSettings();
@@ -1175,14 +1193,14 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::OnSmoothToggleChanged(IInspectable const&, RoutedEventArgs const&)
     {
-        if (m_suppressEvents || !SmoothToggle()) return;
+        if (IsSuppressingEvents() || !SmoothToggle()) return;
         m_config.smooth = SmoothToggle().IsOn();
         RenderFractal();
     }
 
     void MainWindow::OnThemePresetSelectionChanged(IInspectable const&, SelectionChangedEventArgs const&)
     {
-        if (m_suppressEvents) return;
+        if (IsSuppressingEvents()) return;
 
         const int index = ThemePresetComboBox().SelectedIndex();
         const auto& presets = Mandelbrot::GetAllPresets();
@@ -1204,7 +1222,7 @@ namespace winrt::MandelbrotViewer::implementation
             FrequencyValueText().Text(FormatFloat(m_frequency, decimals) + L"x");
         }
 
-        if (m_suppressEvents) return;
+        if (IsSuppressingEvents()) return;
         RecolorBuffer();
     }
 
@@ -1216,7 +1234,7 @@ namespace winrt::MandelbrotViewer::implementation
             PhaseValueText().Text(FormatFloat(m_phaseOffset, 2));
         }
 
-        if (m_suppressEvents) return;
+        if (IsSuppressingEvents()) return;
         RecolorBuffer();
     }
 
@@ -1246,23 +1264,23 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::PopulateStopSelector()
     {
-        m_suppressEvents = true;
-
-        StopSelectorComboBox().Items().Clear();
-        const auto& stops = m_theme.Stops();
-        for (size_t i = 0; i < stops.size(); ++i)
         {
-            std::wostringstream ss;
-            ss << L"Stop " << (i + 1) << L" (" << static_cast<int>(stops[i].position * 100.0f) << L"%)";
-            StopSelectorComboBox().Items().Append(box_value(ss.str()));
-        }
+            ScopedEventSuppress suppress(m_suppressEventDepth);
 
-        if (!stops.empty())
-        {
-            StopSelectorComboBox().SelectedIndex(0);
-        }
+            StopSelectorComboBox().Items().Clear();
+            const auto& stops = m_theme.Stops();
+            for (size_t i = 0; i < stops.size(); ++i)
+            {
+                std::wostringstream ss;
+                ss << L"Stop " << (i + 1) << L" (" << static_cast<int>(stops[i].position * 100.0f) << L"%)";
+                StopSelectorComboBox().Items().Append(box_value(ss.str()));
+            }
 
-        m_suppressEvents = false;
+            if (!stops.empty())
+            {
+                StopSelectorComboBox().SelectedIndex(0);
+            }
+        }
 
         UpdateStopControlsFromSelected();
     }
@@ -1275,7 +1293,7 @@ namespace winrt::MandelbrotViewer::implementation
 
         const auto& stop = stops[index];
 
-        m_suppressEvents = true;
+        ScopedEventSuppress suppress(m_suppressEventDepth);
         StopPositionSlider().Value(stop.position);
         StopPositionText().Text(FormatFloat(stop.position, 2));
 
@@ -1295,20 +1313,18 @@ namespace winrt::MandelbrotViewer::implementation
         color.G = stop.g;
         color.B = stop.b;
         StopColorSwatch().Fill(Media::SolidColorBrush(color));
-
-        m_suppressEvents = false;
     }
 
     void MainWindow::OnStopSelectionChanged(IInspectable const&, SelectionChangedEventArgs const&)
     {
-        if (m_suppressEvents) return;
+        if (IsSuppressingEvents()) return;
         UpdateStopControlsFromSelected();
     }
 
     void MainWindow::OnAddStopClick(IInspectable const&, RoutedEventArgs const&)
     {
-        // Add stop at 0.5 or between stops
-        m_theme.AddStop(0.5f, 255, 180, 0); // Vibrant warm gold accent
+        // Add a warm gold accent stop at the midpoint.
+        m_theme.AddStop(0.5f, 255, 180, 0);
         UpdateGradientPreview();
         PopulateStopSelector();
         StopSelectorComboBox().SelectedIndex(static_cast<int>(m_theme.Stops().size() - 1));
@@ -1335,7 +1351,7 @@ namespace winrt::MandelbrotViewer::implementation
             StopPositionText().Text(FormatFloat(pos, 2));
         }
 
-        if (m_suppressEvents) return;
+        if (IsSuppressingEvents()) return;
         const int index = StopSelectorComboBox().SelectedIndex();
         if (index >= 0 && index < static_cast<int>(m_theme.Stops().size()))
         {
@@ -1348,6 +1364,7 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::OnStopColorChanged(IInspectable const&, Primitives::RangeBaseValueChangedEventArgs const&)
     {
+        if (IsSuppressingEvents()) return;
         const uint8_t r = static_cast<uint8_t>(StopRedSlider().Value());
         const uint8_t g = static_cast<uint8_t>(StopGreenSlider().Value());
         const uint8_t b = static_cast<uint8_t>(StopBlueSlider().Value());
@@ -1363,7 +1380,6 @@ namespace winrt::MandelbrotViewer::implementation
         color.B = b;
         StopColorSwatch().Fill(Media::SolidColorBrush(color));
 
-        if (m_suppressEvents) return;
         const int index = StopSelectorComboBox().SelectedIndex();
         if (index >= 0 && index < static_cast<int>(m_theme.Stops().size()))
         {
@@ -1434,15 +1450,12 @@ namespace winrt::MandelbrotViewer::implementation
         }
     }
 
-    winrt::Windows::Foundation::IAsyncAction MainWindow::OnCopyCoordsClick(IInspectable const&, RoutedEventArgs const&)
+    void MainWindow::OnCopyCoordsClick(IInspectable const&, RoutedEventArgs const&)
     {
-        auto package = winrt::Windows::ApplicationModel::DataTransfer::DataPackage();
-        package.SetText(Mandelbrot::SerializeViewState(
-            PresentationCamera(), m_theme, m_frequency, m_phaseOffset, m_invertColors, m_interiorColor));
-        winrt::Windows::ApplicationModel::DataTransfer::Clipboard::SetContent(package);
-
-        // Visual confirmation by updating Hud text briefly
-        HudTimingText().Text(L"Coordinates copied to clipboard!");
-        co_return;
+        CopyTextToClipboard(
+            Mandelbrot::SerializeViewState(
+                PresentationCamera(), m_theme, m_frequency, m_phaseOffset, m_invertColors, m_interiorColor),
+            HudTimingText(),
+            L"Coordinates copied to clipboard!");
     }
 }

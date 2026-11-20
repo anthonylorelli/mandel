@@ -70,9 +70,10 @@ namespace Mandelbrot
             const BigFloat* anchorX = nullptr,
             const BigFloat* anchorY = nullptr) noexcept;
         void ClearMovieReferenceHint() noexcept;
+        void InvalidateDeepCache() noexcept;
 
         // Fused GPU movie frame rendering helpers (boundary detection, DispatchIndirect 4x
-        // subpixels, supersampled palette coloring, and linear-light temporal blending on GPU).
+        // subpixels, supersampled palette coloring, and optional radial shutter blur on GPU).
         bool CanUseGpu(const FractalConfig& config);
         bool BeginGpuMovieFrame(int width, int height, bool enableShutterBlur = false);
         bool RenderGpuMovieBand(
@@ -80,7 +81,6 @@ namespace Mandelbrot
             int topHalo,
             int visibleRows,
             int destRowOffset,
-            int temporalStep,
             const ColorTheme& theme,
             float frequency,
             float phaseOffset,

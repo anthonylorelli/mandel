@@ -44,6 +44,15 @@ namespace Mandelbrot
         m_anchorY.SetZero();
     }
 
+    void DeepReferenceCache::Invalidate() noexcept
+    {
+        m_hasCachedOrbit = false;
+        m_cachedMandelbrotBla = {};
+        m_cachedBlaVersion = 0;
+        m_cachedBlaRefLen = 0;
+        m_cachedBlaCMax = 0.0;
+    }
+
     void DeepReferenceCache::Prepare(
         const FractalConfig& config,
         ExecutionMode executionMode,
@@ -61,14 +70,9 @@ namespace Mandelbrot
             return;
         }
 
-        BigFloat hpX = config.hpCenterX;
-        BigFloat hpY = config.hpCenterY;
-        if (std::abs(hpX.ToDouble() - config.centerX) > 1e-14 ||
-            std::abs(hpY.ToDouble() - config.centerY) > 1e-14)
-        {
-            hpX = BigFloat(config.centerX);
-            hpY = BigFloat(config.centerY);
-        }
+        BigFloat hpX;
+        BigFloat hpY;
+        config.ResolveHpCenter(hpX, hpY);
 
         DeepReferenceState unusedState{};
         Ensure(config, hpX, hpY, executionMode, unusedState, cancelToken);

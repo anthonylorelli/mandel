@@ -13,10 +13,15 @@ namespace Mandelbrot::detail
             const uint8_t* data{};
             size_t bits{};
             size_t pos{};
+            bool overflow{ false };
 
             uint32_t ReadBit() noexcept
             {
-                if (pos >= bits) return 0;
+                if (pos >= bits)
+                {
+                    overflow = true;
+                    return 0;
+                }
                 const uint32_t b = (data[pos >> 3] >> (7 - (pos & 7))) & 1u;
                 ++pos;
                 return b;
@@ -24,6 +29,12 @@ namespace Mandelbrot::detail
 
             uint32_t ReadBits(int n) noexcept
             {
+                if (n <= 0) return 0;
+                if (n > 32)
+                {
+                    overflow = true;
+                    return 0;
+                }
                 uint32_t v = 0;
                 for (int i = 0; i < n; ++i) v = (v << 1) | ReadBit();
                 return v;
@@ -32,7 +43,21 @@ namespace Mandelbrot::detail
             uint32_t ReadUE() noexcept
             {
                 int zeros = 0;
-                while (pos < bits && ReadBit() == 0 && zeros < 31) ++zeros;
+                while (zeros < 31)
+                {
+                    if (pos >= bits)
+                    {
+                        overflow = true;
+                        return 0;
+                    }
+                    if (ReadBit() != 0) break;
+                    ++zeros;
+                }
+                if (zeros >= 31)
+                {
+                    overflow = true;
+                    return 0;
+                }
                 return zeros == 0 ? 0 : ((1u << zeros) - 1u + ReadBits(zeros));
             }
 
@@ -64,11 +89,11 @@ namespace Mandelbrot::detail
 
             void WriteUE(uint32_t v)
             {
-                const uint32_t code = v + 1u;
+                const uint64_t code = static_cast<uint64_t>(v) + 1ull;
                 int len = 0;
-                for (uint32_t t = code; t > 1; t >>= 1) ++len;
+                for (uint64_t t = code; t > 1; t >>= 1) ++len;
                 for (int i = 0; i < len; ++i) WriteBit(0);
-                WriteBits(code, len + 1);
+                for (int i = len; i >= 0; --i) WriteBit(static_cast<uint32_t>((code >> i) & 1ull));
             }
 
             void WriteSE(int32_t v)
@@ -123,8 +148,9 @@ namespace Mandelbrot::detail
 
     std::vector<uint8_t> PatchH264Sps(const uint8_t* nal, size_t len, int targetW, int targetH)
     {
+        auto fallback = [&]() { return std::vector<uint8_t>(nal, nal + len); };
         const auto rbsp = UnescapeRbsp(nal, len);
-        if (rbsp.size() < 4) return std::vector<uint8_t>(nal, nal + len);
+        if (rbsp.size() < 4) return fallback();
 
         BitReader r{rbsp.data() + 1, (rbsp.size() - 1) * 8, 0};
         BitWriter w;
@@ -145,6 +171,7 @@ namespace Mandelbrot::detail
             profileIdc == 128 || profileIdc == 138 || profileIdc == 139 || profileIdc == 134)
         {
             chromaFormatIdc = r.ReadUE();
+            if (r.overflow || chromaFormatIdc > 3u) return fallback();
             w.WriteUE(chromaFormatIdc);
             if (chromaFormatIdc == 3) w.WriteBit(r.ReadBit());
             w.WriteUE(r.ReadUE()); // bit_depth_luma_minus8
@@ -168,6 +195,7 @@ namespace Mandelbrot::detail
                             if (nextScale != 0)
                             {
                                 const int32_t delta = r.ReadSE();
+                                if (r.overflow) return fallback();
                                 w.WriteSE(delta);
                                 nextScale = (lastScale + delta + 256) % 256;
                             }
@@ -191,6 +219,7 @@ namespace Mandelbrot::detail
             w.WriteSE(r.ReadSE());
             w.WriteSE(r.ReadSE());
             const uint32_t n = r.ReadUE();
+            if (r.overflow || n > 255u) return fallback();
             w.WriteUE(n);
             for (uint32_t i = 0; i < n; ++i) w.WriteSE(r.ReadSE());
         }
@@ -200,6 +229,7 @@ namespace Mandelbrot::detail
         const uint32_t picWidthMbsMinus1 = r.ReadUE();
         const uint32_t picHeightMapUnitsMinus1 = r.ReadUE();
         const uint32_t frameMbsOnly = r.ReadBit();
+        if (r.overflow || picWidthMbsMinus1 > 4095u || picHeightMapUnitsMinus1 > 4095u) return fallback();
         w.WriteUE(picWidthMbsMinus1);
         w.WriteUE(picHeightMapUnitsMinus1);
         w.WriteBit(frameMbsOnly);
@@ -207,6 +237,7 @@ namespace Mandelbrot::detail
         w.WriteBit(r.ReadBit()); // direct_8x8_inference_flag
 
         if (r.ReadBit()) { r.ReadUE(); r.ReadUE(); r.ReadUE(); r.ReadUE(); }
+        if (r.overflow) return fallback();
 
         const int mbW = static_cast<int>(picWidthMbsMinus1 + 1) * 16;
         const int mbH = static_cast<int>(picHeightMapUnitsMinus1 + 1) * (frameMbsOnly ? 16 : 32);
@@ -255,8 +286,9 @@ namespace Mandelbrot::detail
 
     std::vector<uint8_t> PatchHevcSps(const uint8_t* nal, size_t len, int targetW, int targetH)
     {
+        auto fallback = [&]() { return std::vector<uint8_t>(nal, nal + len); };
         const auto rbsp = UnescapeRbsp(nal, len);
-        if (rbsp.size() < 16) return std::vector<uint8_t>(nal, nal + len);
+        if (rbsp.size() < 16) return fallback();
 
         BitReader r{rbsp.data() + 2, (rbsp.size() - 2) * 8, 0};
         BitWriter w;
@@ -266,6 +298,7 @@ namespace Mandelbrot::detail
         const uint32_t vpsId = r.ReadBits(4);
         const uint32_t maxSubLayersMinus1 = r.ReadBits(3);
         const uint32_t temporalIdNesting = r.ReadBit();
+        if (r.overflow || maxSubLayersMinus1 > 6u) return fallback();
         w.WriteBits(vpsId, 4);
         w.WriteBits(maxSubLayersMinus1, 3);
         w.WriteBit(temporalIdNesting);
@@ -291,10 +324,12 @@ namespace Mandelbrot::detail
 
         w.WriteUE(r.ReadUE()); // sps_seq_parameter_set_id
         const uint32_t chromaFormatIdc = r.ReadUE();
+        if (r.overflow || chromaFormatIdc > 3u) return fallback();
         w.WriteUE(chromaFormatIdc);
         if (chromaFormatIdc == 3) w.WriteBit(r.ReadBit());
         const uint32_t picW = r.ReadUE();
         const uint32_t picH = r.ReadUE();
+        if (r.overflow || picW > 65536u || picH > 65536u) return fallback();
         w.WriteUE(picW);
         w.WriteUE(picH);
 
@@ -320,6 +355,7 @@ namespace Mandelbrot::detail
         w.WriteUE(r.ReadUE()); // bit_depth_luma_minus8
         w.WriteUE(r.ReadUE()); // bit_depth_chroma_minus8
         const uint32_t log2MaxPocMinus4 = r.ReadUE();
+        if (r.overflow || log2MaxPocMinus4 > 12u) return fallback();
         w.WriteUE(log2MaxPocMinus4);
         const uint32_t subLayerOrdering = r.ReadBit();
         w.WriteBit(subLayerOrdering);
@@ -341,7 +377,7 @@ namespace Mandelbrot::detail
         {
             const uint32_t scalingData = r.ReadBit();
             w.WriteBit(scalingData);
-            if (scalingData) return std::vector<uint8_t>(nal, nal + len);
+            if (scalingData) return fallback();
         }
         w.WriteBit(r.ReadBit()); // amp_enabled_flag
         w.WriteBit(r.ReadBit()); // sample_adaptive_offset_enabled_flag
@@ -356,19 +392,18 @@ namespace Mandelbrot::detail
             w.WriteBit(r.ReadBit());
         }
         const uint32_t numStRps = r.ReadUE();
+        if (r.overflow || numStRps > 64u) return fallback();
         w.WriteUE(numStRps);
         std::array<uint32_t, 65> numDeltaPocs{};
-        for (uint32_t stIdx = 0; stIdx < numStRps && stIdx < 64; ++stIdx)
+        for (uint32_t stIdx = 0; stIdx < numStRps; ++stIdx)
         {
             const uint32_t interRps = (stIdx != 0) ? r.ReadBit() : 0;
             if (stIdx != 0) w.WriteBit(interRps);
             if (interRps)
             {
-                const uint32_t deltaIdxMinus1 = (stIdx == numStRps) ? r.ReadUE() : 0;
-                if (stIdx == numStRps) w.WriteUE(deltaIdxMinus1);
                 w.WriteBit(r.ReadBit());
                 w.WriteUE(r.ReadUE());
-                const uint32_t refIdx = stIdx - 1 - std::min(stIdx - 1, deltaIdxMinus1);
+                const uint32_t refIdx = stIdx - 1;
                 uint32_t count = 0;
                 for (uint32_t j = 0; j <= numDeltaPocs[refIdx]; ++j)
                 {
@@ -378,12 +413,14 @@ namespace Mandelbrot::detail
                     if (!used) w.WriteBit(useDelta);
                     if (used || useDelta) ++count;
                 }
+                if (r.overflow || count > 16u) return fallback();
                 numDeltaPocs[stIdx] = count;
             }
             else
             {
                 const uint32_t neg = r.ReadUE();
                 const uint32_t pos = r.ReadUE();
+                if (r.overflow || neg > 16u || pos > 16u || neg + pos > 16u) return fallback();
                 w.WriteUE(neg);
                 w.WriteUE(pos);
                 numDeltaPocs[stIdx] = neg + pos;
@@ -396,8 +433,9 @@ namespace Mandelbrot::detail
         if (ltRpsPresent)
         {
             const uint32_t numLt = r.ReadUE();
+            if (r.overflow || numLt > 32u) return fallback();
             w.WriteUE(numLt);
-            const int pocBits = static_cast<int>(log2MaxPocMinus4 + 4);
+            const int pocBits = static_cast<int>(log2MaxPocMinus4 + 4u);
             for (uint32_t j = 0; j < numLt; ++j)
             {
                 w.WriteBits(r.ReadBits(pocBits), pocBits);
@@ -406,6 +444,7 @@ namespace Mandelbrot::detail
         }
         w.WriteBit(r.ReadBit()); // sps_temporal_mvp_enabled_flag
         w.WriteBit(r.ReadBit()); // strong_intra_smoothing_enabled_flag
+        if (r.overflow) return fallback();
 
         w.WriteBit(1);      // vui_parameters_present_flag
         w.WriteBit(1);      // aspect_ratio_info_present_flag

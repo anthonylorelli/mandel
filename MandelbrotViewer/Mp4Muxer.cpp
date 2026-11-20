@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
-#include <omp.h>
 #include <stdexcept>
 #if defined(_M_ARM64)
 #include <arm64_neon.h>
@@ -17,6 +16,11 @@ namespace Mandelbrot::detail
         const uint32_t* bgra, int srcW, int srcH,
         uint8_t* nv12, int codedW, int codedH) noexcept
     {
+        if (!bgra || !nv12 || srcW <= 0 || srcH <= 0 ||
+            codedW <= 0 || codedH <= 0 || (codedW & 1) != 0 || (codedH & 1) != 0)
+        {
+            return;
+        }
         constexpr double kr = 0.2126;
         constexpr double kb = 0.0722;
         constexpr int32_t kOne = 1 << 20;
@@ -195,8 +199,13 @@ namespace Mandelbrot::detail
 
     void Mp4FileWriter::Zero(size_t n)
     {
-        std::vector<char> zeros(n, 0);
-        Bytes(zeros.data(), n);
+        static constexpr char zeros[64]{};
+        while (n > 0)
+        {
+            const size_t chunk = std::min(n, sizeof(zeros));
+            Bytes(zeros, chunk);
+            n -= chunk;
+        }
     }
 
     void Mp4FileWriter::Patch(uint64_t pos, uint32_t n)

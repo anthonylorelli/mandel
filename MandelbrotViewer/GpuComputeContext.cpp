@@ -321,15 +321,18 @@ namespace Mandelbrot
         }
     }
 
-    bool GpuFractalSolver::Impl::EnsureTypedSrvBuffer(
+    bool GpuFractalSolver::Impl::EnsureBufferImpl(
         size_t neededElems,
         UINT elemBytes,
         DXGI_FORMAT format,
+        bool structured,
+        bool dynamicUpload,
         ComPtr<ID3D11Buffer>& buf,
-        ComPtr<ID3D11ShaderResourceView>& srv,
+        ComPtr<ID3D11UnorderedAccessView>* uav,
+        ComPtr<ID3D11ShaderResourceView>* srv,
         size_t& capElems)
     {
-        if (neededElems <= capElems && buf && srv) return true;
+        if (neededElems <= capElems && buf && (!uav || *uav) && (!srv || *srv)) return true;
         const size_t currentBytes = capElems * elemBytes;
         const size_t neededBytes = std::max<size_t>(1, neededElems) * elemBytes;
         if (neededBytes > kD3D11SafeMaxBufferBytes) return false;
@@ -338,25 +341,58 @@ namespace Mandelbrot
 
         D3D11_BUFFER_DESC desc{};
         desc.ByteWidth = static_cast<UINT>(allocElems * elemBytes);
-        desc.Usage = D3D11_USAGE_DYNAMIC;
-        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        desc.Usage = dynamicUpload ? D3D11_USAGE_DYNAMIC : D3D11_USAGE_DEFAULT;
+        desc.CPUAccessFlags = dynamicUpload ? D3D11_CPU_ACCESS_WRITE : 0u;
+        desc.BindFlags =
+            (uav ? D3D11_BIND_UNORDERED_ACCESS : 0u) |
+            (srv ? D3D11_BIND_SHADER_RESOURCE : 0u);
+        if (structured)
+        {
+            desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+            desc.StructureByteStride = elemBytes;
+        }
 
         ComPtr<ID3D11Buffer> newBuf;
         if (FAILED(device->CreateBuffer(&desc, nullptr, &newBuf))) return false;
 
-        D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-        srvDesc.Format = format;
-        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-        srvDesc.Buffer.NumElements = static_cast<UINT>(allocElems);
+        const DXGI_FORMAT viewFormat = structured ? DXGI_FORMAT_UNKNOWN : format;
+
+        ComPtr<ID3D11UnorderedAccessView> newUav;
+        if (uav)
+        {
+            D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+            uavDesc.Format = viewFormat;
+            uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+            uavDesc.Buffer.NumElements = static_cast<UINT>(allocElems);
+            if (FAILED(device->CreateUnorderedAccessView(newBuf.Get(), &uavDesc, &newUav))) return false;
+        }
 
         ComPtr<ID3D11ShaderResourceView> newSrv;
-        if (FAILED(device->CreateShaderResourceView(newBuf.Get(), &srvDesc, &newSrv))) return false;
+        if (srv)
+        {
+            D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+            srvDesc.Format = viewFormat;
+            srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+            srvDesc.Buffer.NumElements = static_cast<UINT>(allocElems);
+            if (FAILED(device->CreateShaderResourceView(newBuf.Get(), &srvDesc, &newSrv))) return false;
+        }
 
         buf = std::move(newBuf);
-        srv = std::move(newSrv);
+        if (uav) *uav = std::move(newUav);
+        if (srv) *srv = std::move(newSrv);
         capElems = allocElems;
         return true;
+    }
+
+    bool GpuFractalSolver::Impl::EnsureTypedSrvBuffer(
+        size_t neededElems,
+        UINT elemBytes,
+        DXGI_FORMAT format,
+        ComPtr<ID3D11Buffer>& buf,
+        ComPtr<ID3D11ShaderResourceView>& srv,
+        size_t& capElems)
+    {
+        return EnsureBufferImpl(neededElems, elemBytes, format, false, true, buf, nullptr, &srv, capElems);
     }
 
     bool GpuFractalSolver::Impl::EnsureStructuredSrvBuffer(
@@ -366,36 +402,7 @@ namespace Mandelbrot
         ComPtr<ID3D11ShaderResourceView>& srv,
         size_t& capElems)
     {
-        if (neededElems <= capElems && buf && srv) return true;
-        const size_t currentBytes = capElems * strideBytes;
-        const size_t neededBytes = std::max<size_t>(1, neededElems) * strideBytes;
-        if (neededBytes > kD3D11SafeMaxBufferBytes) return false;
-        const size_t allocBytes = GrowCapacityBytes(currentBytes, neededBytes);
-        const size_t allocElems = allocBytes / strideBytes;
-
-        D3D11_BUFFER_DESC desc{};
-        desc.ByteWidth = static_cast<UINT>(allocElems * strideBytes);
-        desc.Usage = D3D11_USAGE_DYNAMIC;
-        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-        desc.StructureByteStride = strideBytes;
-
-        ComPtr<ID3D11Buffer> newBuf;
-        if (FAILED(device->CreateBuffer(&desc, nullptr, &newBuf))) return false;
-
-        D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-        srvDesc.Format = DXGI_FORMAT_UNKNOWN;
-        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-        srvDesc.Buffer.NumElements = static_cast<UINT>(allocElems);
-
-        ComPtr<ID3D11ShaderResourceView> newSrv;
-        if (FAILED(device->CreateShaderResourceView(newBuf.Get(), &srvDesc, &newSrv))) return false;
-
-        buf = std::move(newBuf);
-        srv = std::move(newSrv);
-        capElems = allocElems;
-        return true;
+        return EnsureBufferImpl(neededElems, strideBytes, DXGI_FORMAT_UNKNOWN, true, true, buf, nullptr, &srv, capElems);
     }
 
     bool GpuFractalSolver::Impl::EnsureStructuredUavSrvBuffer(
@@ -406,44 +413,7 @@ namespace Mandelbrot
         ComPtr<ID3D11ShaderResourceView>& srv,
         size_t& capElems)
     {
-        if (neededElems <= capElems && buf && uav && srv) return true;
-        const size_t currentBytes = capElems * strideBytes;
-        const size_t neededBytes = std::max<size_t>(1, neededElems) * strideBytes;
-        if (neededBytes > kD3D11SafeMaxBufferBytes) return false;
-        const size_t allocBytes = GrowCapacityBytes(currentBytes, neededBytes);
-        const size_t allocElems = allocBytes / strideBytes;
-
-        D3D11_BUFFER_DESC desc{};
-        desc.ByteWidth = static_cast<UINT>(allocElems * strideBytes);
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
-        desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-        desc.StructureByteStride = strideBytes;
-
-        ComPtr<ID3D11Buffer> newBuf;
-        if (FAILED(device->CreateBuffer(&desc, nullptr, &newBuf))) return false;
-
-        D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
-        uavDesc.Format = DXGI_FORMAT_UNKNOWN;
-        uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-        uavDesc.Buffer.NumElements = static_cast<UINT>(allocElems);
-
-        ComPtr<ID3D11UnorderedAccessView> newUav;
-        if (FAILED(device->CreateUnorderedAccessView(newBuf.Get(), &uavDesc, &newUav))) return false;
-
-        D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-        srvDesc.Format = DXGI_FORMAT_UNKNOWN;
-        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-        srvDesc.Buffer.NumElements = static_cast<UINT>(allocElems);
-
-        ComPtr<ID3D11ShaderResourceView> newSrv;
-        if (FAILED(device->CreateShaderResourceView(newBuf.Get(), &srvDesc, &newSrv))) return false;
-
-        buf = std::move(newBuf);
-        uav = std::move(newUav);
-        srv = std::move(newSrv);
-        capElems = allocElems;
-        return true;
+        return EnsureBufferImpl(neededElems, strideBytes, DXGI_FORMAT_UNKNOWN, true, false, buf, &uav, &srv, capElems);
     }
 
     bool GpuFractalSolver::Impl::EnsureTypedUavSrvBuffer(
@@ -455,42 +425,7 @@ namespace Mandelbrot
         ComPtr<ID3D11ShaderResourceView>& srv,
         size_t& capElems)
     {
-        if (neededElems <= capElems && buf && uav && srv) return true;
-        const size_t currentBytes = capElems * elemBytes;
-        const size_t neededBytes = std::max<size_t>(1, neededElems) * elemBytes;
-        if (neededBytes > kD3D11SafeMaxBufferBytes) return false;
-        const size_t allocBytes = GrowCapacityBytes(currentBytes, neededBytes);
-        const size_t allocElems = allocBytes / elemBytes;
-
-        D3D11_BUFFER_DESC desc{};
-        desc.ByteWidth = static_cast<UINT>(allocElems * elemBytes);
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
-
-        ComPtr<ID3D11Buffer> newBuf;
-        if (FAILED(device->CreateBuffer(&desc, nullptr, &newBuf))) return false;
-
-        D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
-        uavDesc.Format = format;
-        uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-        uavDesc.Buffer.NumElements = static_cast<UINT>(allocElems);
-
-        ComPtr<ID3D11UnorderedAccessView> newUav;
-        if (FAILED(device->CreateUnorderedAccessView(newBuf.Get(), &uavDesc, &newUav))) return false;
-
-        D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-        srvDesc.Format = format;
-        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-        srvDesc.Buffer.NumElements = static_cast<UINT>(allocElems);
-
-        ComPtr<ID3D11ShaderResourceView> newSrv;
-        if (FAILED(device->CreateShaderResourceView(newBuf.Get(), &srvDesc, &newSrv))) return false;
-
-        buf = std::move(newBuf);
-        uav = std::move(newUav);
-        srv = std::move(newSrv);
-        capElems = allocElems;
-        return true;
+        return EnsureBufferImpl(neededElems, elemBytes, format, false, false, buf, &uav, &srv, capElems);
     }
 
     bool GpuFractalSolver::Impl::EnsureStructuredUavBuffer(
@@ -500,35 +435,7 @@ namespace Mandelbrot
         ComPtr<ID3D11UnorderedAccessView>& uav,
         size_t& capElems)
     {
-        if (neededElems <= capElems && buf && uav) return true;
-        const size_t currentBytes = capElems * strideBytes;
-        const size_t neededBytes = std::max<size_t>(1, neededElems) * strideBytes;
-        if (neededBytes > kD3D11SafeMaxBufferBytes) return false;
-        const size_t allocBytes = GrowCapacityBytes(currentBytes, neededBytes);
-        const size_t allocElems = allocBytes / strideBytes;
-
-        D3D11_BUFFER_DESC desc{};
-        desc.ByteWidth = static_cast<UINT>(allocElems * strideBytes);
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
-        desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-        desc.StructureByteStride = strideBytes;
-
-        ComPtr<ID3D11Buffer> newBuf;
-        if (FAILED(device->CreateBuffer(&desc, nullptr, &newBuf))) return false;
-
-        D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
-        uavDesc.Format = DXGI_FORMAT_UNKNOWN;
-        uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-        uavDesc.Buffer.NumElements = static_cast<UINT>(allocElems);
-
-        ComPtr<ID3D11UnorderedAccessView> newUav;
-        if (FAILED(device->CreateUnorderedAccessView(newBuf.Get(), &uavDesc, &newUav))) return false;
-
-        buf = std::move(newBuf);
-        uav = std::move(newUav);
-        capElems = allocElems;
-        return true;
+        return EnsureBufferImpl(neededElems, strideBytes, DXGI_FORMAT_UNKNOWN, true, false, buf, &uav, nullptr, capElems);
     }
 
     bool GpuFractalSolver::Impl::EnsureStagingReadBuffer(

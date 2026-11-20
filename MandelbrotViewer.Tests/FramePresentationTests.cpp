@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "TestHarness.h"
 #include "FramePresentation.h"
+#include <limits>
 
 using namespace Mandelbrot;
 
@@ -243,3 +244,76 @@ TEST_CASE(FramePresentation, ExportSamplesPixelCentersWithBilinearFiltering)
         140, 10, 20, 255, 180, 10, 20, 255 };
     ASSERT_TRUE(expected == pixels);
 }
+
+TEST_CASE(FramePresentation, LimitCameraToFrameHandlesNonPositiveStartMarginsWithoutNaN)
+{
+    MandelbrotConfig frame;
+    frame.width = 64;
+    frame.height = 48;
+    frame.zoom = 10.0;
+    frame.SetCenter(-0.75, 0.125);
+
+    // When `from` is already strictly outside the frame, LimitCameraToFrame snaps back to FrameViewport.
+    auto strictlyOutside = frame;
+    strictlyOutside.SetCenter(-0.75 - 0.1, 0.125);
+    ASSERT_FALSE(FrameCoversViewport(frame, strictlyOutside));
+    const auto snapped = LimitCameraToFrame(frame, strictlyOutside, strictlyOutside);
+    ASSERT_TRUE(std::isfinite(snapped.centerX));
+    ASSERT_NEAR(frame.centerX, snapped.centerX, 1e-12);
+
+    // When `from` is already at/slightly past MaxPresentationScale (still covered by frame),
+    // the scale margin `MaxPresentationScale - a.scale` is <= 0.
+    auto atLimit = frame;
+    atLimit.zoom = frame.zoom * (MaxPresentationScale + 1e-6);
+    ASSERT_TRUE(FrameCoversViewport(frame, atLimit));
+
+    // Zooming further in (end < start <= 0) must clamp progress to 0 (stay at `atLimit`) with no NaN.
+    auto furtherIn = atLimit;
+    furtherIn.zoom *= 1.5;
+    const auto clampedIn = LimitCameraToFrame(frame, atLimit, furtherIn);
+    ASSERT_TRUE(std::isfinite(clampedIn.zoom));
+    ASSERT_NEAR(atLimit.zoom, clampedIn.zoom, 1e-12);
+
+    // Staying at the same over-limit scale (end == start < 0) must not divide by zero.
+    const auto clampedSame = LimitCameraToFrame(frame, atLimit, atLimit);
+    ASSERT_TRUE(std::isfinite(clampedSame.zoom));
+    ASSERT_NEAR(atLimit.zoom, clampedSame.zoom, 1e-12);
+
+    // Zooming back out (end > start) must be allowed to recover rather than freezing at 0.
+    auto zoomBackOut = atLimit;
+    zoomBackOut.zoom = frame.zoom * 1.1;
+    const auto recovered = LimitCameraToFrame(frame, atLimit, zoomBackOut);
+    ASSERT_TRUE(std::isfinite(recovered.zoom));
+    ASSERT_LT(recovered.zoom, atLimit.zoom);
+}
+
+TEST_CASE(FramePresentation, SnapshotViewportRejectsInvalidInputsAndCopiesIdentity)
+{
+    MandelbrotConfig cfg;
+    cfg.width = 4;
+    cfg.height = 4;
+    std::vector<uint8_t> source(4 * 4 * 4, 0xAB);
+    const std::vector<uint8_t> zeros(4 * 4 * 4, 0);
+
+    // Non-positive view dimensions return an empty buffer.
+    auto zeroView = cfg;
+    zeroView.height = 0;
+    ASSERT_TRUE(SnapshotViewport(source.data(), cfg, zeroView).empty());
+
+    // Null source or invalid frame metadata safely returns a zero-filled buffer of view dimensions.
+    ASSERT_TRUE(SnapshotViewport(nullptr, cfg, cfg) == zeros);
+
+    auto zeroFrame = cfg;
+    zeroFrame.width = 0;
+    ASSERT_TRUE(SnapshotViewport(source.data(), zeroFrame, cfg) == zeros);
+
+    auto nanZoom = cfg;
+    nanZoom.zoom = std::numeric_limits<double>::quiet_NaN();
+    ASSERT_TRUE(SnapshotViewport(source.data(), nanZoom, cfg) == zeros);
+
+    // Identity fast-path copies byte-for-byte.
+    for (size_t i = 0; i < source.size(); ++i) source[i] = static_cast<uint8_t>(i);
+    const auto copied = SnapshotViewport(source.data(), cfg, cfg);
+    ASSERT_TRUE(copied == source);
+}
+

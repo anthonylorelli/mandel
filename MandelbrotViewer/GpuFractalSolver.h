@@ -32,7 +32,7 @@ namespace Mandelbrot
     // DirectCompute (D3D11 cs_5_0) fractal solver supporting shallow FP32 evaluation,
     // high-occupancy LDS perturbation, single-precision and FloatExp Bivariate Linear
     // Approximation (BLA) skipping, batched 4x subpixel boundary refinement, and fused
-    // GPU supersampled palette coloring + linear-light temporal accumulation.
+    // GPU supersampled palette coloring + analytical radial shutter blur.
     class GpuFractalSolver
     {
     public:
@@ -67,8 +67,8 @@ namespace Mandelbrot
             double& outElapsedMs);
 
         // Fused GPU-resident movie frame pipeline: keeps iteration, boundary detection,
-        // DispatchIndirect 4x subpixel evaluation, palette coloring, and 2x linear-light
-        // temporal shutter blending entirely on the GPU with a single final BGRA readback.
+        // DispatchIndirect 4x subpixel evaluation, palette coloring, and optional radial
+        // shutter motion blur entirely on the GPU with a single final BGRA readback.
         bool BeginMovieFrame(int width, int height, bool enableShutterBlur = false);
 
         bool RenderMovieBand(
@@ -79,7 +79,6 @@ namespace Mandelbrot
             int topHalo,
             int visibleRows,
             int destRowOffset,
-            int temporalStep,
             const GpuMovieColorParams& colorParams,
             uint32_t* ioBandPixels,
             const std::atomic<bool>* cancelToken);

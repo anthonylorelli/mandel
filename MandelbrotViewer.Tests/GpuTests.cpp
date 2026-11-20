@@ -432,7 +432,7 @@ TEST_CASE(Gpu, FusedMoviePostProcessCoversThemesNewtonDeepExpAndNoSmoothing)
         verifyMoviePlan(deepPlan, 12.0, 4.5);
     }
 
-    // 5. >16M-pixel strip-based temporal accumulation path (!movieFullFrameAccum, temporalMode=2)
+    // 5. >16M-pixel strip-based readback path (!movieFullFrameAccum)
     {
         MoviePlan stripPlan;
         stripPlan.width = 4096;

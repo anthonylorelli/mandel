@@ -35,8 +35,8 @@ namespace Mandelbrot
 
             if (type == FractalType::Newton)
             {
-                outBasin = std::clamp(static_cast<int>(v / 1000000.0f), 0, 2);
-                outSteps = std::fmod(v, 1000000.0f);
+                outBasin = std::clamp(static_cast<int>(v / NewtonRootStride), 0, 2);
+                outSteps = std::fmod(v, NewtonRootStride);
             }
             else
             {

@@ -1,12 +1,20 @@
 #include "pch.h"
 #include "ColorTheme.h"
-#include "MandelbrotEngine.h"
+#include "FractalConfig.h"
 #include <cmath>
 #include <algorithm>
 #include <numbers>
 
 namespace Mandelbrot
 {
+    namespace
+    {
+        float SanitizeStopPosition(float position) noexcept
+        {
+            return std::isnan(position) ? 0.0f : std::clamp(position, 0.0f, 1.0f);
+        }
+    }
+
     const std::vector<PresetTheme>& GetAllPresets()
     {
         static const std::vector<PresetTheme> presets = {
@@ -140,13 +148,17 @@ namespace Mandelbrot
     void ColorTheme::SetStops(const std::vector<GradientStop>& stops)
     {
         m_stops = stops;
+        for (auto& stop : m_stops)
+        {
+            stop.position = SanitizeStopPosition(stop.position);
+        }
         m_currentPreset = PresetTheme::Custom;
         RebuildLut();
     }
 
     void ColorTheme::AddStop(float position, uint8_t r, uint8_t g, uint8_t b)
     {
-        m_stops.push_back({ std::clamp(position, 0.0f, 1.0f), r, g, b });
+        m_stops.push_back({ SanitizeStopPosition(position), r, g, b });
         m_currentPreset = PresetTheme::Custom;
         RebuildLut();
     }
@@ -165,7 +177,7 @@ namespace Mandelbrot
     {
         if (index < m_stops.size())
         {
-            m_stops[index] = { std::clamp(position, 0.0f, 1.0f), r, g, b };
+            m_stops[index] = { SanitizeStopPosition(position), r, g, b };
             m_currentPreset = PresetTheme::Custom;
             RebuildLut();
         }
@@ -236,7 +248,7 @@ namespace Mandelbrot
             const float factor = (span > 0.00001f) ? ((t - s0.position) / span) : 0.0f;
 
             // Smooth cosine interpolation to prevent harsh linear color bends
-            const float mu = (1.0f - std::cos(factor * 3.14159265358979323846f)) * 0.5f;
+            const float mu = (1.0f - std::cos(factor * std::numbers::pi_v<float>)) * 0.5f;
 
             const uint8_t r = static_cast<uint8_t>(std::clamp(s0.r * (1.0f - mu) + s1.r * mu, 0.0f, 255.0f));
             const uint8_t g = static_cast<uint8_t>(std::clamp(s0.g * (1.0f - mu) + s1.g * mu, 0.0f, 255.0f));
@@ -279,14 +291,14 @@ namespace Mandelbrot
     }
 
     uint32_t ColorTheme::ColorIteration(float value, float frequency, float phaseOffset, bool invert,
-        uint32_t interiorColor, FractalType fractalType, float deltaU) const
+        uint32_t interiorColor, FractalType fractalType) const
     {
         if (value < 0.0f) return interiorColor;
         const float lutMax = static_cast<float>(LUT_SIZE - 1);
         if (fractalType == FractalType::Newton)
         {
-            const int root = static_cast<int>(value / 1000000.0f);
-            const float iter = value - root * 1000000.0f;
+            const int root = static_cast<int>(value / NewtonRootStride);
+            const float iter = value - root * NewtonRootStride;
             const float rootBase = static_cast<float>(root % 3) / 3.0f;
             const float compressedIter = 12.0f * std::log(1.0f + iter * (1.0f / 12.0f));
             const float rawRing = compressedIter * 0.06f * frequency + phaseOffset;
@@ -309,7 +321,7 @@ namespace Mandelbrot
             return color;
         }
 
-        return ColorAtPhase(MapIterationToPhase(value, frequency), phaseOffset, invert, deltaU);
+        return ColorAtPhase(MapIterationToPhase(value, frequency), phaseOffset, invert, 0.0f);
     }
 
     uint32_t ColorTheme::ColorAtPhase(float basePhase, float phaseOffset, bool invert, float deltaU) const
@@ -346,29 +358,6 @@ namespace Mandelbrot
         return 0xFF000000u | (static_cast<uint32_t>(std::clamp(r + 0.5f, 0.0f, 255.0f)) << 16) |
             (static_cast<uint32_t>(std::clamp(g + 0.5f, 0.0f, 255.0f)) << 8) |
             static_cast<uint32_t>(std::clamp(b + 0.5f, 0.0f, 255.0f));
-    }
-
-    namespace
-    {
-        struct LinearColorTables
-        {
-            std::array<float, 256> decode{};
-            std::array<uint8_t, 4097> encode{};
-            LinearColorTables()
-            {
-                for (size_t i = 0; i < decode.size(); ++i)
-                {
-                    const float s = static_cast<float>(i) / 255.0f;
-                    decode[i] = s <= 0.04045f ? s / 12.92f : std::pow((s + 0.055f) / 1.055f, 2.4f);
-                }
-                for (size_t i = 0; i < encode.size(); ++i)
-                {
-                    const float linear = static_cast<float>(i) / (encode.size() - 1);
-                    const float s = linear <= 0.0031308f ? 12.92f * linear : 1.055f * std::pow(linear, 1.0f / 2.4f) - 0.055f;
-                    encode[i] = static_cast<uint8_t>(std::clamp(s * 255.0f + 0.5f, 0.0f, 255.0f));
-                }
-            }
-        };
     }
 
     void ColorTheme::Recolor(
@@ -468,7 +457,7 @@ namespace Mandelbrot
         }
 
         if (!subpixelSamples || subpixelSamples->empty()) return;
-        static const LinearColorTables colorSpace;
+        const auto& colorSpace = detail::LinearSrgbTables::Instance();
         const intptr_t sampleCount = static_cast<intptr_t>(subpixelSamples->size());
         #pragma omp parallel for schedule(static, 64)
         for (intptr_t i = 0; i < sampleCount; ++i)

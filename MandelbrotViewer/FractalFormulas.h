@@ -1,5 +1,5 @@
 #pragma once
-#include "FractalCatalog.h"
+#include "FractalConfig.h"
 #include <algorithm>
 #include <cmath>
 
@@ -99,6 +99,7 @@ namespace Mandelbrot::detail
         constexpr double invLn3 = 0.91023922662683739361; // 1.0 / ln(3)
         const double invLnDegree = (type == FractalType::CubicMultibrot) ? invLn3 : invLn2;
         const double mod2 = zr2 + zi2;
+        if (!std::isfinite(mod2) || mod2 <= 1.0) return 0.0f;
         const double logZn = std::log(mod2) * 0.5;
         const double nu = smoothIter + 1.0 - std::log(logZn) * invLnDegree;
         return static_cast<float>(nu > 0.0 ? nu : 0.0);
@@ -270,7 +271,7 @@ namespace Mandelbrot::detail
                     smoothVal = static_cast<float>(std::max(0.0, iter - frac));
                 }
             }
-            return rootIndex * 1000000.0f + smoothVal;
+            return rootIndex * NewtonRootStride + smoothVal;
         }
 
         double zr = 0.0;
@@ -287,145 +288,72 @@ namespace Mandelbrot::detail
         int stepsSinceCheck = 0;
         int iter = 0;
 
+        auto runEscapeLoop = [&](auto&& stepFn) noexcept
+        {
+            while (iter < maxIter && (zr2 + zi2) <= bailoutRadius2)
+            {
+                stepFn();
+                zr2 = zr * zr;
+                zi2 = zi * zi;
+                iter++;
+                if (zr == checkZr && zi == checkZi)
+                {
+                    iter = maxIter;
+                    break;
+                }
+                if (++stepsSinceCheck == checkPeriod)
+                {
+                    checkZr = zr;
+                    checkZi = zi;
+                    stepsSinceCheck = 0;
+                    if (checkPeriod < 1024) checkPeriod <<= 1;
+                }
+            }
+        };
+
         switch (type)
         {
         case FractalType::Mandelbrot:
-            while (iter < maxIter && (zr2 + zi2) <= bailoutRadius2)
-            {
+            runEscapeLoop([&]() noexcept {
                 zi = 2.0 * zr * zi + cy;
                 zr = zr2 - zi2 + cx;
-                zr2 = zr * zr;
-                zi2 = zi * zi;
-                iter++;
-                if (zr == checkZr && zi == checkZi)
-                {
-                    iter = maxIter;
-                    break;
-                }
-                if (++stepsSinceCheck == checkPeriod)
-                {
-                    checkZr = zr;
-                    checkZi = zi;
-                    stepsSinceCheck = 0;
-                    if (checkPeriod < 1024) checkPeriod <<= 1;
-                }
-            }
+            });
             break;
 
         case FractalType::BurningShip:
-            while (iter < maxIter && (zr2 + zi2) <= bailoutRadius2)
-            {
+            runEscapeLoop([&]() noexcept {
                 zi = -2.0 * std::abs(zr * zi) + cy;
                 zr = zr2 - zi2 + cx;
-                zr2 = zr * zr;
-                zi2 = zi * zi;
-                iter++;
-                if (zr == checkZr && zi == checkZi)
-                {
-                    iter = maxIter;
-                    break;
-                }
-                if (++stepsSinceCheck == checkPeriod)
-                {
-                    checkZr = zr;
-                    checkZi = zi;
-                    stepsSinceCheck = 0;
-                    if (checkPeriod < 1024) checkPeriod <<= 1;
-                }
-            }
+            });
             break;
 
         case FractalType::Tricorn:
-            while (iter < maxIter && (zr2 + zi2) <= bailoutRadius2)
-            {
+            runEscapeLoop([&]() noexcept {
                 zi = -2.0 * zr * zi + cy;
                 zr = zr2 - zi2 + cx;
-                zr2 = zr * zr;
-                zi2 = zi * zi;
-                iter++;
-                if (zr == checkZr && zi == checkZi)
-                {
-                    iter = maxIter;
-                    break;
-                }
-                if (++stepsSinceCheck == checkPeriod)
-                {
-                    checkZr = zr;
-                    checkZi = zi;
-                    stepsSinceCheck = 0;
-                    if (checkPeriod < 1024) checkPeriod <<= 1;
-                }
-            }
+            });
             break;
 
         case FractalType::Celtic:
-            while (iter < maxIter && (zr2 + zi2) <= bailoutRadius2)
-            {
+            runEscapeLoop([&]() noexcept {
                 zi = 2.0 * zr * zi + cy;
                 zr = std::abs(zr2 - zi2) + cx;
-                zr2 = zr * zr;
-                zi2 = zi * zi;
-                iter++;
-                if (zr == checkZr && zi == checkZi)
-                {
-                    iter = maxIter;
-                    break;
-                }
-                if (++stepsSinceCheck == checkPeriod)
-                {
-                    checkZr = zr;
-                    checkZi = zi;
-                    stepsSinceCheck = 0;
-                    if (checkPeriod < 1024) checkPeriod <<= 1;
-                }
-            }
+            });
             break;
 
         case FractalType::Buffalo:
-            while (iter < maxIter && (zr2 + zi2) <= bailoutRadius2)
-            {
+            runEscapeLoop([&]() noexcept {
                 zi = -2.0 * std::abs(zr * zi) + cy;
                 zr = std::abs(zr2 - zi2) + cx;
-                zr2 = zr * zr;
-                zi2 = zi * zi;
-                iter++;
-                if (zr == checkZr && zi == checkZi)
-                {
-                    iter = maxIter;
-                    break;
-                }
-                if (++stepsSinceCheck == checkPeriod)
-                {
-                    checkZr = zr;
-                    checkZi = zi;
-                    stepsSinceCheck = 0;
-                    if (checkPeriod < 1024) checkPeriod <<= 1;
-                }
-            }
+            });
             break;
 
         case FractalType::CubicMultibrot:
-            while (iter < maxIter && (zr2 + zi2) <= bailoutRadius2)
-            {
+            runEscapeLoop([&]() noexcept {
                 const double nextZr = zr * (zr2 - 3.0 * zi2) + cx;
                 zi = zi * (3.0 * zr2 - zi2) + cy;
                 zr = nextZr;
-                zr2 = zr * zr;
-                zi2 = zi * zi;
-                iter++;
-                if (zr == checkZr && zi == checkZi)
-                {
-                    iter = maxIter;
-                    break;
-                }
-                if (++stepsSinceCheck == checkPeriod)
-                {
-                    checkZr = zr;
-                    checkZi = zi;
-                    stepsSinceCheck = 0;
-                    if (checkPeriod < 1024) checkPeriod <<= 1;
-                }
-            }
+            });
             break;
 
         case FractalType::Phoenix:

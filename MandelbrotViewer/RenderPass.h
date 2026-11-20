@@ -1,5 +1,5 @@
 #pragma once
-#include "FractalCatalog.h"
+#include "FractalConfig.h"
 #include "PixelSampling.h"
 #include <algorithm>
 #include <atomic>
@@ -9,6 +9,15 @@
 #include <omp.h>
 #include <stdexcept>
 #include <vector>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 namespace Mandelbrot::detail
 {
@@ -17,7 +26,7 @@ namespace Mandelbrot::detail
         if ((a < 0.0f) != (b < 0.0f)) return false;
         if (type == FractalType::Newton && a >= 0.0f)
         {
-            return static_cast<int>(a / 1000000.0f) == static_cast<int>(b / 1000000.0f);
+            return static_cast<int>(a / NewtonRootStride) == static_cast<int>(b / NewtonRootStride);
         }
         return true;
     }
@@ -200,11 +209,16 @@ namespace Mandelbrot::detail
                     if (!smooth)
                     {
                         // Discrete mode: fast-fill constant integer band confirmed by neighbors; refine cells crossing an integer step
-                        const float nL = outIterations[static_cast<size_t>(y0) * width + xPrev];
-                        const float nR = outIterations[static_cast<size_t>(y0) * width + xNext];
-                        const float nT = outIterations[static_cast<size_t>(yPrev) * width + x0];
-                        const float nB = outIterations[static_cast<size_t>(yNext) * width + x0];
-                        if (minV == maxV && (!edgeRefine || (nL == v00 && nR == v00 && nT == v00 && nB == v00)))
+                        bool canFill = (minV == maxV);
+                        if (canFill && edgeRefine)
+                        {
+                            const float nL = outIterations[static_cast<size_t>(y0) * width + xPrev];
+                            const float nR = outIterations[static_cast<size_t>(y0) * width + xNext];
+                            const float nT = outIterations[static_cast<size_t>(yPrev) * width + x0];
+                            const float nB = outIterations[static_cast<size_t>(yNext) * width + x0];
+                            canFill = (nL == v00 && nR == v00 && nT == v00 && nB == v00);
+                        }
+                        if (canFill)
                         {
                             for (int py = y0; py < writeYEnd; ++py)
                             {
@@ -350,16 +364,23 @@ namespace Mandelbrot::detail
         }
     }
 
-    template <typename EvalQuadFn>
-    void RefineSubpixelsQuads(int width, int height, bool smooth, FractalType type,
-        const std::vector<float>& centers, std::vector<float>& weights,
-        std::vector<SubpixelSamples>* samples, const std::atomic<bool>* cancelToken,
-        EvalQuadFn&& evalQuad)
+    // Detects boundary and high-variation pixels in a 3x3 neighborhood and compacts their
+    // indices and smooth blend weights into `samples` (and optional pixel->slot lookup table).
+    // Returns false if canceled before completion.
+    inline bool BuildSubpixelMask(
+        int width,
+        int height,
+        bool smooth,
+        FractalType type,
+        const std::vector<float>& centers,
+        std::vector<float>& weights,
+        std::vector<SubpixelSamples>& samples,
+        const std::atomic<bool>* cancelToken,
+        std::vector<uint32_t>* outSlotOfPixel = nullptr)
     {
-        if (!samples) return;
-        samples->clear();
+        samples.clear();
         auto canceled = [&] { return cancelToken && cancelToken->load(std::memory_order_relaxed); };
-        if (canceled()) return;
+        if (canceled()) return false;
         if (centers.size() > std::numeric_limits<uint32_t>::max())
             throw std::length_error("Supersampling image is too large.");
 
@@ -373,7 +394,7 @@ namespace Mandelbrot::detail
             const int y0 = std::max(0, y - 1), y1 = std::min(height - 1, y + 1);
             for (int x = 0; x < width; ++x)
             {
-                const size_t index = static_cast<size_t>(y) * width + x;
+                const size_t index = static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x);
                 const float center = centers[index];
                 const int x0 = std::max(0, x - 1), x1 = std::min(width - 1, x + 1);
                 if (center < 0.0f)
@@ -381,7 +402,7 @@ namespace Mandelbrot::detail
                     bool boundary = false;
                     for (int ny = y0; ny <= y1 && !boundary; ++ny)
                     {
-                        const float* nRow = centers.data() + static_cast<size_t>(ny) * width;
+                        const float* nRow = centers.data() + static_cast<size_t>(ny) * static_cast<size_t>(width);
                         for (int nx = x0; nx <= x1; ++nx)
                             if (nRow[nx] >= 0.0f) { boundary = true; break; }
                     }
@@ -391,10 +412,10 @@ namespace Mandelbrot::detail
                 }
                 float variation = 0.0f;
                 bool boundary = false;
-                const float a = type == FractalType::Newton ? std::fmod(center, 1000000.0f) : center;
+                const float a = (type == FractalType::Newton) ? std::fmod(center, NewtonRootStride) : center;
                 for (int ny = y0; ny <= y1; ++ny)
                 {
-                    const float* nRow = centers.data() + static_cast<size_t>(ny) * width;
+                    const float* nRow = centers.data() + static_cast<size_t>(ny) * static_cast<size_t>(width);
                     for (int nx = x0; nx <= x1; ++nx)
                     {
                         if (nx == x && ny == y) continue;
@@ -402,7 +423,7 @@ namespace Mandelbrot::detail
                         if (neighbor < 0.0f) { boundary = true; continue; }
                         if (!SameBasin(center, neighbor, type) || (!smooth && center != neighbor))
                             boundary = true;
-                        const float b = type == FractalType::Newton ? std::fmod(neighbor, 1000000.0f) : neighbor;
+                        const float b = (type == FractalType::Newton) ? std::fmod(neighbor, NewtonRootStride) : neighbor;
                         variation = std::max(variation, std::abs(a - b) / (10.0f + std::min(a, b)));
                     }
                 }
@@ -415,26 +436,43 @@ namespace Mandelbrot::detail
             }
             rowOffsets[static_cast<size_t>(y) + 1] = selected;
         }
-        if (canceled()) return;
-        for (int y = 0; y < height; ++y) rowOffsets[y + 1] += rowOffsets[y];
-        if (rowOffsets.back() == 0) return;
-        samples->resize(rowOffsets.back());
+        if (canceled()) return false;
+        for (int y = 0; y < height; ++y) rowOffsets[static_cast<size_t>(y) + 1] += rowOffsets[static_cast<size_t>(y)];
+        const size_t subCount = rowOffsets.back();
+        if (subCount == 0) return true;
+
+        samples.resize(subCount);
+        if (outSlotOfPixel) outSlotOfPixel->resize(centers.size());
 
         #pragma omp parallel for schedule(static)
         for (int y = 0; y < height; ++y)
         {
-            if (rowOffsets[y] == rowOffsets[y + 1]) continue;
-            size_t output = rowOffsets[y];
+            if (rowOffsets[static_cast<size_t>(y)] == rowOffsets[static_cast<size_t>(y) + 1]) continue;
+            size_t output = rowOffsets[static_cast<size_t>(y)];
             for (int x = 0; x < width; ++x)
             {
-                const size_t index = static_cast<size_t>(y) * width + x;
+                const size_t index = static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x);
                 if (weights[index] <= 0.0f) continue;
-                auto& sample = (*samples)[output++];
+                if (outSlotOfPixel) (*outSlotOfPixel)[index] = static_cast<uint32_t>(output);
+                auto& sample = samples[output++];
                 sample.pixelIndex = static_cast<uint32_t>(index);
                 sample.weight = weights[index];
             }
         }
+        return true;
+    }
 
+    template <typename EvalQuadFn>
+    void RefineSubpixelsQuads(int width, int height, bool smooth, FractalType type,
+        const std::vector<float>& centers, std::vector<float>& weights,
+        std::vector<SubpixelSamples>* samples, const std::atomic<bool>* cancelToken,
+        EvalQuadFn&& evalQuad)
+    {
+        if (!samples) return;
+        if (!BuildSubpixelMask(width, height, smooth, type, centers, weights, *samples, cancelToken) || samples->empty())
+            return;
+
+        auto canceled = [&] { return cancelToken && cancelToken->load(std::memory_order_relaxed); };
         const intptr_t sampleCount = static_cast<intptr_t>(samples->size());
         #pragma omp parallel for schedule(dynamic, 32)
         for (intptr_t i = 0; i < sampleCount; ++i)
@@ -466,11 +504,13 @@ namespace Mandelbrot::detail
 
     inline void DisableCurrentThreadPowerThrottling()
     {
+#ifdef _WIN32
         THREAD_POWER_THROTTLING_STATE throttling{};
         throttling.Version = THREAD_POWER_THROTTLING_CURRENT_VERSION;
         throttling.ControlMask = THREAD_POWER_THROTTLING_EXECUTION_SPEED;
         throttling.StateMask = 0;
         SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, &throttling, sizeof(throttling));
+#endif
     }
 
     inline void EnsureOpenMpAllCores()

@@ -54,6 +54,7 @@ namespace Mandelbrot
             std::vector<float> iterations;
             std::vector<SubpixelSamples> samples;
         };
+        void DiscardCompletedLocked() noexcept;
         void Run();
 
         NotifyReady m_notify;

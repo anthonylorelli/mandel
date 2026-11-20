@@ -125,7 +125,7 @@ namespace Mandelbrot::detail
         uint32_t destRowOffset, fractalType, smoothFlag, invertFlag;
         float frequency, phaseOffset;
         uint32_t interiorColor, avgRgb;
-        uint32_t temporalMode, subGroupThreads, pad0, pad1;
+        uint32_t subGroupThreads, pad0, pad1, pad2;
     };
     static_assert(sizeof(PostProcessCb) == 64);
 

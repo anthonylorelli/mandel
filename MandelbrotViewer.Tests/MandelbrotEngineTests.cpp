@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "TestHarness.h"
 #include "MandelbrotEngine.h"
+#include "DeepReferenceCache.h"
 
 using namespace Mandelbrot;
 
@@ -668,3 +669,63 @@ TEST_CASE(MandelbrotEngine, IterationEdge_SmoothContinuityAndNoFlicker)
         ASSERT_GT(bandTransitionsChecked, 2);
     }
 }
+
+TEST_CASE(MandelbrotEngine, ResolveHpCenterPreservesUntouchedAxisPrecision)
+{
+    FractalConfig cfg;
+    const BigFloat baseX(-0.75);
+    const BigFloat tinyDelta(1e-40);
+    const BigFloat hpX = baseX + tinyDelta;
+    const BigFloat hpY(0.125);
+    cfg.SetCenter(hpX, hpY);
+
+    // Modify only centerY as a double; centerX remains unchanged.
+    cfg.centerY = 0.25;
+
+    BigFloat resolvedX, resolvedY;
+    cfg.ResolveHpCenter(resolvedX, resolvedY);
+
+    // X must retain its 1e-40 deep offset instead of being clobbered to double precision.
+    ASSERT_TRUE(resolvedX == hpX);
+    ASSERT_FALSE((resolvedX - baseX).IsZero());
+    // Y must sync to the updated double value.
+    ASSERT_NEAR(0.25, resolvedY.ToDouble(), 1e-15);
+
+    // Symmetrically, modifying only centerX preserves high-precision Y.
+    const BigFloat hpYDeep = BigFloat(0.125) + tinyDelta;
+    cfg.SetCenter(baseX, hpYDeep);
+    cfg.centerX = -0.5;
+    cfg.ResolveHpCenter(resolvedX, resolvedY);
+    ASSERT_NEAR(-0.5, resolvedX.ToDouble(), 1e-15);
+    ASSERT_TRUE(resolvedY == hpYDeep);
+}
+
+TEST_CASE(MandelbrotEngine, DeepReferenceCacheInvalidateForcesRecomputation)
+{
+    DeepReferenceCache cache;
+    FractalConfig cfg;
+    cfg.width = 64;
+    cfg.height = 48;
+    cfg.zoom = 1e20;
+    cfg.maxIterations = 300;
+    cfg.SetCenter(-0.7436438870371587, 0.1318259042053119);
+
+    DeepReferenceState s0{};
+    ASSERT_TRUE(cache.Ensure(cfg, cfg.hpCenterX, cfg.hpCenterY, ExecutionMode::Automatic, s0));
+    const uint64_t v0 = s0.orbitVersion;
+    ASSERT_GT(v0, 0ull);
+    ASSERT_GT(s0.refLen, 0);
+
+    // Subsequent call without invalidation reuses the cached orbit version.
+    DeepReferenceState s1{};
+    ASSERT_TRUE(cache.Ensure(cfg, cfg.hpCenterX, cfg.hpCenterY, ExecutionMode::Automatic, s1));
+    ASSERT_EQ(v0, s1.orbitVersion);
+
+    // After Invalidate(), the next Ensure recomputes a fresh orbit with a newer version.
+    cache.Invalidate();
+    DeepReferenceState s2{};
+    ASSERT_TRUE(cache.Ensure(cfg, cfg.hpCenterX, cfg.hpCenterY, ExecutionMode::Automatic, s2));
+    ASSERT_GT(s2.orbitVersion, v0);
+    ASSERT_EQ(s0.refLen, s2.refLen);
+}
+
