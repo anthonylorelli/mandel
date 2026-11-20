@@ -228,6 +228,11 @@ namespace Mandelbrot
             if (check != 0 && (t - m_autoTargets.back().progress) * seconds < .5 &&
                 (t - m_autoTargets.back().progress) * range < std::log(2.0)) continue;
             probe.zoom = check == 0 ? start.zoom : std::exp(std::log(start.zoom) + range * t);
+            if (autoScaleIterations)
+            {
+                probe.maxIterations = MandelbrotEngine::RecommendMaxIterations(
+                    probe.zoom, probe.fractalType, baseIterations);
+            }
             probe.SetCenter(state.x, state.y);
             engine.Compute(probe, iterations, &cancel);
             if (cancel.load(std::memory_order_relaxed)) { m_autoTargets.clear(); return false; }
@@ -301,10 +306,18 @@ namespace Mandelbrot
             const int maxStripByMem = std::max(
                 1,
                 static_cast<int>((4ULL * 1024 * 1024) / static_cast<size_t>(plan.width)) - 2);
+            const bool gpuMultiPassEligible =
+                (camera.fractalType == FractalType::Mandelbrot &&
+                 !camera.juliaSet &&
+                 camera.zoom >= GpuPerturbationThreshold);
+            const uint64_t effectiveDispatchIters = static_cast<uint64_t>(
+                gpuMultiPassEligible
+                    ? std::min(std::max(1, camera.maxIterations), 12288)
+                    : std::max(1, camera.maxIterations));
             const int maxStripByTdr = std::max(
                 16,
                 static_cast<int>(12'000'000'000ULL /
-                    (static_cast<uint64_t>(plan.width) * static_cast<uint64_t>(std::max(1, plan.start.maxIterations)))));
+                    (static_cast<uint64_t>(plan.width) * effectiveDispatchIters)));
             const int gpuBandRows = std::min({ bandRows, maxStripByMem, maxStripByTdr });
 
             if (hasShutter && !gpuFullFrame)
@@ -481,6 +494,22 @@ namespace Mandelbrot
             {
                 MovieWriter writer(staging.wstring(), plan.width, plan.height, plan.fps, plan.codec);
                 MandelbrotEngine engine(plan.useGpu ? ExecutionMode::Gpu : ExecutionMode::Automatic);
+                const double peakZoom = std::max(plan.start.zoom, plan.endZoom);
+                if (!plan.start.juliaSet)
+                {
+                    if (!plan.autoRetarget)
+                    {
+                        const bool zoomIn = (plan.endZoom >= plan.start.zoom);
+                        engine.SetMovieReferenceHint(
+                            peakZoom,
+                            zoomIn ? &plan.targetX : &plan.start.hpCenterX,
+                            zoomIn ? &plan.targetY : &plan.start.hpCenterY);
+                    }
+                    else
+                    {
+                        engine.SetMovieReferenceHint(peakZoom);
+                    }
+                }
                 struct PendingFrame { uint32_t frame{}; std::vector<uint32_t> pixels; };
                 std::mutex queueMutex;
                 std::condition_variable queueCv;

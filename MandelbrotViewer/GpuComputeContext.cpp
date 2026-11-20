@@ -25,9 +25,9 @@ namespace Mandelbrot
         {
             ComPtr<ID3DBlob> shallowPrim, shallowSub;
             ComPtr<ID3DBlob> ldsPrim, ldsSub;
-            ComPtr<ID3DBlob> ldsBlaPrim, ldsBlaSub;
-            ComPtr<ID3DBlob> deepExpPrim, deepExpSub;
-            ComPtr<ID3DBlob> postDetect, postBuildIndirect, postResolve, postShutter;
+            ComPtr<ID3DBlob> ldsBlaPrim, ldsBlaSub, ldsBlaStage0, ldsBlaResume;
+            ComPtr<ID3DBlob> deepExpPrim, deepExpSub, deepExpStage0, deepExpResume;
+            ComPtr<ID3DBlob> postDetect, postBuildIndirect, postBuildActiveIndirect, postResolve, postShutter;
             bool ok{ false };
         };
 
@@ -70,10 +70,15 @@ namespace Mandelbrot
                     compileOne(ldsSrc, "CSSubpixels", cache.ldsSub) &&
                     compileOne(ldsBlaSrc, "CSPrimary", cache.ldsBlaPrim) &&
                     compileOne(ldsBlaSrc, "CSSubpixels", cache.ldsBlaSub) &&
+                    compileOne(ldsBlaSrc, "CSPrimaryStage0", cache.ldsBlaStage0) &&
+                    compileOne(ldsBlaSrc, "CSPrimaryResume", cache.ldsBlaResume) &&
                     compileOne(deepExpSrc, "CSPrimary", cache.deepExpPrim) &&
                     compileOne(deepExpSrc, "CSSubpixels", cache.deepExpSub) &&
+                    compileOne(deepExpSrc, "CSPrimaryStage0", cache.deepExpStage0) &&
+                    compileOne(deepExpSrc, "CSPrimaryResume", cache.deepExpResume) &&
                     compileOne(detectSrc, "CSDetectBoundaries", cache.postDetect) &&
                     compileOne(detectSrc, "CSBuildIndirectArgs", cache.postBuildIndirect) &&
+                    compileOne(detectSrc, "CSBuildActiveIndirectArgs", cache.postBuildActiveIndirect) &&
                     compileOne(resolveSrc, "CSResolveAndBlend", cache.postResolve) &&
                     compileOne(shutterSrc, "CSShutterMotionBlur", cache.postShutter);
             });
@@ -158,10 +163,15 @@ namespace Mandelbrot
             !makeShader(shaders.ldsSub, csLdsSub) ||
             !makeShader(shaders.ldsBlaPrim, csLdsBlaPrim) ||
             !makeShader(shaders.ldsBlaSub, csLdsBlaSub) ||
+            !makeShader(shaders.ldsBlaStage0, csLdsBlaStage0) ||
+            !makeShader(shaders.ldsBlaResume, csLdsBlaResume) ||
             !makeShader(shaders.deepExpPrim, csDeepExpPrim) ||
             !makeShader(shaders.deepExpSub, csDeepExpSub) ||
+            !makeShader(shaders.deepExpStage0, csDeepExpStage0) ||
+            !makeShader(shaders.deepExpResume, csDeepExpResume) ||
             !makeShader(shaders.postDetect, csPostDetect) ||
             !makeShader(shaders.postBuildIndirect, csPostBuildIndirect) ||
+            !makeShader(shaders.postBuildActiveIndirect, csPostBuildActiveIndirect) ||
             !makeShader(shaders.postResolve, csPostResolve) ||
             !makeShader(shaders.postShutter, csPostShutter))
         {
@@ -221,6 +231,16 @@ namespace Mandelbrot
         if (FAILED(device->CreateShaderResourceView(subCounterBuf.Get(), &counterSrvDesc, &subCounterSrv)))
         {
             return;
+        }
+
+        for (int i = 0; i < 2; ++i)
+        {
+            if (FAILED(device->CreateBuffer(&counterDesc, nullptr, &activeCountBuf[i])) ||
+                FAILED(device->CreateUnorderedAccessView(activeCountBuf[i].Get(), &counterUavDesc, &activeCountUav[i])) ||
+                FAILED(device->CreateShaderResourceView(activeCountBuf[i].Get(), &counterSrvDesc, &activeCountSrv[i])))
+            {
+                return;
+            }
         }
 
         D3D11_BUFFER_DESC indirectDesc{};
@@ -606,8 +626,8 @@ namespace Mandelbrot
 
     void GpuFractalSolver::Impl::UnbindComputeResources() noexcept
     {
-        ID3D11UnorderedAccessView* nullUavs[3]{ nullptr, nullptr, nullptr };
-        context->CSSetUnorderedAccessViews(0, 3, nullUavs, nullptr);
+        ID3D11UnorderedAccessView* nullUavs[5]{};
+        context->CSSetUnorderedAccessViews(0, 5, nullUavs, nullptr);
         ID3D11ShaderResourceView* nullSrvs[8]{};
         context->CSSetShaderResources(0, 8, nullSrvs);
     }

@@ -6,21 +6,27 @@
 #include <string_view>
 #include <algorithm>
 #include <sstream>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
 
 namespace Mandelbrot
 {
-    // 1024-bit significand floating-point number (32 x 32-bit limbs in base 2^32)
+    // 1024-bit significand floating-point number (16 x 64-bit limbs in base 2^64)
     // Provides ~308 decimal digits of precision with zero heap allocations.
-    // Value = (-1)^sign * sum_{i=0}^{N-1} (limbs[i] * B^{-(i+1)}) * B^exp, where B = 2^32.
+    // Value = (-1)^sign * sum_{i=0}^{W-1} (limbs[i] * B^{-(i+1)}) * B^exp, where B = 2^64.
     class BigFloat
     {
     public:
-        static constexpr int N = 32; // 32 * 32 = 1024 bits of mantissa (~308 decimal digits)
+        // N retains the 32-bit limb count (32 * 32 = 1024 bits) for activeLimbs API compatibility;
+        // W is the internal 64-bit word count (17 * 64 = 1088 bits, >= 1025 bits even with 63 leading zeros).
+        static constexpr int N = 32;
+        static constexpr int W = 17;
 
         bool sign{ false };
         bool isZero{ true };
         int64_t exp{ 0 };
-        uint32_t limbs[N]{};
+        uint64_t limbs[W]{};
 
         constexpr BigFloat() = default;
 
@@ -39,7 +45,7 @@ namespace Mandelbrot
             return isZero;
         }
 
-        void SetZero()
+        void SetZero() noexcept
         {
             sign = false;
             isZero = true;
@@ -47,10 +53,11 @@ namespace Mandelbrot
             std::memset(limbs, 0, sizeof(limbs));
         }
 
-        void Normalize()
+        void Normalize(int wLimit = W) noexcept
         {
+            const int limit = std::clamp(wLimit, 1, W);
             int firstNonZero = -1;
-            for (int i = 0; i < N; ++i)
+            for (int i = 0; i < limit; ++i)
             {
                 if (limbs[i] != 0)
                 {
@@ -69,18 +76,18 @@ namespace Mandelbrot
             if (firstNonZero > 0)
             {
                 exp -= firstNonZero;
-                for (int i = 0; i < N - firstNonZero; ++i)
+                for (int i = 0; i < limit - firstNonZero; ++i)
                 {
                     limbs[i] = limbs[i + firstNonZero];
                 }
-                for (int i = N - firstNonZero; i < N; ++i)
+                for (int i = limit - firstNonZero; i < W; ++i)
                 {
                     limbs[i] = 0;
                 }
             }
         }
 
-        void FromDouble(double val)
+        void FromDouble(double val) noexcept
         {
             SetZero();
             if (val == 0.0 || std::isnan(val) || std::isinf(val))
@@ -95,69 +102,69 @@ namespace Mandelbrot
             }
 
             int bitExp = 0;
-            double m = std::frexp(val, &bitExp); // val = m * 2^bitExp, m in [0.5, 1.0)
+            const double m = std::frexp(val, &bitExp); // val = m * 2^bitExp, m in [0.5, 1.0)
+            const uint64_t sig = static_cast<uint64_t>(std::ldexp(m, 53)); // exact 53-bit integer in [2^52, 2^53)
 
-            // Floor division so that 32*(exp - 1) < bitExp <= 32*exp
-            int64_t bExp = bitExp - 1;
-            int64_t q = (bExp >= 0) ? (bExp / 32) : ((bExp - 31) / 32);
+            // Floor division so that 64*(exp - 1) < bitExp <= 64*exp
+            const int64_t bExp = static_cast<int64_t>(bitExp) - 1;
+            const int64_t q = (bExp >= 0) ? (bExp / 64) : ((bExp - 63) / 64);
             exp = q + 1;
 
-            int shift = static_cast<int>(bitExp - 32 * exp); // in [-31, 0]
-            double scaled = std::ldexp(m, shift);
-
-            constexpr double BASE = 4294967296.0; // 2^32
-            for (int i = 0; i < 4 && scaled > 0.0; ++i)
+            // Bit offset of sig's LSB relative to limbs[0]'s LSB is in [-52, 11]
+            const int s = static_cast<int>(bitExp - 64 * exp) + 11;
+            if (s >= 0)
             {
-                scaled *= BASE;
-                uint32_t limb = static_cast<uint32_t>(scaled);
-                limbs[i] = limb;
-                scaled -= static_cast<double>(limb);
+                limbs[0] = sig << s;
+                limbs[1] = 0;
+            }
+            else
+            {
+                limbs[0] = sig >> (-s);
+                limbs[1] = sig << (64 + s);
             }
 
             isZero = false;
-            Normalize();
         }
 
-        double ToDouble() const
+        double ToDouble() const noexcept
         {
             if (isZero) return 0.0;
 
-            constexpr double INV_BASE1 = 1.0 / 4294967296.0;
-            constexpr double INV_BASE2 = INV_BASE1 * INV_BASE1;
+            constexpr double INV_BASE1 = 5.42101086242752217003726400434970855712890625e-20; // 2^-64
 
-            double mant = static_cast<double>(limbs[0])
-                        + static_cast<double>(limbs[1]) * INV_BASE1
-                        + static_cast<double>(limbs[2]) * INV_BASE2;
+            const double mant = static_cast<double>(limbs[0])
+                              + static_cast<double>(limbs[1]) * INV_BASE1;
 
-            int64_t bitShift = 32 * (exp - 1);
+            int64_t bitShift = 64 * (exp - 1);
             if (bitShift > 1024) bitShift = 1024;
-            if (bitShift < -1075) return 0.0;
+            if (bitShift < -1139) return 0.0;
 
-            double res = std::ldexp(mant, static_cast<int>(bitShift));
+            const double res = std::ldexp(mant, static_cast<int>(bitShift));
             return sign ? -res : res;
         }
 
-        BigFloat Abs() const
+        BigFloat Abs() const noexcept
         {
             BigFloat res = *this;
             if (!res.isZero) res.sign = false;
             return res;
         }
 
-        BigFloat operator-() const
+        BigFloat operator-() const noexcept
         {
             BigFloat res = *this;
             if (!res.isZero) res.sign = !res.sign;
             return res;
         }
 
-        static int CompareMagnitude(const BigFloat& a, const BigFloat& b)
+        static int CompareMagnitude(const BigFloat& a, const BigFloat& b, int activeLimbs = N) noexcept
         {
             if (a.isZero && b.isZero) return 0;
             if (a.isZero) return -1;
             if (b.isZero) return 1;
             if (a.exp != b.exp) return (a.exp > b.exp) ? 1 : -1;
-            for (int i = 0; i < N; ++i)
+            const int wLimit = WordsForLimbs(activeLimbs);
+            for (int i = 0; i < wLimit; ++i)
             {
                 if (a.limbs[i] != b.limbs[i])
                 {
@@ -179,7 +186,7 @@ namespace Mandelbrot
             return !(*this == rhs);
         }
 
-        static BigFloat AddMagnitude(const BigFloat& a, const BigFloat& b, bool resultSign)
+        static BigFloat AddMagnitude(const BigFloat& a, const BigFloat& b, bool resultSign, int activeLimbs = N) noexcept
         {
             if (a.isZero)
             {
@@ -196,11 +203,12 @@ namespace Mandelbrot
 
             if (a.exp < b.exp)
             {
-                return AddMagnitude(b, a, resultSign);
+                return AddMagnitude(b, a, resultSign, activeLimbs);
             }
 
+            const int wLimit = WordsForLimbs(activeLimbs);
             const int64_t diff = a.exp - b.exp;
-            if (diff >= N)
+            if (diff >= wLimit)
             {
                 BigFloat r = a;
                 r.sign = resultSign;
@@ -212,23 +220,26 @@ namespace Mandelbrot
             res.isZero = false;
 
             uint64_t carry = 0;
-            uint32_t temp[N]{};
-            for (int i = N - 1; i >= 0; --i)
+            uint64_t temp[W]{};
+            for (int i = wLimit - 1; i >= 0; --i)
             {
-                uint64_t sum = static_cast<uint64_t>(a.limbs[i]) + carry;
+                uint64_t sum = a.limbs[i] + carry;
+                uint64_t c = (sum < carry) ? 1ULL : 0ULL;
                 if (i >= diff)
                 {
-                    sum += static_cast<uint64_t>(b.limbs[i - diff]);
+                    const uint64_t bv = b.limbs[i - diff];
+                    sum += bv;
+                    c += (sum < bv) ? 1ULL : 0ULL;
                 }
-                temp[i] = static_cast<uint32_t>(sum & 0xFFFFFFFFULL);
-                carry = sum >> 32;
+                temp[i] = sum;
+                carry = c;
             }
 
             if (carry > 0)
             {
                 res.exp = a.exp + 1;
-                res.limbs[0] = static_cast<uint32_t>(carry);
-                for (int i = 1; i < N; ++i)
+                res.limbs[0] = carry;
+                for (int i = 1; i < wLimit; ++i)
                 {
                     res.limbs[i] = temp[i - 1];
                 }
@@ -236,18 +247,17 @@ namespace Mandelbrot
             else
             {
                 res.exp = a.exp;
-                for (int i = 0; i < N; ++i)
+                for (int i = 0; i < wLimit; ++i)
                 {
                     res.limbs[i] = temp[i];
                 }
             }
 
-            res.Normalize();
             return res;
         }
 
         // Assumes |a| >= |b|
-        static BigFloat SubMagnitude(const BigFloat& a, const BigFloat& b, bool resultSign)
+        static BigFloat SubMagnitude(const BigFloat& a, const BigFloat& b, bool resultSign, int activeLimbs = N) noexcept
         {
             if (b.isZero)
             {
@@ -256,35 +266,31 @@ namespace Mandelbrot
                 return r;
             }
 
+            const int wLimit = WordsForLimbs(activeLimbs);
             const int64_t diff = a.exp - b.exp;
-            if (diff > N)
+            if (diff > wLimit)
             {
                 BigFloat r = a;
                 r.sign = resultSign;
                 return r;
             }
 
-            int64_t borrow = 0;
-            uint32_t temp[N + 1]{};
-            for (int i = N; i >= 0; --i)
+            uint64_t borrow = 0;
+            uint64_t temp[W + 1]{};
+            for (int i = wLimit; i >= 0; --i)
             {
-                int64_t av = (i < N) ? static_cast<int64_t>(a.limbs[i]) : 0;
-                int64_t bv = (i >= diff && (i - diff) < N) ? static_cast<int64_t>(b.limbs[i - diff]) : 0;
-                int64_t sub = av - bv - borrow;
-                if (sub < 0)
-                {
-                    sub += (1LL << 32);
-                    borrow = 1;
-                }
-                else
-                {
-                    borrow = 0;
-                }
-                temp[i] = static_cast<uint32_t>(sub);
+                const uint64_t av = (i < wLimit) ? a.limbs[i] : 0ULL;
+                const uint64_t bv = (i >= diff && (i - diff) < wLimit) ? b.limbs[i - diff] : 0ULL;
+                const uint64_t d1 = av - bv;
+                const uint64_t b1 = (av < bv) ? 1ULL : 0ULL;
+                const uint64_t d2 = d1 - borrow;
+                const uint64_t b2 = (d1 < borrow) ? 1ULL : 0ULL;
+                temp[i] = d2;
+                borrow = b1 + b2;
             }
 
             int firstNonZero = -1;
-            for (int i = 0; i <= N; ++i)
+            for (int i = 0; i <= wLimit; ++i)
             {
                 if (temp[i] != 0)
                 {
@@ -302,82 +308,122 @@ namespace Mandelbrot
             res.sign = resultSign;
             res.isZero = false;
             res.exp = a.exp - firstNonZero;
-            for (int i = 0; i < N; ++i)
+            for (int i = 0; i < wLimit; ++i)
             {
-                int srcIdx = firstNonZero + i;
-                res.limbs[i] = (srcIdx <= N) ? temp[srcIdx] : 0;
+                const int srcIdx = firstNonZero + i;
+                res.limbs[i] = (srcIdx <= wLimit) ? temp[srcIdx] : 0ULL;
             }
             return res;
         }
 
-        BigFloat operator+(const BigFloat& rhs) const
+        BigFloat Add(const BigFloat& rhs, int activeLimbs = N) const noexcept
         {
             if (isZero) return rhs;
             if (rhs.isZero) return *this;
 
             if (sign == rhs.sign)
             {
-                return AddMagnitude(*this, rhs, sign);
+                return AddMagnitude(*this, rhs, sign, activeLimbs);
             }
 
-            int cmp = CompareMagnitude(*this, rhs);
+            const int cmp = CompareMagnitude(*this, rhs, activeLimbs);
             if (cmp == 0)
             {
                 return BigFloat(); // Zero
             }
-            else if (cmp > 0)
+            if (cmp > 0)
             {
-                return SubMagnitude(*this, rhs, sign);
+                return SubMagnitude(*this, rhs, sign, activeLimbs);
             }
-            else
-            {
-                return SubMagnitude(rhs, *this, rhs.sign);
-            }
+            return SubMagnitude(rhs, *this, rhs.sign, activeLimbs);
         }
 
-        BigFloat operator-(const BigFloat& rhs) const
+        BigFloat Sub(const BigFloat& rhs, int activeLimbs = N) const noexcept
         {
-            return *this + (-rhs);
+            if (rhs.isZero) return *this;
+            if (isZero) return -rhs;
+
+            if (sign != rhs.sign)
+            {
+                return AddMagnitude(*this, rhs, sign, activeLimbs);
+            }
+
+            const int cmp = CompareMagnitude(*this, rhs, activeLimbs);
+            if (cmp == 0)
+            {
+                return BigFloat(); // Zero
+            }
+            if (cmp > 0)
+            {
+                return SubMagnitude(*this, rhs, sign, activeLimbs);
+            }
+            return SubMagnitude(rhs, *this, !rhs.sign, activeLimbs);
         }
 
-        BigFloat& operator+=(const BigFloat& rhs)
+        BigFloat operator+(const BigFloat& rhs) const noexcept
         {
-            *this = *this + rhs;
+            return Add(rhs, N);
+        }
+
+        BigFloat operator-(const BigFloat& rhs) const noexcept
+        {
+            return Sub(rhs, N);
+        }
+
+        BigFloat& operator+=(const BigFloat& rhs) noexcept
+        {
+            *this = Add(rhs, N);
             return *this;
         }
 
-        BigFloat& operator-=(const BigFloat& rhs)
+        BigFloat& operator-=(const BigFloat& rhs) noexcept
         {
-            *this = *this - rhs;
+            *this = Sub(rhs, N);
             return *this;
         }
 
-        BigFloat Mul(const BigFloat& rhs, int activeLimbs = N) const
+        BigFloat Mul(const BigFloat& rhs, int activeLimbs = N) const noexcept
         {
             if (isZero || rhs.isZero) return BigFloat();
 
-            const int limit = std::clamp(activeLimbs, 1, N);
-            uint64_t prod[N + 3]{};
-            for (int i = 0; i < limit; ++i)
+            const int wLimit = WordsForLimbs(activeLimbs);
+            const int prodLen = wLimit + 3;
+            uint64_t prod[W + 3]{};
+            uint64_t overflow[W + 3]{};
+
+            for (int i = 0; i < wLimit; ++i)
             {
-                uint64_t ai = limbs[i];
+                const uint64_t ai = limbs[i];
                 if (ai == 0) continue;
-                int maxJ = std::min(limit - 1, N + 1 - i);
+                const int maxJ = std::min(wLimit - 1, wLimit + 1 - i);
                 for (int j = 0; j <= maxJ; ++j)
                 {
-                    uint64_t bj = rhs.limbs[j];
+                    const uint64_t bj = rhs.limbs[j];
                     if (bj == 0) continue;
-                    uint64_t p = ai * bj;
-                    prod[i + j + 1] += (p & 0xFFFFFFFFULL);
-                    prod[i + j] += (p >> 32);
+                    uint64_t lo = 0, hi = 0;
+                    Mul64x64(ai, bj, lo, hi);
+
+                    const int loIdx = i + j + 1;
+                    const uint64_t prevLo = prod[loIdx];
+                    prod[loIdx] = prevLo + lo;
+                    if (prod[loIdx] < prevLo) ++overflow[loIdx];
+
+                    const int hiIdx = i + j;
+                    const uint64_t prevHi = prod[hiIdx];
+                    prod[hiIdx] = prevHi + hi;
+                    if (prod[hiIdx] < prevHi) ++overflow[hiIdx];
                 }
             }
 
-            for (int k = N + 2; k >= 1; --k)
+            uint64_t carry = 0;
+            for (int k = prodLen - 1; k >= 1; --k)
             {
-                prod[k - 1] += prod[k] >> 32;
-                prod[k] &= 0xFFFFFFFFULL;
+                const uint64_t v = prod[k] + carry;
+                const uint64_t c1 = (v < prod[k]) ? 1ULL : 0ULL;
+                prod[k] = v;
+                carry = overflow[k] + c1;
             }
+            prod[0] += carry;
 
             BigFloat res;
             res.sign = (sign != rhs.sign);
@@ -386,45 +432,152 @@ namespace Mandelbrot
             if (prod[0] != 0)
             {
                 res.exp = exp + rhs.exp;
-                for (int i = 0; i < N; ++i)
+                for (int i = 0; i < wLimit; ++i)
                 {
-                    res.limbs[i] = static_cast<uint32_t>(prod[i]);
+                    res.limbs[i] = prod[i];
                 }
             }
             else
             {
                 res.exp = exp + rhs.exp - 1;
-                for (int i = 0; i < N; ++i)
+                for (int i = 0; i < wLimit; ++i)
                 {
-                    res.limbs[i] = static_cast<uint32_t>(prod[i + 1]);
+                    res.limbs[i] = prod[i + 1];
                 }
             }
 
-            res.Normalize();
+            res.Normalize(wLimit);
             return res;
         }
 
-        BigFloat operator*(const BigFloat& rhs) const
+        BigFloat operator*(const BigFloat& rhs) const noexcept
         {
             return Mul(rhs, N);
         }
 
-        BigFloat Sqr(int activeLimbs = N) const
+        BigFloat Sqr(int activeLimbs = N) const noexcept
         {
-            return Mul(*this, activeLimbs);
+            if (isZero) return BigFloat();
+
+            const int wLimit = WordsForLimbs(activeLimbs);
+            const int prodLen = wLimit + 3;
+            uint64_t prod[W + 3]{};
+            uint64_t overflow[W + 3]{};
+
+            // 1. Accumulate off-diagonal products (i < j) once
+            for (int i = 0; i < wLimit; ++i)
+            {
+                const uint64_t ai = limbs[i];
+                if (ai == 0) continue;
+                const int maxJ = std::min(wLimit - 1, wLimit + 1 - i);
+                for (int j = i + 1; j <= maxJ; ++j)
+                {
+                    const uint64_t aj = limbs[j];
+                    if (aj == 0) continue;
+                    uint64_t lo = 0, hi = 0;
+                    Mul64x64(ai, aj, lo, hi);
+
+                    const int loIdx = i + j + 1;
+                    const uint64_t prevLo = prod[loIdx];
+                    prod[loIdx] = prevLo + lo;
+                    if (prod[loIdx] < prevLo) ++overflow[loIdx];
+
+                    const int hiIdx = i + j;
+                    const uint64_t prevHi = prod[hiIdx];
+                    prod[hiIdx] = prevHi + hi;
+                    if (prod[hiIdx] < prevHi) ++overflow[hiIdx];
+                }
+            }
+
+            // Propagate carries for off-diagonal sum, then double in a single left-shift pass
+            uint64_t carry = 0;
+            for (int k = prodLen - 1; k >= 1; --k)
+            {
+                const uint64_t v = prod[k] + carry;
+                const uint64_t c1 = (v < prod[k]) ? 1ULL : 0ULL;
+                prod[k] = v;
+                carry = overflow[k] + c1;
+                overflow[k] = 0;
+            }
+            prod[0] += carry;
+            overflow[0] = 0;
+
+            uint64_t bitCarry = 0;
+            for (int k = prodLen - 1; k >= 0; --k)
+            {
+                const uint64_t v = prod[k];
+                prod[k] = (v << 1) | bitCarry;
+                bitCarry = v >> 63;
+            }
+
+            // 2. Add diagonal squares (limbs[i]^2)
+            for (int i = 0; i < wLimit && (2 * i) <= wLimit + 1; ++i)
+            {
+                const uint64_t ai = limbs[i];
+                if (ai == 0) continue;
+                uint64_t lo = 0, hi = 0;
+                Mul64x64(ai, ai, lo, hi);
+
+                const int loIdx = 2 * i + 1;
+                const uint64_t prevLo = prod[loIdx];
+                prod[loIdx] = prevLo + lo;
+                if (prod[loIdx] < prevLo) ++overflow[loIdx];
+
+                const int hiIdx = 2 * i;
+                const uint64_t prevHi = prod[hiIdx];
+                prod[hiIdx] = prevHi + hi;
+                if (prod[hiIdx] < prevHi) ++overflow[hiIdx];
+            }
+
+            carry = 0;
+            for (int k = prodLen - 1; k >= 1; --k)
+            {
+                const uint64_t v = prod[k] + carry;
+                const uint64_t c1 = (v < prod[k]) ? 1ULL : 0ULL;
+                prod[k] = v;
+                carry = overflow[k] + c1;
+            }
+            prod[0] += carry;
+
+            BigFloat res;
+            res.sign = false;
+            res.isZero = false;
+
+            if (prod[0] != 0)
+            {
+                res.exp = exp + exp;
+                for (int i = 0; i < wLimit; ++i)
+                {
+                    res.limbs[i] = prod[i];
+                }
+            }
+            else
+            {
+                res.exp = exp + exp - 1;
+                for (int i = 0; i < wLimit; ++i)
+                {
+                    res.limbs[i] = prod[i + 1];
+                }
+            }
+
+            res.Normalize(wLimit);
+            return res;
         }
 
-        BigFloat MulUInt32(uint32_t m) const
+        BigFloat MulUInt32(uint32_t m) const noexcept
         {
             if (isZero || m == 0) return BigFloat();
 
             uint64_t carry = 0;
-            uint32_t temp[N]{};
-            for (int i = N - 1; i >= 0; --i)
+            uint64_t temp[W]{};
+            for (int i = W - 1; i >= 0; --i)
             {
-                uint64_t p = static_cast<uint64_t>(limbs[i]) * static_cast<uint64_t>(m) + carry;
-                temp[i] = static_cast<uint32_t>(p & 0xFFFFFFFFULL);
-                carry = p >> 32;
+                uint64_t lo = 0, hi = 0;
+                Mul64x64(limbs[i], static_cast<uint64_t>(m), lo, hi);
+                const uint64_t sum = lo + carry;
+                const uint64_t c = (sum < lo) ? 1ULL : 0ULL;
+                temp[i] = sum;
+                carry = hi + c;
             }
 
             BigFloat res;
@@ -433,37 +586,39 @@ namespace Mandelbrot
             if (carry > 0)
             {
                 res.exp = exp + 1;
-                res.limbs[0] = static_cast<uint32_t>(carry);
-                for (int i = 1; i < N; ++i) res.limbs[i] = temp[i - 1];
+                res.limbs[0] = carry;
+                for (int i = 1; i < W; ++i) res.limbs[i] = temp[i - 1];
             }
             else
             {
                 res.exp = exp;
-                for (int i = 0; i < N; ++i) res.limbs[i] = temp[i];
+                for (int i = 0; i < W; ++i) res.limbs[i] = temp[i];
             }
             res.Normalize();
             return res;
         }
 
         // Reciprocal 1 / (*this) using Newton-Raphson iteration: x_{k+1} = x_k * (2 - d * x_k)
-        BigFloat Reciprocal() const
+        BigFloat Reciprocal() const noexcept
         {
             if (isZero) return BigFloat();
 
-            // Normalize exponent to 1 so dNorm is in [1, 2^32) and fits cleanly in double
+            // Normalize exponent to 1 so dNorm is in [1, 2^64) and fits cleanly in double
             BigFloat dNorm = *this;
             dNorm.sign = false;
-            int64_t origExp = dNorm.exp;
+            const int64_t origExp = dNorm.exp;
             dNorm.exp = 1;
 
-            double approx = 1.0 / dNorm.ToDouble();
+            const double approx = 1.0 / dNorm.ToDouble();
             BigFloat x(approx);
             const BigFloat two(2.0);
 
             // 5 Newton iterations double precision from 53 bits -> 106 -> 212 -> 424 -> 848 -> 1696 bits (> 1024)
-            for (int i = 0; i < 5; ++i)
+            // Scale active precision progressively so early iterations avoid full 1024-bit work.
+            constexpr int precSteps[5]{ 6, 10, 18, 32, 32 };
+            for (int p : precSteps)
             {
-                x = x * (two - dNorm * x);
+                x = x.Mul(two.Sub(dNorm.Mul(x, p), p), p);
             }
 
             x.exp -= (origExp - 1);
@@ -471,7 +626,7 @@ namespace Mandelbrot
             return x;
         }
 
-        BigFloat operator/(const BigFloat& rhs) const
+        BigFloat operator/(const BigFloat& rhs) const noexcept
         {
             if (isZero || rhs.isZero) return BigFloat();
             return (*this) * rhs.Reciprocal();
@@ -509,8 +664,7 @@ namespace Mandelbrot
                 val = val.MulUInt32(10);
                 if (!val.isZero && val.exp >= 1)
                 {
-                    uint32_t digit = val.limbs[0];
-                    if (digit > 9) digit = 9;
+                    uint32_t digit = static_cast<uint32_t>(std::min<uint64_t>(val.limbs[0], 9ULL));
                     out += static_cast<char>('0' + digit);
                     val.limbs[0] = 0;
                     val.Normalize();
@@ -659,6 +813,38 @@ namespace Mandelbrot
                 ascii.push_back(static_cast<char>(wc));
             }
             return TryParse(std::string_view(ascii), out);
+        }
+
+    private:
+        static constexpr int WordsForLimbs(int activeLimbs) noexcept
+        {
+            return std::clamp((activeLimbs / 2) + 1, 2, W);
+        }
+
+        static inline void Mul64x64(uint64_t a, uint64_t b, uint64_t& lo, uint64_t& hi) noexcept
+        {
+#if defined(_MSC_VER) && defined(_M_X64)
+            lo = _umul128(a, b, &hi);
+#elif defined(_MSC_VER) && defined(_M_ARM64)
+            lo = a * b;
+            hi = __umulh(a, b);
+#elif defined(__SIZEOF_INT128__)
+            const unsigned __int128 p = static_cast<unsigned __int128>(a) * static_cast<unsigned __int128>(b);
+            lo = static_cast<uint64_t>(p);
+            hi = static_cast<uint64_t>(p >> 64);
+#else
+            const uint64_t aLo = a & 0xFFFFFFFFULL;
+            const uint64_t aHi = a >> 32;
+            const uint64_t bLo = b & 0xFFFFFFFFULL;
+            const uint64_t bHi = b >> 32;
+            const uint64_t p00 = aLo * bLo;
+            const uint64_t p01 = aLo * bHi;
+            const uint64_t p10 = aHi * bLo;
+            const uint64_t p11 = aHi * bHi;
+            const uint64_t mid = (p00 >> 32) + (p01 & 0xFFFFFFFFULL) + (p10 & 0xFFFFFFFFULL);
+            lo = (p00 & 0xFFFFFFFFULL) | (mid << 32);
+            hi = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+#endif
         }
     };
 }

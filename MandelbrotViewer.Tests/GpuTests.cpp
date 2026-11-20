@@ -462,3 +462,82 @@ TEST_CASE(Gpu, FusedMoviePostProcessCoversThemesNewtonDeepExpAndNoSmoothing)
         }
     }
 }
+
+TEST_CASE(Gpu, MultiPassCompactionAndUltraDeepBlaMatchCpu)
+{
+    std::atomic<bool> cancel{};
+    MandelbrotEngine sharedGpu(ExecutionMode::Gpu, true);
+    MandelbrotEngine sharedCpu(ExecutionMode::Automatic);
+    ASSERT_TRUE(sharedGpu.IsGpuAvailable());
+
+    auto verifyDeepMovie = [&](MoviePlan gpuPlan, double frame)
+    {
+        MoviePlan cpuPlan = gpuPlan;
+        cpuPlan.useGpu = false;
+
+        const auto gpuWhole = RenderMovieFrame(gpuPlan, frame, cancel, {}, gpuPlan.height, &sharedGpu);
+        const auto gpuBanded = RenderMovieFrame(gpuPlan, frame, cancel, {}, 11, &sharedGpu);
+        const auto cpuWhole = RenderMovieFrame(cpuPlan, frame, cancel, {}, cpuPlan.height, &sharedCpu);
+
+        ASSERT_EQ(static_cast<size_t>(gpuPlan.width) * static_cast<size_t>(gpuPlan.height), gpuWhole.size());
+        ASSERT_EQ(gpuWhole.size(), gpuBanded.size());
+        for (size_t i = 0; i < gpuWhole.size(); ++i)
+        {
+            for (int shift : { 0, 8, 16 })
+            {
+                ASSERT_NEAR((gpuWhole[i] >> shift) & 255, (gpuBanded[i] >> shift) & 255, 1);
+            }
+        }
+        ASSERT_LT(FilteredPixelError(cpuWhole, gpuWhole, gpuPlan.width, gpuPlan.height), 4.5);
+    };
+
+    // 1. Multi-pass PerturbLdsBla (maxIterations = 3500 > 2048) at zoom = 1e18 + zoom-out BLA reuse
+    {
+        MoviePlan ldsMulti;
+        ldsMulti.width = 81;
+        ldsMulti.height = 57;
+        ldsMulti.fps = 24;
+        ldsMulti.seconds = 1;
+        ldsMulti.motionSmoothing = false;
+        ldsMulti.useGpu = true;
+        ldsMulti.start.SetCenter(
+            BigFloat("-0.743643887037158704752191506114774"),
+            BigFloat("0.131825904205311970493132056385139"));
+        ldsMulti.targetX = ldsMulti.start.hpCenterX;
+        ldsMulti.targetY = ldsMulti.start.hpCenterY;
+        ldsMulti.start.zoom = 2e18;
+        ldsMulti.endZoom = 1e18; // zoom-out exercises cMax headroom reuse
+        ldsMulti.start.maxIterations = 3500;
+        verifyDeepMovie(ldsMulti, 0.0);
+        verifyDeepMovie(ldsMulti, 12.0);
+    }
+
+    // 2. Multi-pass PerturbDeepExp (maxIterations = 3500 > 2048) at zoom = 1e45 and ultra-deep 1e180
+    {
+        MoviePlan deepMulti;
+        deepMulti.width = 65;
+        deepMulti.height = 49;
+        deepMulti.fps = 24;
+        deepMulti.seconds = 1;
+        deepMulti.motionSmoothing = true;
+        deepMulti.useGpu = true;
+        deepMulti.start.SetCenter(
+            BigFloat("-1.74975914513036651613063305841522638950626266680180909383610018508190914266589615"),
+            BigFloat("0.00000000368513794929231850000185950626266680180909383610018508190914266589615"));
+        deepMulti.targetX = deepMulti.start.hpCenterX;
+        deepMulti.targetY = deepMulti.start.hpCenterY;
+        deepMulti.start.zoom = 1e45;
+        deepMulti.endZoom = 1e50;
+        deepMulti.start.maxIterations = 3500;
+        verifyDeepMovie(deepMulti, 10.0);
+
+        MoviePlan ultraMulti = deepMulti;
+        ultraMulti.start.SetCenter(0.0, 1.0);
+        ultraMulti.targetX = BigFloat(0.0);
+        ultraMulti.targetY = BigFloat(1.0);
+        ultraMulti.start.zoom = 1e180;
+        ultraMulti.endZoom = 1e185;
+        ultraMulti.start.maxIterations = 3000;
+        verifyDeepMovie(ultraMulti, 8.0);
+    }
+}

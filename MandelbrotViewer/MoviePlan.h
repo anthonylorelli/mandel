@@ -35,6 +35,8 @@ namespace Mandelbrot
         bool invert{}, motionSmoothing{true};
         bool autoRetarget{};
         bool useGpu{true};
+        bool autoScaleIterations{};
+        int baseIterations{500};
         uint64_t targetSeed{1};
         uint32_t interior{0xFF000000};
 
@@ -72,6 +74,7 @@ namespace Mandelbrot
                 seconds < 1 || seconds > 3600 || !std::isfinite(start.zoom) || !std::isfinite(endZoom) ||
                 start.zoom < MandelbrotEngine::MinZoom || start.zoom > MandelbrotEngine::MaxZoom ||
                 endZoom < MandelbrotEngine::MinZoom || endZoom > MandelbrotEngine::MaxZoom || start.maxIterations < 1 ||
+                (autoScaleIterations && baseIterations < 1) ||
                 !std::isfinite(targetX.ToDouble()) || !std::isfinite(targetY.ToDouble()) ||
                 !std::isfinite(start.hpCenterX.ToDouble()) || !std::isfinite(start.hpCenterY.ToDouble()) ||
                 !std::isfinite(frequency) || !std::isfinite(phase))
@@ -89,6 +92,11 @@ namespace Mandelbrot
             const double t = std::clamp(frameIndex / (FrameCount() - 1.0), 0.0, 1.0);
             const double range = std::log(endZoom) - std::log(start.zoom);
             camera.zoom = t == 0 ? start.zoom : t == 1 ? endZoom : std::exp(std::log(start.zoom) + range * t);
+            if (autoScaleIterations)
+            {
+                camera.maxIterations = MandelbrotEngine::RecommendMaxIterations(
+                    camera.zoom, camera.fractalType, baseIterations);
+            }
             if (autoRetarget)
             {
                 if (m_autoTargets.empty()) throw std::logic_error("Prepare automatic movie targets before rendering.");

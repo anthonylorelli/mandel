@@ -40,9 +40,9 @@ namespace Mandelbrot
 
         ComPtr<ID3D11ComputeShader> csShallowPrim, csShallowSub;
         ComPtr<ID3D11ComputeShader> csLdsPrim, csLdsSub;
-        ComPtr<ID3D11ComputeShader> csLdsBlaPrim, csLdsBlaSub;
-        ComPtr<ID3D11ComputeShader> csDeepExpPrim, csDeepExpSub;
-        ComPtr<ID3D11ComputeShader> csPostDetect, csPostBuildIndirect, csPostResolve, csPostShutter;
+        ComPtr<ID3D11ComputeShader> csLdsBlaPrim, csLdsBlaSub, csLdsBlaStage0, csLdsBlaResume;
+        ComPtr<ID3D11ComputeShader> csDeepExpPrim, csDeepExpSub, csDeepExpStage0, csDeepExpResume;
+        ComPtr<ID3D11ComputeShader> csPostDetect, csPostBuildIndirect, csPostBuildActiveIndirect, csPostResolve, csPostShutter;
 
         ComPtr<ID3D11Buffer> constantBuffer;
 
@@ -66,6 +66,20 @@ namespace Mandelbrot
         ComPtr<ID3D11Buffer> subCounterBuf;
         ComPtr<ID3D11UnorderedAccessView> subCounterUav;
         ComPtr<ID3D11ShaderResourceView> subCounterSrv;
+
+        // Multi-pass active-pixel compaction resources for high-iteration deep zooms
+        ComPtr<ID3D11Buffer> activeStateBuf;
+        ComPtr<ID3D11UnorderedAccessView> activeStateUav;
+        size_t activeStateCapElems{ 0 };
+
+        ComPtr<ID3D11Buffer> activeIdxBuf[2];
+        ComPtr<ID3D11UnorderedAccessView> activeIdxUav[2];
+        ComPtr<ID3D11ShaderResourceView> activeIdxSrv[2];
+        size_t activeIdxCapElems[2]{ 0, 0 };
+
+        ComPtr<ID3D11Buffer> activeCountBuf[2];
+        ComPtr<ID3D11UnorderedAccessView> activeCountUav[2];
+        ComPtr<ID3D11ShaderResourceView> activeCountSrv[2];
 
         ComPtr<ID3D11Buffer> indirectArgsBuf;
         ComPtr<ID3D11UnorderedAccessView> indirectArgsUav;
@@ -109,6 +123,13 @@ namespace Mandelbrot
         ComPtr<ID3D11ShaderResourceView> colCoordsExpSrv, rowCoordsExpSrv;
         size_t colCoordsExpCapElems{ 0 }, rowCoordsExpCapElems{ 0 };
 
+        // Cached column coordinate upload key to skip redundant per-band uploads within a frame
+        bool hasUploadedCols{ false };
+        detail::GpuShaderMode uploadedColMode{ detail::GpuShaderMode::Shallow };
+        int uploadedColWidth{ 0 };
+        double uploadedColOrigin{ 0.0 };
+        double uploadedColStep{ 0.0 };
+
         ComPtr<ID3D11Buffer> orbitFastBuf;
         ComPtr<ID3D11ShaderResourceView> orbitFastSrv;
         size_t orbitFastCapElems{ 0 };
@@ -137,6 +158,7 @@ namespace Mandelbrot
         uint64_t uploadedBlaOrbitVersion{ 0 };
         int uploadedBlaRefLen{ -1 };
         double uploadedBlaCMax{ 0.0 };
+        bool uploadedBlaForceDeepExp{ false };
         bool uploadedHasBlaF32{ false };
         bool uploadedHasBlaExp{ false };
         detail::GpuMandelbrotBlaBuilder blaBuilder;
@@ -230,7 +252,8 @@ namespace Mandelbrot
             double juliaBailout2,
             uint32_t rowOffset,
             uint32_t outRowOffset,
-            uint32_t subTotal);
+            uint32_t subTotal,
+            uint32_t stageIterLimit = 0u);
 
         void BindFractalSrvs(
             detail::GpuShaderMode mode,
