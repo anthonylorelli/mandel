@@ -4,6 +4,7 @@
 #include "FrameTiming.h"
 #include "FramePresentation.h"
 #include "JuliaView.h"
+#include "resource.h"
 #if __has_include("MainWindow.g.cpp")
 #include "MainWindow.g.cpp"
 #endif
@@ -143,6 +144,30 @@ namespace winrt::MandelbrotViewer::implementation
             InitializeComponent();
         }
         Title(L"Fractal Studio - Mandelbrot Set");
+
+        if (auto native = try_as<IWindowNative>())
+        {
+            HWND hwnd = nullptr;
+            if (SUCCEEDED(native->get_WindowHandle(&hwnd)) && hwnd)
+            {
+                const UINT dpi = GetDpiForWindow(hwnd);
+                const HINSTANCE instance = GetModuleHandleW(nullptr);
+                const int bigW = dpi ? GetSystemMetricsForDpi(SM_CXICON, dpi) : GetSystemMetrics(SM_CXICON);
+                const int bigH = dpi ? GetSystemMetricsForDpi(SM_CYICON, dpi) : GetSystemMetrics(SM_CYICON);
+                const int smallW = dpi ? GetSystemMetricsForDpi(SM_CXSMICON, dpi) : GetSystemMetrics(SM_CXSMICON);
+                const int smallH = dpi ? GetSystemMetricsForDpi(SM_CYSMICON, dpi) : GetSystemMetrics(SM_CYSMICON);
+                if (auto hBig = static_cast<HICON>(LoadImageW(
+                    instance, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON, bigW, bigH, LR_SHARED)))
+                {
+                    SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(hBig));
+                }
+                if (auto hSmall = static_cast<HICON>(LoadImageW(
+                    instance, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON, smallW, smallH, LR_SHARED)))
+                {
+                    SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(hSmall));
+                }
+            }
+        }
 
         m_renderer = CreateBackgroundRenderer(&MainWindow::OnRenderCompleted);
         InitializeControls();

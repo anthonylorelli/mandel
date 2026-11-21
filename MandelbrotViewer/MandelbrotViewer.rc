@@ -1,0 +1,4 @@
+#include "resource.h"
+
+// Primary application icon embedded in MandelbrotViewer.exe.
+IDI_APPICON ICON "Assets\\AppIcon.ico"

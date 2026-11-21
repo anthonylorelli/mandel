@@ -195,6 +195,7 @@
     <ClInclude Include="MovieWriter.h" />
     <ClInclude Include="MovieExport.h" />
     <ClInclude Include="MovieZoomPyramid.h" />
+    <ClInclude Include="resource.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp">
@@ -239,7 +240,12 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
+    <ResourceCompile Include="MandelbrotViewer.rc" />
+  </ItemGroup>
+  <ItemGroup>
     <None Include="packages.config" />
+    <None Include="Assets\AppIcon.ico" />
+    <None Include="Assets\AppIcon.png" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
