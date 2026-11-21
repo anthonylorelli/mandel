@@ -9,12 +9,17 @@
 
 namespace Mandelbrot
 {
+    struct KeyframeInnerRect;
     struct MoviePreview { int width{}, height{}; uint32_t frame{}; std::vector<uint32_t> pixels; };
     // Automatic plans must call PrepareAutoTargets after their settings are finalized.
     // MovieExporter prepares them on its worker before rendering the first frame.
     std::vector<uint32_t> RenderMovieFrame(const MoviePlan& plan, double frameIndex,
         const std::atomic<bool>& cancel, const std::function<void(float)>& progress = {},
         int bandRows = 64, MandelbrotEngine* sharedEngine = nullptr);
+    std::vector<uint32_t> RenderMovieKeyframe(const MoviePlan& plan, const FractalConfig& keyframeCamera,
+        const KeyframeInnerRect* skipRect, const std::atomic<bool>& cancel,
+        const std::function<void(float)>& progress = {}, int bandRows = 64,
+        MandelbrotEngine* sharedEngine = nullptr);
     MoviePreview MakeMoviePreview(const std::vector<uint32_t>& pixels, int width, int height, uint32_t frame);
 
     struct MovieProgress

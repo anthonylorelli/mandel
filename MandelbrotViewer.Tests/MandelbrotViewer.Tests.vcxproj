@@ -133,6 +133,7 @@
     <ClInclude Include="..\MandelbrotViewer\MovieWriter.h" />
     <ClInclude Include="MoviePlayback.h" />
     <ClInclude Include="..\MandelbrotViewer\MovieExport.h" />
+    <ClInclude Include="..\MandelbrotViewer\MovieZoomPyramid.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp">
@@ -158,6 +159,7 @@
     <ClCompile Include="..\MandelbrotViewer\Mp4Muxer.cpp" />
     <ClCompile Include="..\MandelbrotViewer\MovieWriter.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\MandelbrotViewer\MovieExport.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="..\MandelbrotViewer\MovieZoomPyramid.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\MandelbrotViewer\BackgroundRenderer.cpp" />
     <ClCompile Include="..\MandelbrotViewer\FractalCatalog.cpp" />
     <ClCompile Include="..\MandelbrotViewer\ViewportNavigation.cpp" />
