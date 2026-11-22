@@ -29,15 +29,28 @@
     <DefaultLanguage>en-US</DefaultLanguage>
     <MinimumVisualStudioVersion>18.0</MinimumVisualStudioVersion>
     <AppContainerApplication>false</AppContainerApplication>
-    <AppxPackage>false</AppxPackage>
+    <BuildMsix Condition="'$(BuildMsix)' == ''">false</BuildMsix>
+    <AppxPackage Condition="'$(BuildMsix)' != 'true'">false</AppxPackage>
+    <AppxPackage Condition="'$(BuildMsix)' == 'true'">true</AppxPackage>
     <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
     <WindowsTargetPlatformMinVersion>10.0.19041.0</WindowsTargetPlatformMinVersion>
     <TargetPlatformVersion>10.0.26100.0</TargetPlatformVersion>
     <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
     <UseWinUI>true</UseWinUI>
-    <EnableMsixTooling>false</EnableMsixTooling>
-    <WindowsPackageType>None</WindowsPackageType>
-    <EnableCoreMrtTooling>false</EnableCoreMrtTooling>
+    <EnableMsixTooling Condition="'$(BuildMsix)' != 'true'">false</EnableMsixTooling>
+    <EnableMsixTooling Condition="'$(BuildMsix)' == 'true'">true</EnableMsixTooling>
+    <WindowsPackageType Condition="'$(BuildMsix)' != 'true'">None</WindowsPackageType>
+    <WindowsPackageType Condition="'$(BuildMsix)' == 'true'">MSIX</WindowsPackageType>
+    <EnableCoreMrtTooling Condition="'$(BuildMsix)' != 'true'">false</EnableCoreMrtTooling>
+    <EnableCoreMrtTooling Condition="'$(BuildMsix)' == 'true'">true</EnableCoreMrtTooling>
+    <WindowsAppSDKSelfContained Condition="'$(BuildMsix)' == 'true'">true</WindowsAppSDKSelfContained>
+    <WindowsAppSdkDeploymentManagerInitialize Condition="'$(BuildMsix)' == 'true'">false</WindowsAppSdkDeploymentManagerInitialize>
+    <WinUISDKReferences Condition="'$(BuildMsix)' == 'true'">false</WinUISDKReferences>
+    <AppxBundle Condition="'$(BuildMsix)' == 'true'">Never</AppxBundle>
+    <GenerateAppxPackageOnBuild Condition="'$(BuildMsix)' == 'true'">true</GenerateAppxPackageOnBuild>
+    <AppxPackageSigningEnabled Condition="'$(BuildMsix)' == 'true'">false</AppxPackageSigningEnabled>
+    <AppxSymbolPackageEnabled Condition="'$(BuildMsix)' == 'true'">false</AppxSymbolPackageEnabled>
+    <GenerateTestArtifacts Condition="'$(BuildMsix)' == 'true'">false</GenerateTestArtifacts>
     <XamlGeneratedOutputPath>$(GeneratedFilesDir)</XamlGeneratedOutputPath>
     <BaseOutputPath>bin\</BaseOutputPath>
     <OutputPath>bin\$(Platform)\$(Configuration)\</OutputPath>
@@ -112,6 +125,9 @@
     <Manifest>
       <AdditionalManifestFiles>app.manifest %(AdditionalManifestFiles)</AdditionalManifestFiles>
     </Manifest>
+    <ResourceCompile Condition="'$(AppVersionMajor)' != ''">
+      <PreprocessorDefinitions>APP_VERSION_MAJOR=$(AppVersionMajor);APP_VERSION_MINOR=$(AppVersionMinor);APP_VERSION_PATCH=$(AppVersionPatch);APP_VERSION_BUILD=$(AppVersionBuild);APP_VERSION_STRING="$(AppVersionMajor).$(AppVersionMinor).$(AppVersionPatch).$(AppVersionBuild)";%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ResourceCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
     <ClCompile>
@@ -247,6 +263,24 @@
     <None Include="Assets\AppIcon.ico" />
     <None Include="Assets\AppIcon.png" />
   </ItemGroup>
+  <ItemGroup Condition="'$(BuildMsix)' == 'true'">
+    <AppxManifest Include="Package.appxmanifest">
+      <SubType>Designer</SubType>
+    </AppxManifest>
+    <Image Include="Assets\StoreLogo.png"><DeploymentContent>true</DeploymentContent></Image>
+    <Image Include="Assets\StoreLogo.scale-200.png"><DeploymentContent>true</DeploymentContent></Image>
+    <Image Include="Assets\Square44x44Logo.png"><DeploymentContent>true</DeploymentContent></Image>
+    <Image Include="Assets\Square44x44Logo.scale-200.png"><DeploymentContent>true</DeploymentContent></Image>
+    <Image Include="Assets\Square44x44Logo.targetsize-24_altform-unplated.png"><DeploymentContent>true</DeploymentContent></Image>
+    <Image Include="Assets\Square44x44Logo.targetsize-48_altform-unplated.png"><DeploymentContent>true</DeploymentContent></Image>
+    <Image Include="Assets\Square44x44Logo.targetsize-256_altform-unplated.png"><DeploymentContent>true</DeploymentContent></Image>
+    <Image Include="Assets\Square150x150Logo.png"><DeploymentContent>true</DeploymentContent></Image>
+    <Image Include="Assets\Square150x150Logo.scale-200.png"><DeploymentContent>true</DeploymentContent></Image>
+    <Image Include="Assets\Wide310x150Logo.png"><DeploymentContent>true</DeploymentContent></Image>
+    <Image Include="Assets\Wide310x150Logo.scale-200.png"><DeploymentContent>true</DeploymentContent></Image>
+    <Image Include="Assets\SplashScreen.png"><DeploymentContent>true</DeploymentContent></Image>
+    <Image Include="Assets\SplashScreen.scale-200.png"><DeploymentContent>true</DeploymentContent></Image>
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
 
@@ -263,7 +297,30 @@
     <Import Project="$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.2.6.5\build\native\Microsoft.WindowsAppSDK.targets" Condition="Exists('$(MSBuildThisFileDirectory)..\packages\Microsoft.WindowsAppSDK.2.6.5\build\native\Microsoft.WindowsAppSDK.targets')" />
   </ImportGroup>
   <Target Name="_RunXamlMarkupCompile" BeforeTargets="ClCompile" DependsOnTargets="MarkupCompilePass1;MarkupCompilePass2" />
-  <Target Name="_SyncLegacyProjectOutDir" AfterTargets="Build" Condition="'$(OutDir)' != '$(ProjectDir)$(Platform)\$(Configuration)\'">
+  <Target Name="_IncludeVcRedistInMsix"
+          AfterTargets="GetPackagingOutputs"
+          Condition="'$(BuildMsix)' == 'true'">
+    <PropertyGroup>
+      <_ResolvedVcRedistDir Condition="'$(VcRedistDir)' != ''">$(VcRedistDir)</_ResolvedVcRedistDir>
+      <_ResolvedVcRedistDir Condition="'$(_ResolvedVcRedistDir)' == ''">$(VCToolsRedistDir)</_ResolvedVcRedistDir>
+    </PropertyGroup>
+    <ItemGroup Condition="'$(_ResolvedVcRedistDir)' != ''">
+      <_VcRedistCandidate Include="$(_ResolvedVcRedistDir)\$(Platform)\Microsoft.VC*.CRT\vcruntime140.dll" />
+      <_VcRedistCandidate Include="$(_ResolvedVcRedistDir)\$(Platform)\Microsoft.VC*.CRT\vcruntime140_1.dll" />
+      <_VcRedistCandidate Include="$(_ResolvedVcRedistDir)\$(Platform)\Microsoft.VC*.CRT\msvcp140.dll" />
+      <_VcRedistCandidate Include="$(_ResolvedVcRedistDir)\$(Platform)\Microsoft.VC*.CRT\msvcp140_1.dll" />
+      <_VcRedistCandidate Include="$(_ResolvedVcRedistDir)\$(Platform)\Microsoft.VC*.CRT\msvcp140_2.dll" />
+      <_VcRedistCandidate Include="$(_ResolvedVcRedistDir)\$(Platform)\Microsoft.VC*.CRT\concrt140.dll" />
+      <_VcRedistCandidate Include="$(_ResolvedVcRedistDir)\$(Platform)\Microsoft.VC*.OpenMP\vcomp140.dll" />
+      <PackagingOutputs Include="@(_VcRedistCandidate)">
+        <OutputGroup>ContentFilesProjectOutputGroup</OutputGroup>
+        <ProjectName>$(ProjectName)</ProjectName>
+        <TargetPath>%(Filename)%(Extension)</TargetPath>
+      </PackagingOutputs>
+    </ItemGroup>
+    <Message Importance="high" Text="Bundling VC++ redist DLLs from '$(_ResolvedVcRedistDir)\$(Platform)': @(_VcRedistCandidate->'%(Filename)%(Extension)')" />
+  </Target>
+  <Target Name="_SyncLegacyProjectOutDir" AfterTargets="Build" Condition="'$(BuildMsix)' != 'true' and '$(OutDir)' != '$(ProjectDir)$(Platform)\$(Configuration)\'">
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(ProjectDir)$(Platform)\$(Configuration)\" SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(TargetDir)$(TargetName).pdb" DestinationFolder="$(ProjectDir)$(Platform)\$(Configuration)\" Condition="Exists('$(TargetDir)$(TargetName).pdb')" SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(TargetDir)$(TargetName).winmd" DestinationFolder="$(ProjectDir)$(Platform)\$(Configuration)\" Condition="Exists('$(TargetDir)$(TargetName).winmd')" SkipUnchangedFiles="true" />

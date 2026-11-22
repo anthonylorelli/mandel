@@ -1,4 +1,54 @@
+#include <winver.h>
 #include "resource.h"
+
+#ifndef APP_VERSION_MAJOR
+#define APP_VERSION_MAJOR 1
+#endif
+#ifndef APP_VERSION_MINOR
+#define APP_VERSION_MINOR 0
+#endif
+#ifndef APP_VERSION_PATCH
+#define APP_VERSION_PATCH 0
+#endif
+#ifndef APP_VERSION_BUILD
+#define APP_VERSION_BUILD 0
+#endif
+#ifndef APP_VERSION_STRING
+#define APP_VERSION_STRING "1.0.0.0"
+#endif
 
 // Primary application icon embedded in MandelbrotViewer.exe.
 IDI_APPICON ICON "Assets\\AppIcon.ico"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION APP_VERSION_MAJOR,APP_VERSION_MINOR,APP_VERSION_PATCH,APP_VERSION_BUILD
+ PRODUCTVERSION APP_VERSION_MAJOR,APP_VERSION_MINOR,APP_VERSION_PATCH,APP_VERSION_BUILD
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "Anthony Lorelli\0"
+            VALUE "FileDescription", "Mandelbrot Viewer\0"
+            VALUE "FileVersion", APP_VERSION_STRING "\0"
+            VALUE "InternalName", "MandelbrotViewer.exe\0"
+            VALUE "OriginalFilename", "MandelbrotViewer.exe\0"
+            VALUE "ProductName", "Mandelbrot Viewer\0"
+            VALUE "ProductVersion", APP_VERSION_STRING "\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
+
