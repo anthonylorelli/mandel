@@ -94,7 +94,7 @@ namespace winrt::MandelbrotViewer::implementation
             {
                 if (auto window = weak.get()) (window.get()->*onCompleted)();
             });
-        }, {}, Mandelbrot::ExecutionMode::Gpu);
+        }, Mandelbrot::BackgroundRenderer::Compute{}, Mandelbrot::ExecutionMode::Gpu);
     }
 
     void MainWindow::SyncMaxIterationsUi(int value, int sliderThreshold)
