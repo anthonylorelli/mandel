@@ -626,12 +626,6 @@ namespace Mandelbrot
             return text.str();
         }
 
-        std::wstring FormatFootageTime(uint32_t frames, int fps)
-        {
-            const uint64_t safeFps = static_cast<uint64_t>(std::max(1, fps));
-            return FormatTenthsTimecode(static_cast<uint64_t>(frames) * 10u / safeFps);
-        }
-
         std::wstring FormatElapsedTime(double seconds)
         {
             return FormatTenthsTimecode(static_cast<uint64_t>(std::max(0.0, std::floor(seconds * 10.0 + 0.5))));
@@ -650,6 +644,23 @@ namespace Mandelbrot
                 ss << std::scientific << std::setprecision(2) << zoom << L"x";
             }
             return ss.str();
+        }
+
+        size_t QueryInteractiveConsoleWidth() noexcept
+        {
+#ifdef _WIN32
+            const HANDLE handle = GetStdHandle(STD_OUTPUT_HANDLE);
+            CONSOLE_SCREEN_BUFFER_INFO info{};
+            if (handle != nullptr && handle != INVALID_HANDLE_VALUE && GetConsoleScreenBufferInfo(handle, &info))
+            {
+                const int cols = static_cast<int>(info.srWindow.Right) - static_cast<int>(info.srWindow.Left) + 1;
+                if (cols > 1)
+                {
+                    return static_cast<size_t>(cols - 1);
+                }
+            }
+#endif
+            return 0;
         }
 
 #ifdef _WIN32
@@ -697,11 +708,13 @@ namespace Mandelbrot
                         FILE* stream = nullptr;
                         if (!hadStdout && freopen_s(&stream, "CONOUT$", "w", stdout) == 0)
                         {
+                            std::setvbuf(stdout, nullptr, _IONBF, 0);
                             std::cout.clear();
                             std::wcout.clear();
                         }
                         if (!hadStderr && freopen_s(&stream, "CONOUT$", "w", stderr) == 0)
                         {
+                            std::setvbuf(stderr, nullptr, _IONBF, 0);
                             std::cerr.clear();
                             std::wcerr.clear();
                         }
@@ -1630,6 +1643,52 @@ namespace Mandelbrot
         return result;
     }
 
+    std::wstring FormatMovieCliProgressLine(const MovieProgress& progress, const MoviePlan& plan)
+    {
+        const uint32_t total = (progress.total > 0) ? progress.total : plan.FrameCount();
+        const uint32_t completed = std::min(progress.completed, total);
+        const double exactFrames = progress.finished
+            ? static_cast<double>(completed)
+            : std::min(
+                static_cast<double>(total),
+                static_cast<double>(completed) + static_cast<double>(std::clamp(progress.frameFraction, 0.0f, 1.0f)));
+        const double pct = (total > 0) ? (100.0 * exactFrames / static_cast<double>(total)) : 100.0;
+
+        double zoom = progress.currentZoom;
+        if (!std::isfinite(zoom) || zoom < MandelbrotEngine::MinZoom || zoom > MandelbrotEngine::MaxZoom)
+        {
+            const double frameIdx = (completed == 0) ? 0.0 : static_cast<double>(completed - 1);
+            zoom = plan.ZoomAt(frameIdx);
+        }
+        else if (completed >= total && total > 0)
+        {
+            zoom = plan.endZoom;
+        }
+
+        std::wostringstream line;
+        line.imbue(std::locale::classic());
+        if (progress.planning)
+        {
+            line << L"Planning auto-targets... | Frames: " << completed << L"/" << total
+                 << L" | Zoom: " << FormatZoomShort(zoom)
+                 << L" | Elapsed: " << FormatElapsedTime(progress.elapsedSeconds);
+        }
+        else if (!progress.finished && completed >= total && total > 0)
+        {
+            line << L"Finalizing MP4... | Frames: " << completed << L"/" << total
+                 << L" (100.0%) | Zoom: " << FormatZoomShort(zoom)
+                 << L" | Elapsed: " << FormatElapsedTime(progress.elapsedSeconds);
+        }
+        else
+        {
+            line << L"Frames: " << completed << L"/" << total
+                 << L" (" << std::fixed << std::setprecision(1) << std::setw(5) << pct << L"%) | Zoom: "
+                 << FormatZoomShort(zoom)
+                 << L" | Elapsed: " << FormatElapsedTime(progress.elapsedSeconds);
+        }
+        return line.str();
+    }
+
     int RunMovieExportCli(
         const MovieCliOptions& options,
         std::wostream& out,
@@ -1672,9 +1731,34 @@ namespace Mandelbrot
             auto lastReport = std::chrono::steady_clock::now() - std::chrono::seconds(10);
             int lastPercentBucket = -1;
             int lastPhase = -1; // 0 = planning, 1 = rendering, 2 = finalizing
+            uint32_t lastReportedCompleted = std::numeric_limits<uint32_t>::max();
             size_t lastLineLen = 0;
             bool cancelSent = false;
             MovieProgress progress{};
+
+            auto writeProgressLine = [&](const MovieProgress& current)
+            {
+                std::wstring text = FormatMovieCliProgressLine(current, plan);
+                if (interactiveTerminal)
+                {
+                    const size_t maxCols = QueryInteractiveConsoleWidth();
+                    if (maxCols > 0 && text.size() > maxCols)
+                    {
+                        text.resize(maxCols);
+                    }
+                    out << L"\r" << text;
+                    if (text.size() < lastLineLen)
+                    {
+                        out << std::wstring(lastLineLen - text.size(), L' ');
+                    }
+                    lastLineLen = text.size();
+                }
+                else
+                {
+                    out << text << L"\n";
+                }
+                out.flush();
+            };
 
             for (;;)
             {
@@ -1695,50 +1779,22 @@ namespace Mandelbrot
 
                 if (!options.quiet && !progress.finished)
                 {
+                    const bool frameAdvanced = (progress.completed != lastReportedCompleted);
                     const bool shouldPrint = interactiveTerminal
-                        ? (phase != lastPhase || now - lastReport >= std::chrono::milliseconds(250))
-                        : (phase != lastPhase || pctBucket != lastPercentBucket || now - lastReport >= std::chrono::seconds(5));
+                        ? (phase != lastPhase ||
+                           (frameAdvanced && now - lastReport >= std::chrono::milliseconds(100)) ||
+                           now - lastReport >= std::chrono::milliseconds(250))
+                        : (phase != lastPhase ||
+                           pctBucket != lastPercentBucket ||
+                           now - lastReport >= std::chrono::seconds(2));
 
                     if (shouldPrint)
                     {
-                        std::wostringstream line;
-                        line.imbue(std::locale::classic());
-                        if (phase == 0)
-                        {
-                            line << L"Planning auto-targets... | Elapsed: " << FormatElapsedTime(progress.elapsedSeconds);
-                        }
-                        else if (phase == 2)
-                        {
-                            line << L"Finalizing movie... (" << progress.completed << L" / " << progress.total
-                                 << L" frames) | Elapsed: " << FormatElapsedTime(progress.elapsedSeconds);
-                        }
-                        else
-                        {
-                            line << L"Progress: " << std::fixed << std::setprecision(1) << std::setw(5) << pct << L"% | "
-                                 << progress.completed << L" / " << progress.total << L" frames ("
-                                 << FormatFootageTime(progress.completed, plan.fps) << L" / "
-                                 << FormatFootageTime(progress.total, plan.fps) << L") | Elapsed: "
-                                 << FormatElapsedTime(progress.elapsedSeconds);
-                        }
-
-                        const std::wstring text = line.str();
-                        if (interactiveTerminal)
-                        {
-                            out << L"\r" << text;
-                            if (text.size() < lastLineLen)
-                            {
-                                out << std::wstring(lastLineLen - text.size(), L' ');
-                            }
-                            lastLineLen = text.size();
-                        }
-                        else
-                        {
-                            out << text << L"\n";
-                        }
-                        out.flush();
+                        writeProgressLine(progress);
                         lastReport = now;
                         lastPhase = phase;
                         lastPercentBucket = pctBucket;
+                        lastReportedCompleted = progress.completed;
                     }
                 }
 
@@ -1751,6 +1807,11 @@ namespace Mandelbrot
 
             exporter.Stop();
             progress = exporter.Progress();
+
+            if (!options.quiet && progress.error.empty() && !progress.canceled)
+            {
+                writeProgressLine(progress);
+            }
 
             if (interactiveTerminal && !options.quiet && lastLineLen > 0)
             {
@@ -1774,8 +1835,9 @@ namespace Mandelbrot
             if (!options.quiet)
             {
                 out << L"Export complete: " << options.outputPath
-                    << L" (" << progress.completed << L" frames, elapsed "
-                    << FormatElapsedTime(progress.elapsedSeconds) << L")\n";
+                    << L" | Frames: " << progress.completed << L"/" << progress.total
+                    << L" | Zoom: " << FormatZoomShort(plan.start.zoom) << L" -> " << FormatZoomShort(plan.endZoom)
+                    << L" | Elapsed: " << FormatElapsedTime(progress.elapsedSeconds) << L"\n";
                 out.flush();
             }
             return 0;

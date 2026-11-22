@@ -8,6 +8,8 @@
 
 namespace Mandelbrot
 {
+    struct MovieProgress;
+
     enum class CliAction
     {
         LaunchGui,
@@ -32,6 +34,9 @@ namespace Mandelbrot
 
     // Formats CLI help/usage text.
     std::wstring MovieCliUsage();
+
+    // Formats a single console progress status line showing frames, percentage, zoom level, and elapsed time.
+    std::wstring FormatMovieCliProgressLine(const MovieProgress& progress, const MoviePlan& plan);
 
     // Loads view, coordinates, and palette settings from a JSON document produced by SerializeViewState().
     // Throws std::invalid_argument on malformed JSON or invalid values.

@@ -379,6 +379,53 @@ TEST_CASE(MovieCli, SplitsWindowsCommandLineWithQuotes)
     ASSERT_TRUE(noArgs.empty());
 }
 
+TEST_CASE(MovieCli, FormatsProgressStatsWithFramesZoomAndElapsedTime)
+{
+    MoviePlan plan;
+    plan.fps = 30;
+    plan.seconds = 10; // 300 frames
+    plan.start.zoom = 1.0;
+    plan.endZoom = 1.0e6;
+    ASSERT_NEAR(1.0, plan.ZoomAt(0.0), 1e-12);
+    ASSERT_NEAR(1.0e3, plan.ZoomAt(149.5), 1e-6);
+    ASSERT_NEAR(1.0e6, plan.ZoomAt(299.0), 1e-6);
+
+    MovieProgress planning{};
+    planning.completed = 0;
+    planning.total = 300;
+    planning.planning = true;
+    planning.elapsedSeconds = 1.2;
+    planning.currentZoom = 1.0;
+    const std::wstring planLine = FormatMovieCliProgressLine(planning, plan);
+    ASSERT_TRUE(planLine.find(L"Planning auto-targets") != std::wstring::npos);
+    ASSERT_TRUE(planLine.find(L"Frames: 0/300") != std::wstring::npos);
+    ASSERT_TRUE(planLine.find(L"Zoom: 1.00x") != std::wstring::npos);
+    ASSERT_TRUE(planLine.find(L"Elapsed: 00:00:01.2") != std::wstring::npos);
+
+    MovieProgress rendering{};
+    rendering.completed = 150;
+    rendering.total = 300;
+    rendering.frameFraction = 0.0f;
+    rendering.elapsedSeconds = 65.4;
+    rendering.currentZoom = 15000.0;
+    const std::wstring renderLine = FormatMovieCliProgressLine(rendering, plan);
+    ASSERT_TRUE(renderLine.find(L"Frames: 150/300") != std::wstring::npos);
+    ASSERT_TRUE(renderLine.find(L"50.0%") != std::wstring::npos);
+    ASSERT_TRUE(renderLine.find(L"Zoom: 1.50e+04x") != std::wstring::npos);
+    ASSERT_TRUE(renderLine.find(L"Elapsed: 00:01:05.4") != std::wstring::npos);
+
+    MovieProgress finalizing{};
+    finalizing.completed = 300;
+    finalizing.total = 300;
+    finalizing.elapsedSeconds = 120.0;
+    finalizing.currentZoom = 1.0e6;
+    const std::wstring finLine = FormatMovieCliProgressLine(finalizing, plan);
+    ASSERT_TRUE(finLine.find(L"Finalizing MP4") != std::wstring::npos);
+    ASSERT_TRUE(finLine.find(L"Frames: 300/300") != std::wstring::npos);
+    ASSERT_TRUE(finLine.find(L"Zoom: 1.00e+06x") != std::wstring::npos);
+    ASSERT_TRUE(finLine.find(L"Elapsed: 00:02:00.0") != std::wstring::npos);
+}
+
 TEST_CASE(MovieCli, EndToEndHeadlessExportWritesValidMovieAndReportsProgress)
 {
     TempFile movieFile(L".mp4");
@@ -402,13 +449,29 @@ TEST_CASE(MovieCli, EndToEndHeadlessExportWritesValidMovieAndReportsProgress)
     const int exitCode = RunMovieExportCli(parsed.options, out, err, nullptr, false);
     ASSERT_EQ(0, exitCode);
     ASSERT_TRUE(err.str().empty());
-    ASSERT_TRUE(out.str().find(L"Exporting zoom movie:") != std::wstring::npos);
-    ASSERT_TRUE(out.str().find(L"Export complete:") != std::wstring::npos);
+    const std::wstring text = out.str();
+    ASSERT_TRUE(text.find(L"Exporting zoom movie:") != std::wstring::npos);
+    ASSERT_TRUE(text.find(L"Frames: 24/24") != std::wstring::npos);
+    ASSERT_TRUE(text.find(L"Zoom: 4.00x") != std::wstring::npos);
+    ASSERT_TRUE(text.find(L"Elapsed: ") != std::wstring::npos);
+    ASSERT_TRUE(text.find(L"Export complete:") != std::wstring::npos);
     ASSERT_FALSE(ReadBytes(movieFile.path).empty());
 
     // Verify the exported MP4 decodes cleanly through Windows Media playback.
     const auto decoded = DecodePlayerFrame(movieFile.path, 64, 48);
     ASSERT_EQ(static_cast<size_t>(64 * 48), decoded.size());
+
+    // Interactive console mode uses carriage-return in-place updates and reports stats.
+    TempFile ttyFile(L".mp4");
+    auto ttyOptions = parsed.options;
+    ttyOptions.outputPath = ttyFile.path.wstring();
+    std::wostringstream ttyOut, ttyErr;
+    ASSERT_EQ(0, RunMovieExportCli(ttyOptions, ttyOut, ttyErr, nullptr, true));
+    ASSERT_TRUE(ttyErr.str().empty());
+    ASSERT_TRUE(ttyOut.str().find(L"\rFrames: ") != std::wstring::npos);
+    ASSERT_TRUE(ttyOut.str().find(L"Frames: 24/24") != std::wstring::npos);
+    ASSERT_TRUE(ttyOut.str().find(L"Zoom: 4.00x") != std::wstring::npos);
+    ASSERT_TRUE(ttyOut.str().find(L"Elapsed: ") != std::wstring::npos);
 
     // Quiet mode suppresses stdout while still succeeding.
     TempFile quietFile(L".mp4");

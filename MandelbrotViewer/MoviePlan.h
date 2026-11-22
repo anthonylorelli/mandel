@@ -67,6 +67,16 @@ namespace Mandelbrot
         const std::vector<AutoTarget>& AutoTargets() const { return m_autoTargets; }
 
         uint32_t FrameCount() const { return static_cast<uint32_t>(static_cast<uint64_t>(fps) * seconds); }
+        double ZoomAt(double frameIndex) const noexcept
+        {
+            const uint32_t count = FrameCount();
+            if (count <= 1) return start.zoom;
+            const double t = std::clamp(frameIndex / (count - 1.0), 0.0, 1.0);
+            if (t <= 0.0) return start.zoom;
+            if (t >= 1.0) return endZoom;
+            const double range = std::log(endZoom) - std::log(start.zoom);
+            return std::exp(std::log(start.zoom) + range * t);
+        }
         void Validate() const
         {
             if (width < 1 || height < 1 || width > 7680 || height > 4320 ||
@@ -91,7 +101,7 @@ namespace Mandelbrot
             camera.edgeRefine = false;
             const double t = std::clamp(frameIndex / (FrameCount() - 1.0), 0.0, 1.0);
             const double range = std::log(endZoom) - std::log(start.zoom);
-            camera.zoom = t == 0 ? start.zoom : t == 1 ? endZoom : std::exp(std::log(start.zoom) + range * t);
+            camera.zoom = ZoomAt(frameIndex);
             if (autoScaleIterations)
             {
                 camera.maxIterations = MandelbrotEngine::RecommendMaxIterations(

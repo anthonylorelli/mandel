@@ -731,7 +731,8 @@ namespace Mandelbrot
     }
 
     MovieExporter::MovieExporter(MoviePlan plan, std::wstring destination)
-        : m_total(plan.FrameCount())
+        : m_currentZoom(plan.start.zoom)
+        , m_total(plan.FrameCount())
         , m_startTime(std::chrono::steady_clock::now())
     {
         plan.Validate();
@@ -746,7 +747,7 @@ namespace Mandelbrot
         std::lock_guard lock(m_mutex);
         const auto end = m_finished ? m_endTime : std::chrono::steady_clock::now();
         const double elapsed = std::max(0.0, std::chrono::duration<double>(end - m_startTime).count());
-        return {m_completed.load(), m_total, m_fraction.load(), m_finished, m_canceled, m_planning.load(), m_error, elapsed};
+        return {m_completed.load(), m_total, m_fraction.load(), m_finished, m_canceled, m_planning.load(), m_error, elapsed, m_currentZoom.load(std::memory_order_relaxed)};
     }
     std::optional<MoviePreview> MovieExporter::TakePreview()
     {
@@ -824,6 +825,7 @@ namespace Mandelbrot
                             ThrowIfCanceled(m_cancel);
                             writer.WriteFrame(item.pixels);
                             ThrowIfCanceled(m_cancel);
+                            m_currentZoom.store(plan.ZoomAt(static_cast<double>(item.frame)), std::memory_order_relaxed);
                             m_completed.store(item.frame + 1);
                             const auto now = std::chrono::steady_clock::now();
                             if (item.frame == 0 || item.frame + 1 == m_total || now - lastPreview >= std::chrono::seconds(15))
