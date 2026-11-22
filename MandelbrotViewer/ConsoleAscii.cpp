@@ -549,16 +549,35 @@ namespace Mandelbrot
         return std::max(1, static_cast<int>(std::lround(static_cast<double>(safeRows) * clampedAspect)));
     }
 
-    std::string RenderAsciiFrame(
+    void ComputeAsciiSupersampleDimensions(
+        int cols,
+        int rows,
+        double charAspect,
+        int& outPixelWidth,
+        int& outPixelHeight) noexcept
+    {
+        const int safeCols = std::max(1, cols);
+        const int safeRows = std::max(1, rows);
+        const int baseHeight = ComputeAsciiPixelHeight(safeRows, charAspect);
+        // Use 2x spatial supersampling (8 pixel centers per cell at 2:1 aspect, plus 4x adaptive
+        // subpixel refinement on detail) for normal terminal sizes to eliminate point-sampling sparkle.
+        const int scale = (static_cast<int64_t>(safeCols) * static_cast<int64_t>(safeRows) <= 16384) ? 2 : 1;
+        outPixelWidth = safeCols * scale;
+        outPixelHeight = baseHeight * scale;
+    }
+
+    std::string RenderAsciiFrameStabilized(
         const std::vector<float>& iterations,
         const std::vector<uint32_t>& bgraPixels,
-        int pixelWidth,
-        int pixelHeight,
+        const FractalConfig& currentConfig,
         int cols,
         int rows,
         std::string_view charset,
-        AsciiColorMode resolvedColorMode)
+        AsciiColorMode resolvedColorMode,
+        AsciiTemporalState* temporalState)
     {
+        const int pixelWidth = currentConfig.width;
+        const int pixelHeight = currentConfig.height;
         if (pixelWidth <= 0 || pixelHeight <= 0 || cols <= 0 || rows <= 0)
         {
             return {};
@@ -574,65 +593,85 @@ namespace Mandelbrot
         const size_t maxRampIdx = ramp.size() - 1u;
         const size_t minExteriorIdx = (ramp[0] == ' ' && ramp.size() > 2u) ? 1u : 0u;
         const auto& srgb = detail::LinearSrgbTables::Instance();
+        const size_t maxEnc = srgb.encode.size() - 1u;
 
-        const bool useTrueColor = (resolvedColorMode == AsciiColorMode::TrueColor);
-        const bool useAnsi256 = (resolvedColorMode == AsciiColorMode::Ansi256);
-        const bool useColor = useTrueColor || useAnsi256;
+        const size_t cellCount = static_cast<size_t>(cols) * static_cast<size_t>(rows);
+        std::vector<AsciiCellHistory> currCells(cellCount);
 
-        std::string out;
-        const size_t bytesPerCell = useTrueColor ? 16u : (useAnsi256 ? 8u : 1u);
-        out.reserve(static_cast<size_t>(cols) * static_cast<size_t>(rows) * bytesPerCell + static_cast<size_t>(rows) * 8u);
+        // 1. Downsample supersampled linear RGB and continuous exterior coverage into terminal cells
+        //    using a compact tent filter so fine filaments glide smoothly across cell boundaries
+        //    instead of popping abruptly in/out of a hard box footprint.
+        const bool canTentFilter = (pixelWidth > cols || pixelHeight > rows);
+        const float cellScaleX = static_cast<float>(pixelWidth) / static_cast<float>(cols);
+        const float cellScaleY = static_cast<float>(pixelHeight) / static_cast<float>(rows);
+        const float radiusX = canTentFilter ? (0.75f * cellScaleX) : (0.5f * cellScaleX);
+        const float radiusY = canTentFilter ? (0.75f * cellScaleY) : (0.5f * cellScaleY);
 
         for (int ry = 0; ry < rows; ++ry)
         {
-            const int y0 = (ry * pixelHeight) / rows;
-            const int y1 = std::min(pixelHeight, std::max(y0 + 1, ((ry + 1) * pixelHeight) / rows));
-
-            bool hasActiveColor = false;
-            uint8_t lastR = 0;
-            uint8_t lastG = 0;
-            uint8_t lastB = 0;
-            uint8_t lastAnsi = 0;
+            const float centerY = (static_cast<float>(ry) + 0.5f) * cellScaleY;
+            const int y0 = canTentFilter
+                ? std::max(0, static_cast<int>(std::floor(centerY - radiusY)))
+                : (ry * pixelHeight) / rows;
+            const int y1 = canTentFilter
+                ? std::min(pixelHeight, std::max(y0 + 1, static_cast<int>(std::ceil(centerY + radiusY))))
+                : std::min(pixelHeight, std::max(y0 + 1, ((ry + 1) * pixelHeight) / rows));
+            const size_t cellRowOffset = static_cast<size_t>(ry) * static_cast<size_t>(cols);
 
             for (int cx = 0; cx < cols; ++cx)
             {
-                const int x0 = (cx * pixelWidth) / cols;
-                const int x1 = std::min(pixelWidth, std::max(x0 + 1, ((cx + 1) * pixelWidth) / cols));
+                const float centerX = (static_cast<float>(cx) + 0.5f) * cellScaleX;
+                const int x0 = canTentFilter
+                    ? std::max(0, static_cast<int>(std::floor(centerX - radiusX)))
+                    : (cx * pixelWidth) / cols;
+                const int x1 = canTentFilter
+                    ? std::min(pixelWidth, std::max(x0 + 1, static_cast<int>(std::ceil(centerX + radiusX))))
+                    : std::min(pixelWidth, std::max(x0 + 1, ((cx + 1) * pixelWidth) / cols));
 
                 float linR = 0.0f;
                 float linG = 0.0f;
                 float linB = 0.0f;
-                int totalSamples = 0;
-                int exteriorSamples = 0;
+                float totalWeight = 0.0f;
+                float exteriorWeight = 0.0f;
 
                 for (int py = y0; py < y1; ++py)
                 {
+                    const float wy = canTentFilter
+                        ? std::max(0.0f, 1.0f - std::abs((static_cast<float>(py) + 0.5f) - centerY) / radiusY)
+                        : 1.0f;
+                    if (wy <= 0.0f) continue;
+
                     const size_t rowOffset = static_cast<size_t>(py) * static_cast<size_t>(pixelWidth);
                     for (int px = x0; px < x1; ++px)
                     {
+                        const float wx = canTentFilter
+                            ? std::max(0.0f, 1.0f - std::abs((static_cast<float>(px) + 0.5f) - centerX) / radiusX)
+                            : 1.0f;
+                        const float w = wx * wy;
+                        if (w <= 0.0f) continue;
+
                         const size_t idx = rowOffset + static_cast<size_t>(px);
                         const float iter = iterations[idx];
                         if (iter >= 0.0f && !std::isnan(iter))
                         {
-                            ++exteriorSamples;
+                            exteriorWeight += w;
                         }
                         const uint32_t bgra = bgraPixels[idx];
                         const uint8_t b = static_cast<uint8_t>(bgra & 0xFFu);
                         const uint8_t g = static_cast<uint8_t>((bgra >> 8) & 0xFFu);
                         const uint8_t r = static_cast<uint8_t>((bgra >> 16) & 0xFFu);
-                        linR += srgb.decode[r];
-                        linG += srgb.decode[g];
-                        linB += srgb.decode[b];
-                        ++totalSamples;
+                        linR += w * srgb.decode[r];
+                        linG += w * srgb.decode[g];
+                        linB += w * srgb.decode[b];
+                        totalWeight += w;
                     }
                 }
 
-                const float invSamples = 1.0f / static_cast<float>(std::max(1, totalSamples));
-                const float avgLinR = std::clamp(linR * invSamples, 0.0f, 1.0f);
-                const float avgLinG = std::clamp(linG * invSamples, 0.0f, 1.0f);
-                const float avgLinB = std::clamp(linB * invSamples, 0.0f, 1.0f);
+                const float invWeight = (totalWeight > 0.0f) ? (1.0f / totalWeight) : 0.0f;
+                const float avgLinR = std::clamp(linR * invWeight, 0.0f, 1.0f);
+                const float avgLinG = std::clamp(linG * invWeight, 0.0f, 1.0f);
+                const float avgLinB = std::clamp(linB * invWeight, 0.0f, 1.0f);
 
-                const size_t maxEnc = srgb.encode.size() - 1u;
                 const uint8_t outR = srgb.encode[static_cast<size_t>(avgLinR * static_cast<float>(maxEnc) + 0.5f)];
                 const uint8_t outG = srgb.encode[static_cast<size_t>(avgLinG * static_cast<float>(maxEnc) + 0.5f)];
                 const uint8_t outB = srgb.encode[static_cast<size_t>(avgLinB * static_cast<float>(maxEnc) + 0.5f)];
@@ -641,21 +680,199 @@ namespace Mandelbrot
                                     0.7152f * static_cast<float>(outG) +
                                     0.0722f * static_cast<float>(outB)) / 255.0f;
 
-                size_t rampIdx = 0u;
-                if (exteriorSamples == 0)
+                // Continuous exterior floor avoids abrupt space/dot cliff on shoreline cells.
+                const float exteriorRatio = std::clamp(exteriorWeight * invWeight, 0.0f, 1.0f);
+                const float exteriorFloor = static_cast<float>(minExteriorIdx) * exteriorRatio;
+                const float rampPos = exteriorFloor +
+                    std::clamp(luma, 0.0f, 1.0f) * (static_cast<float>(maxRampIdx) - exteriorFloor);
+
+                AsciiCellHistory& cell = currCells[cellRowOffset + static_cast<size_t>(cx)];
+                cell.rampPos = rampPos;
+                cell.linR = avgLinR;
+                cell.linG = avgLinG;
+                cell.linB = avgLinB;
+            }
+        }
+
+        // 2. Check whether previous frame history is compatible for motion-compensated temporal filtering.
+        bool canReproject = false;
+        double currSpanX = 0.0;
+        double currSpanY = 0.0;
+        double prevSpanX = 0.0;
+        double prevSpanY = 0.0;
+        double deltaCenterX = 0.0;
+        double deltaCenterY = 0.0;
+
+        if (temporalState &&
+            temporalState->valid &&
+            temporalState->cols == cols &&
+            temporalState->rows == rows &&
+            temporalState->charset == ramp &&
+            temporalState->cells.size() == cellCount &&
+            temporalState->config.fractalType == currentConfig.fractalType &&
+            temporalState->config.juliaSet == currentConfig.juliaSet &&
+            temporalState->config.smooth == currentConfig.smooth &&
+            temporalState->config.width > 0 &&
+            temporalState->config.height > 0 &&
+            temporalState->config.zoom > 0.0 &&
+            currentConfig.zoom > 0.0)
+        {
+            const bool sameJulia = !currentConfig.juliaSet ||
+                (temporalState->config.juliaX == currentConfig.juliaX &&
+                 temporalState->config.juliaY == currentConfig.juliaY);
+            const double zoomRatio = currentConfig.zoom / temporalState->config.zoom;
+            if (sameJulia && zoomRatio >= 0.5 && zoomRatio <= 2.0)
+            {
+                BigFloat currHpX;
+                BigFloat currHpY;
+                BigFloat prevHpX;
+                BigFloat prevHpY;
+                currentConfig.ResolveHpCenter(currHpX, currHpY);
+                temporalState->config.ResolveHpCenter(prevHpX, prevHpY);
+
+                currSpanX = 3.0 / std::max(currentConfig.zoom, 1e-12);
+                currSpanY = currSpanX * (static_cast<double>(pixelHeight) / static_cast<double>(pixelWidth));
+                prevSpanX = 3.0 / std::max(temporalState->config.zoom, 1e-12);
+                prevSpanY = prevSpanX * (static_cast<double>(temporalState->config.height) /
+                                         static_cast<double>(temporalState->config.width));
+                deltaCenterX = (currHpX - prevHpX).ToDouble();
+                deltaCenterY = (currHpY - prevHpY).ToDouble();
+
+                if (std::isfinite(deltaCenterX) && std::isfinite(deltaCenterY) &&
+                    std::abs(deltaCenterX) < prevSpanX && std::abs(deltaCenterY) < prevSpanY)
                 {
-                    rampIdx = static_cast<size_t>(std::lround(std::clamp(luma, 0.0f, 1.0f) * static_cast<float>(maxRampIdx)));
+                    canReproject = true;
                 }
-                else
+            }
+        }
+
+        // 3. Motion-compensated temporal accumulation (with 3x3 neighborhood clamping) + glyph hysteresis.
+        std::vector<AsciiCellHistory> nextCells(cellCount);
+        const bool useTrueColor = (resolvedColorMode == AsciiColorMode::TrueColor);
+        const bool useAnsi256 = (resolvedColorMode == AsciiColorMode::Ansi256);
+        const bool useColor = useTrueColor || useAnsi256;
+
+        std::string out;
+        const size_t bytesPerCell = useTrueColor ? 16u : (useAnsi256 ? 8u : 1u);
+        out.reserve(cellCount * bytesPerCell + static_cast<size_t>(rows) * 8u);
+
+        constexpr float kCurrentWeight = 0.45f;
+        constexpr float kHistoryWeight = 1.0f - kCurrentWeight;
+        constexpr float kHysteresis = 0.34f;
+
+        for (int ry = 0; ry < rows; ++ry)
+        {
+            const size_t cellRowOffset = static_cast<size_t>(ry) * static_cast<size_t>(cols);
+            bool hasActiveColor = false;
+            uint8_t lastR = 0;
+            uint8_t lastG = 0;
+            uint8_t lastB = 0;
+            uint8_t lastAnsi = 0;
+
+            const double v = 0.5 - (static_cast<double>(ry) + 0.5) / static_cast<double>(rows);
+
+            for (int cx = 0; cx < cols; ++cx)
+            {
+                const size_t cellIdx = cellRowOffset + static_cast<size_t>(cx);
+                AsciiCellHistory filtered = currCells[cellIdx];
+
+                if (canReproject)
                 {
-                    const float scaled = static_cast<float>(minExteriorIdx) +
-                        std::clamp(luma, 0.0f, 1.0f) * static_cast<float>(maxRampIdx - minExteriorIdx);
-                    rampIdx = std::clamp(static_cast<size_t>(std::lround(scaled)), minExteriorIdx, maxRampIdx);
+                    const double u = (static_cast<double>(cx) + 0.5) / static_cast<double>(cols) - 0.5;
+                    const double relPrevX = deltaCenterX + u * currSpanX;
+                    const double relPrevY = deltaCenterY + v * currSpanY;
+                    const double prevCx = (relPrevX / prevSpanX + 0.5) * static_cast<double>(cols) - 0.5;
+                    const double prevRy = (0.5 - relPrevY / prevSpanY) * static_cast<double>(rows) - 0.5;
+
+                    if (prevCx >= 0.0 && prevCx <= static_cast<double>(cols - 1) &&
+                        prevRy >= 0.0 && prevRy <= static_cast<double>(rows - 1))
+                    {
+                        const int ix0 = static_cast<int>(std::floor(prevCx));
+                        const int iy0 = static_cast<int>(std::floor(prevRy));
+                        const int ix1 = std::min(cols - 1, ix0 + 1);
+                        const int iy1 = std::min(rows - 1, iy0 + 1);
+                        const float fx = static_cast<float>(prevCx - static_cast<double>(ix0));
+                        const float fy = static_cast<float>(prevRy - static_cast<double>(iy0));
+
+                        const auto& c00 = temporalState->cells[static_cast<size_t>(iy0) * static_cast<size_t>(cols) + static_cast<size_t>(ix0)];
+                        const auto& c10 = temporalState->cells[static_cast<size_t>(iy0) * static_cast<size_t>(cols) + static_cast<size_t>(ix1)];
+                        const auto& c01 = temporalState->cells[static_cast<size_t>(iy1) * static_cast<size_t>(cols) + static_cast<size_t>(ix0)];
+                        const auto& c11 = temporalState->cells[static_cast<size_t>(iy1) * static_cast<size_t>(cols) + static_cast<size_t>(ix1)];
+
+                        const float w00 = (1.0f - fx) * (1.0f - fy);
+                        const float w10 = fx * (1.0f - fy);
+                        const float w01 = (1.0f - fx) * fy;
+                        const float w11 = fx * fy;
+
+                        const float histPos = w00 * c00.rampPos + w10 * c10.rampPos + w01 * c01.rampPos + w11 * c11.rampPos;
+                        const float histR = w00 * c00.linR + w10 * c10.linR + w01 * c01.linR + w11 * c11.linR;
+                        const float histG = w00 * c00.linG + w10 * c10.linG + w01 * c01.linG + w11 * c11.linG;
+                        const float histB = w00 * c00.linB + w10 * c10.linB + w01 * c01.linB + w11 * c11.linB;
+
+                        // Clamp reprojected history to current 3x3 neighborhood to eliminate motion ghosting.
+                        float minPos = filtered.rampPos;
+                        float maxPos = filtered.rampPos;
+                        float minR = filtered.linR;
+                        float maxR = filtered.linR;
+                        float minG = filtered.linG;
+                        float maxG = filtered.linG;
+                        float minB = filtered.linB;
+                        float maxB = filtered.linB;
+
+                        const int ny0 = std::max(0, ry - 1);
+                        const int ny1 = std::min(rows - 1, ry + 1);
+                        const int nx0 = std::max(0, cx - 1);
+                        const int nx1 = std::min(cols - 1, cx + 1);
+                        for (int ny = ny0; ny <= ny1; ++ny)
+                        {
+                            const size_t nRow = static_cast<size_t>(ny) * static_cast<size_t>(cols);
+                            for (int nx = nx0; nx <= nx1; ++nx)
+                            {
+                                const auto& nb = currCells[nRow + static_cast<size_t>(nx)];
+                                minPos = std::min(minPos, nb.rampPos);
+                                maxPos = std::max(maxPos, nb.rampPos);
+                                minR = std::min(minR, nb.linR);
+                                maxR = std::max(maxR, nb.linR);
+                                minG = std::min(minG, nb.linG);
+                                maxG = std::max(maxG, nb.linG);
+                                minB = std::min(minB, nb.linB);
+                                maxB = std::max(maxB, nb.linB);
+                            }
+                        }
+
+                        filtered.rampPos = kCurrentWeight * filtered.rampPos + kHistoryWeight * std::clamp(histPos, minPos, maxPos);
+                        filtered.linR = kCurrentWeight * filtered.linR + kHistoryWeight * std::clamp(histR, minR, maxR);
+                        filtered.linG = kCurrentWeight * filtered.linG + kHistoryWeight * std::clamp(histG, minG, maxG);
+                        filtered.linB = kCurrentWeight * filtered.linB + kHistoryWeight * std::clamp(histB, minB, maxB);
+                    }
                 }
+
+                const float clampedPos = std::clamp(filtered.rampPos, 0.0f, static_cast<float>(maxRampIdx));
+                size_t rampIdx = std::clamp(
+                    static_cast<size_t>(std::lround(clampedPos)),
+                    static_cast<size_t>(0u),
+                    maxRampIdx);
+
+                if (canReproject)
+                {
+                    const size_t prevIdx = std::min<size_t>(temporalState->cells[cellIdx].rampIdx, maxRampIdx);
+                    if (std::abs(clampedPos - static_cast<float>(prevIdx)) < 0.5f + kHysteresis)
+                    {
+                        rampIdx = prevIdx;
+                    }
+                }
+
+                filtered.rampPos = clampedPos;
+                filtered.rampIdx = static_cast<uint8_t>(rampIdx);
+                nextCells[cellIdx] = filtered;
 
                 const char ch = ramp[rampIdx];
                 if (useColor && ch != ' ')
                 {
+                    const uint8_t outR = srgb.encode[static_cast<size_t>(std::clamp(filtered.linR, 0.0f, 1.0f) * static_cast<float>(maxEnc) + 0.5f)];
+                    const uint8_t outG = srgb.encode[static_cast<size_t>(std::clamp(filtered.linG, 0.0f, 1.0f) * static_cast<float>(maxEnc) + 0.5f)];
+                    const uint8_t outB = srgb.encode[static_cast<size_t>(std::clamp(filtered.linB, 0.0f, 1.0f) * static_cast<float>(maxEnc) + 0.5f)];
+
                     if (useTrueColor)
                     {
                         if (!hasActiveColor || outR != lastR || outG != lastG || outB != lastB)
@@ -688,7 +905,34 @@ namespace Mandelbrot
             out.push_back('\n');
         }
 
+        if (temporalState)
+        {
+            temporalState->valid = true;
+            temporalState->cols = cols;
+            temporalState->rows = rows;
+            temporalState->charset.assign(ramp);
+            temporalState->config = currentConfig;
+            temporalState->cells = std::move(nextCells);
+        }
+
         return out;
+    }
+
+    std::string RenderAsciiFrame(
+        const std::vector<float>& iterations,
+        const std::vector<uint32_t>& bgraPixels,
+        int pixelWidth,
+        int pixelHeight,
+        int cols,
+        int rows,
+        std::string_view charset,
+        AsciiColorMode resolvedColorMode)
+    {
+        FractalConfig cfg;
+        cfg.width = pixelWidth;
+        cfg.height = pixelHeight;
+        return RenderAsciiFrameStabilized(
+            iterations, bgraPixels, cfg, cols, rows, charset, resolvedColorMode, nullptr);
     }
 
     std::string FormatConsoleHudPrimaryLine(
@@ -780,10 +1024,19 @@ namespace Mandelbrot
 
     void ConsoleAsciiSession::Resize(int cols, int rows)
     {
-        m_cols = std::clamp(cols, MinConsoleCols, MaxConsoleCols);
-        m_rows = std::clamp(rows, MinConsoleRows, MaxConsoleRows);
-        m_config.width = m_cols;
-        m_config.height = ComputeAsciiPixelHeight(m_rows, m_options.charAspect);
+        const int clampedCols = std::clamp(cols, MinConsoleCols, MaxConsoleCols);
+        const int clampedRows = std::clamp(rows, MinConsoleRows, MaxConsoleRows);
+        int pixelW = 0;
+        int pixelH = 0;
+        ComputeAsciiSupersampleDimensions(clampedCols, clampedRows, m_options.charAspect, pixelW, pixelH);
+        if (clampedCols != m_cols || clampedRows != m_rows || pixelW != m_config.width || pixelH != m_config.height)
+        {
+            m_temporalState.Reset();
+        }
+        m_cols = clampedCols;
+        m_rows = clampedRows;
+        m_config.width = pixelW;
+        m_config.height = pixelH;
     }
 
     void ConsoleAsciiSession::RefreshCharset()
@@ -854,7 +1107,7 @@ namespace Mandelbrot
             m_pixels.resize(pixelCount);
         }
 
-        const double computeMs = m_engine.Compute(m_config, m_iterations, cancelToken, nullptr);
+        const double computeMs = m_engine.Compute(m_config, m_iterations, cancelToken, &m_subpixelSamples);
         if (cancelToken && cancelToken->load(std::memory_order_relaxed))
         {
             return {};
@@ -871,17 +1124,17 @@ namespace Mandelbrot
             m_options.interior,
             m_config.fractalType,
             m_config.width,
-            nullptr,
+            &m_subpixelSamples,
             true);
-        const std::string ascii = RenderAsciiFrame(
+        const std::string ascii = RenderAsciiFrameStabilized(
             m_iterations,
             m_pixels,
-            m_config.width,
-            m_config.height,
+            m_config,
             m_cols,
             m_rows,
             m_charset,
-            resolvedColorMode);
+            resolvedColorMode,
+            &m_temporalState);
         const auto colorEnd = std::chrono::steady_clock::now();
         const double colorMs = std::chrono::duration<double, std::milli>(colorEnd - colorStart).count();
 
@@ -1111,6 +1364,7 @@ namespace Mandelbrot
                 m_hasActiveRandomTarget = false;
                 m_hasRenderedFrame = false;
                 m_reachedZoomBound = false;
+                m_temporalState.Reset();
                 m_engine.InvalidateDeepCache();
                 SyncRecommendedIterations();
             }
@@ -1125,6 +1379,7 @@ namespace Mandelbrot
                 auto it = std::find(presets.begin(), presets.end(), m_theme.CurrentPreset());
                 const size_t nextIdx = (it == presets.end()) ? 0u : ((static_cast<size_t>(it - presets.begin()) + 1u) % presets.size());
                 m_theme.SetPreset(presets[nextIdx]);
+                m_temporalState.Reset();
             }
             return true;
         }
@@ -1157,6 +1412,7 @@ namespace Mandelbrot
             default:                           m_charsetPreset = AsciiCharsetPreset::Standard; break;
             }
             RefreshCharset();
+            m_temporalState.Reset();
             return true;
 
         case ConsoleKeyAction::ToggleHud:
@@ -1168,14 +1424,14 @@ namespace Mandelbrot
             m_config = m_options.start;
             m_config.renderStride = 1;
             m_config.edgeRefine = false;
-            m_config.width = m_cols;
-            m_config.height = ComputeAsciiPixelHeight(m_rows, m_options.charAspect);
+            ComputeAsciiSupersampleDimensions(m_cols, m_rows, m_options.charAspect, m_config.width, m_config.height);
             m_targetX = m_options.targetX;
             m_targetY = m_options.targetY;
             m_hasActiveRandomTarget = false;
             m_hasRenderedFrame = false;
             m_reachedZoomBound = false;
             m_retargetPanProgress = 1.0;
+            m_temporalState.Reset();
             m_engine.InvalidateDeepCache();
             SyncRecommendedIterations();
             return true;
