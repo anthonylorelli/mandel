@@ -87,6 +87,29 @@ A high-performance Windows desktop application built with native **C++/WinRT** a
   - **Export Viewport Image**: Saves current view directly to a PNG file using Windows Imaging Component (`BitmapEncoder`).
   - **Copy Coordinates & Config**: Copies current fractal view parameters and theme as JSON to the clipboard.
 
+### 4. Command-Line Zoom Movie Export
+`MandelbrotViewer.exe` can export zoom movies headlessly without opening the GUI window using `--export-movie <output.mp4>`:
+
+```powershell
+# Show all available command-line options
+.\x64\Release\MandelbrotViewer.exe --help
+
+# Zoom from overview into Seahorse Valley (1080p, 30 fps, 15s)
+.\x64\Release\MandelbrotViewer.exe --export-movie seahorse.mp4 --bookmark "Seahorse Valley" --start-zoom 1 --end-zoom 85000 --duration 15
+
+# Auto-pick detailed targets in 4K @ 60 fps with Inferno theme and HEVC
+.\x64\Release\MandelbrotViewer.exe --export-movie auto_4k.mp4 --auto-target --resolution 4k --fps 60 --duration 30 --codec hevc --theme inferno
+
+# Load coordinates & custom palette JSON saved from "Copy Coordinates & Config"
+.\x64\Release\MandelbrotViewer.exe --export-movie custom.mp4 --config view.json --direction in --zoom-speed 1.5 --duration 20
+```
+
+Supported flags include:
+- **Output & Video**: `--export-movie <path>` (or `-o`/`--output`), `--resolution <720p|1080p|1440p|4k|8k|WxH>`, `--width`, `--height`, `--fps <24|25|30|48|50|60>`, `--duration <1..3600>`, `--codec <h264|hevc>`, `--motion-smoothing` / `--no-motion-smoothing`, `-q` / `--quiet`.
+- **View & Coordinates**: `--config <file.json>`, `--fractal <name>`, `--bookmark <name>`, `--center-x`, `--center-y`, `--start-zoom` / `--zoom`, `--julia <x,y>`, `--julia-x`, `--julia-y`.
+- **Zoom Motion**: `--target-x`, `--target-y`, `--direction <in|out>`, `--zoom-speed <0.2..5.0>`, `--end-zoom`, `--auto-target` / `--no-auto-target`, `--seed <uint64>`.
+- **Rendering & Theme**: `--iterations`, `--auto-iterations` / `--no-auto-iterations`, `--smooth` / `--no-smooth`, `--gpu` / `--no-gpu` (`--cpu`), `--theme <name>`, `--frequency`, `--phase`, `--invert` / `--no-invert`, `--interior-color <#RRGGBB|#AARRGGBB|0xAARRGGBB>`.
+
 ---
 
 ## Build & Run
@@ -147,3 +170,4 @@ Or with options:
 - **Julia Views**: Quadratic orbits, the unit disk, deep parameter and critical-point precision, subpixel sampling, point selection and projection, viewport fitting, stale-parameter rejection, and complete shared state.
 - **Julia Tours**: Seeded continuous routes around Mandelbrot regions, exterior time allocation around both primary regions, rendered detail, bounded frame steps, critical-orbit escape and return checks, and safe handling of unsupported selections and long frame delays.
 - **Movie Export**: Exact and deep camera paths, fixed sampling and render-band agreement, 8K JPEG encoding, MP4 sample tables and timing, rendered playback geometry and colors through 8K, background progress and previews, and cancellation preserving an existing destination.
+- **Command-Line Movie Export**: Argument parsing, resolution/codec/theme/bookmark/Julia options, `SerializeViewState` JSON config loading with CLI overrides, invalid/conflicting flag rejection, Windows command-line quoting, and end-to-end headless movie export and cancellation.

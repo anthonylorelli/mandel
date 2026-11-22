@@ -29,6 +29,7 @@ namespace Mandelbrot
         bool finished{}, canceled{}, planning{};
         std::wstring error;
         double elapsedSeconds{};
+        double currentZoom{ 1.0 };
     };
 
     class MovieExporter
@@ -46,6 +47,7 @@ namespace Mandelbrot
         std::atomic<uint32_t> m_completed{};
         std::atomic<float> m_fraction{};
         std::atomic<bool> m_planning{};
+        std::atomic<double> m_currentZoom{ 1.0 };
         uint32_t m_total;
         std::chrono::steady_clock::time_point m_startTime{};
         std::chrono::steady_clock::time_point m_endTime{};
