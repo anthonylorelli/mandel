@@ -1,4 +1,5 @@
 #pragma once
+#include "ConsoleAscii.h"
 #include "MoviePlan.h"
 #include <atomic>
 #include <iosfwd>
@@ -15,6 +16,7 @@ namespace Mandelbrot
         LaunchGui,
         ShowHelp,
         ExportMovie,
+        ConsoleAscii,
         Error
     };
 
@@ -29,6 +31,7 @@ namespace Mandelbrot
     {
         CliAction action{ CliAction::LaunchGui };
         MovieCliOptions options;
+        ConsoleAsciiOptions consoleOptions;
         std::wstring errorMessage;
     };
 
