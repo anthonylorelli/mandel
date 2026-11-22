@@ -4,8 +4,11 @@
 
 namespace Mandelbrot
 {
-    BackgroundRenderer::BackgroundRenderer(NotifyReady notify, Compute compute)
-        : m_notify(std::move(notify)), m_compute(std::move(compute)), m_worker([this] { Run(); })
+    BackgroundRenderer::BackgroundRenderer(NotifyReady notify, Compute compute, ExecutionMode executionMode)
+        : m_notify(std::move(notify))
+        , m_compute(std::move(compute))
+        , m_engine(executionMode)
+        , m_worker([this] { Run(); })
     {
     }
 
@@ -124,7 +127,10 @@ namespace Mandelbrot
             if (m_cancel.load(std::memory_order_relaxed) || request.generation != m_generation || result.error)
             {
                 const bool discard = !result.error || request.generation != m_generation;
-                if (!m_compute && (request.config.zoom >= DeepZoomThreshold || result.error))
+                const double perturbThreshold = (m_engine.GetExecutionMode() == ExecutionMode::Gpu)
+                    ? 16.0
+                    : DeepZoomThreshold;
+                if (!m_compute && (request.config.zoom >= perturbThreshold || result.error))
                 {
                     // A canceled or failed deep render may have partially modified the reference cache.
                     lock.unlock();

@@ -9,6 +9,7 @@ namespace Mandelbrot::detail
     inline constexpr double kGpuDeepExpThreshold = 1e30;
     inline constexpr double kGpuTricornMaxZoom = 1e20;
     inline constexpr size_t kMaxPrimaryChunkPixels = 16ULL * 1024 * 1024;
+    inline constexpr size_t kMaxSingleSyncInteractivePixels = 4ULL * 1024 * 1024;
     inline constexpr uint64_t kMaxPrimaryIterBudget = 6'000'000'000ULL;
     inline constexpr size_t kMaxSubpixelBatchPixels = 2ULL * 1024 * 1024;
     inline constexpr size_t kMaxFullFrameAccumPixels = 16ULL * 1024 * 1024;

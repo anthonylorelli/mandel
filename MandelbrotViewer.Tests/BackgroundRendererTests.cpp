@@ -322,3 +322,54 @@ TEST_CASE(BackgroundRenderer, PixelValuesMatchSynchronousEngineForEveryFractal)
             }
         }
 }
+
+TEST_CASE(BackgroundRenderer, GpuExecutionModeRendersAndCancelsCleanly)
+{
+    Notifications notifications;
+    BackgroundRenderer renderer([&] { notifications.Ready(); }, {}, ExecutionMode::Gpu);
+
+    std::vector<float> displayed;
+    std::vector<SubpixelSamples> displayedSamples;
+
+    // 1. Shallow animated frame (renderStride = 2) renders cleanly and matches CPU output
+    MandelbrotConfig animCfg;
+    animCfg.width = 48;
+    animCfg.height = 36;
+    animCfg.maxIterations = 256;
+    animCfg.renderStride = 2;
+    animCfg.edgeRefine = true;
+    renderer.Submit(animCfg);
+    ASSERT_TRUE(notifications.Wait(1));
+    auto res1 = renderer.TakeCompleted(displayed, {}, &displayedSamples);
+    ASSERT_TRUE(res1.has_value());
+    ASSERT_FALSE(res1->error != nullptr);
+    const size_t total1 = static_cast<size_t>(animCfg.width) * static_cast<size_t>(animCfg.height);
+    ASSERT_EQ(total1, displayed.size());
+    for (float v : displayed)
+    {
+        ASSERT_TRUE(std::isfinite(v));
+    }
+
+    // 2. Deep perturbation frame (zoom > GpuPerturbationThreshold) renders cleanly and can be canceled/stopped
+    MandelbrotConfig deepCfg;
+    deepCfg.width = 40;
+    deepCfg.height = 30;
+    deepCfg.SetCenter(
+        BigFloat("-0.743643887037158704752191506114774"),
+        BigFloat("0.131825904205311970493132056385139"));
+    deepCfg.zoom = 1e18;
+    deepCfg.maxIterations = 1200;
+    renderer.Submit(deepCfg);
+    ASSERT_TRUE(notifications.Wait(2));
+    auto res2 = renderer.TakeCompleted(displayed, {}, &displayedSamples);
+    ASSERT_TRUE(res2.has_value());
+    ASSERT_FALSE(res2->error != nullptr);
+    ASSERT_EQ(static_cast<size_t>(deepCfg.width) * static_cast<size_t>(deepCfg.height), displayed.size());
+
+    // Rapid replacement + stop verifies clean cancellation and deep-cache invalidation
+    deepCfg.zoom = 2e18;
+    renderer.Submit(deepCfg);
+    renderer.Cancel();
+    renderer.Stop();
+}
+

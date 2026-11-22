@@ -281,10 +281,6 @@ namespace Mandelbrot
         {
             return false;
         }
-        if (config.renderStride > 1 && config.width >= 8 && config.height >= 8)
-        {
-            return false;
-        }
 
         if (config.juliaSet)
         {

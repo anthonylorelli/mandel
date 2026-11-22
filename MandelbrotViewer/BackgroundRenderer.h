@@ -25,7 +25,10 @@ namespace Mandelbrot
         using NotifyReady = std::function<void()>;
         using Compute = std::function<double(const MandelbrotConfig&, std::vector<float>&, const std::atomic<bool>*)>;
 
-        explicit BackgroundRenderer(NotifyReady notify, Compute compute = {});
+        explicit BackgroundRenderer(
+            NotifyReady notify,
+            Compute compute = {},
+            ExecutionMode executionMode = ExecutionMode::Automatic);
         ~BackgroundRenderer();
         BackgroundRenderer(const BackgroundRenderer&) = delete;
         BackgroundRenderer& operator=(const BackgroundRenderer&) = delete;
