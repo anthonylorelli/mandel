@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "App.xaml.h"
 #include "MainWindow.xaml.h"
+#include "MovieCli.h"
 
 namespace winrt::MandelbrotViewer::implementation
 {
@@ -29,6 +30,11 @@ namespace winrt::MandelbrotViewer::implementation
 
 int __stdcall wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 {
+    if (const auto exitCode = Mandelbrot::TryRunMovieCliFromWinMain())
+    {
+        return *exitCode;
+    }
+
     winrt::init_apartment(winrt::apartment_type::single_threaded);
     ::winrt::Microsoft::UI::Xaml::Application::Start([](auto&&)
     {
