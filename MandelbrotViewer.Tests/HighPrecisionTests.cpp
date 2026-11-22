@@ -98,3 +98,46 @@ TEST_CASE(HighPrecision, BigFloat_64BitLimbSqrAndPrecision)
     ASSERT_NEAR((x - y).ToDouble(), x.Sub(y, 14).ToDouble(), 1e-15);
     ASSERT_TRUE((x.Add(y, 24).Sub(x, 24) - y).Abs().ToDouble() < 1e-150);
 }
+
+TEST_CASE(HighPrecision, BigFloat_ToStringAndTryParseEdgeCases)
+{
+    // Zero honors requested maxDecimals (including 0).
+    const BigFloat zero(0.0);
+    ASSERT_TRUE(zero.ToString(0) == "+0");
+    ASSERT_TRUE(zero.ToString(4) == "+0.0000");
+    ASSERT_TRUE(zero.ToString(12) == "+0.000000000000");
+
+    // maxDecimals == 0 omits trailing decimal point.
+    ASSERT_TRUE(BigFloat(42.75).ToString(0) == "+42");
+    ASSERT_TRUE(BigFloat(-42.75).ToString(0) == "-42");
+
+    // Values >= 2^64 (exp >= 2 in 64-bit limbs) format exact integer digits without UB.
+    const BigFloat exactHuge = BigFloat(18446744073709551616.0) + BigFloat(0.5); // 2^64 + 0.5
+    ASSERT_TRUE(exactHuge.ToString(2) == "+18446744073709551616.50");
+
+    BigFloat parsedHuge;
+    ASSERT_TRUE(BigFloat::TryParse("18446744073709551616.5", parsedHuge));
+    ASSERT_TRUE(parsedHuge.ToString(0) == "+18446744073709551616");
+    ASSERT_TRUE((parsedHuge - exactHuge).Abs().ToDouble() < 1e-100);
+
+    BigFloat negHuge;
+    ASSERT_TRUE(BigFloat::TryParse("-1000000000000000000000000.25", negHuge)); // -10^24 - 0.25
+    ASSERT_TRUE(negHuge.ToString(0) == "-1000000000000000000000000");
+    const BigFloat exactNegHuge = -(BigFloat("1000000000000000000000000") + BigFloat(0.25));
+    ASSERT_TRUE(exactNegHuge.ToString(2) == "-1000000000000000000000000.25");
+    ASSERT_TRUE((negHuge - exactNegHuge).Abs().ToDouble() < 1e-100);
+
+    // Exponents beyond +/-308 are parsed accurately rather than silently clamped to 308.
+    BigFloat tiny350, tiny308;
+    ASSERT_TRUE(BigFloat::TryParse("1e-350", tiny350));
+    ASSERT_TRUE(BigFloat::TryParse("1e-308", tiny308));
+    ASSERT_FALSE(tiny350.isZero);
+    ASSERT_TRUE(tiny350 != tiny308);
+    const BigFloat scaledBack = tiny350 * BigFloat("1e350");
+    ASSERT_NEAR(1.0, scaledBack.ToDouble(), 1e-12);
+
+    // Exponents past the supported +/-10000 bound fail cleanly instead of silently clamping.
+    BigFloat overflowed;
+    ASSERT_FALSE(BigFloat::TryParse("1e50000", overflowed));
+    ASSERT_FALSE(BigFloat::TryParse("1e-50000", overflowed));
+}

@@ -52,6 +52,12 @@ namespace Mandelbrot
                         0,
                         &outBlob,
                         &err);
+#if defined(_DEBUG) && defined(_WIN32)
+                    if (FAILED(hr) && err && err->GetBufferPointer())
+                    {
+                        OutputDebugStringA(static_cast<const char*>(err->GetBufferPointer()));
+                    }
+#endif
                     return SUCCEEDED(hr) && outBlob != nullptr;
                 };
 
@@ -277,7 +283,8 @@ namespace Mandelbrot
 
     bool GpuFractalSolver::Impl::CanSupportConfig(const FractalConfig& config) const noexcept
     {
-        if (!available || config.width <= 0 || config.height <= 0 || config.maxIterations < 0)
+        if (!available || config.width <= 0 || config.height <= 0 || config.maxIterations < 0 ||
+            !std::isfinite(config.zoom) || !(config.zoom > 0.0))
         {
             return false;
         }
@@ -285,6 +292,7 @@ namespace Mandelbrot
         if (config.juliaSet)
         {
             if (config.zoom >= GpuPerturbationThreshold) return false;
+            if (!std::isfinite(config.centerX) || !std::isfinite(config.centerY)) return false;
             if (config.fractalType != FractalType::Mandelbrot && config.fractalType != FractalType::BurningShip)
                 return false;
             const double jx = config.juliaX.ToDouble();
@@ -457,11 +465,23 @@ namespace Mandelbrot
         return true;
     }
 
+    void GpuFractalSolver::Impl::CheckDeviceLost() noexcept
+    {
+        if (device && FAILED(device->GetDeviceRemovedReason()))
+        {
+            available = false;
+        }
+    }
+
     bool GpuFractalSolver::Impl::UploadBufferDiscard(ID3D11Buffer* buf, const void* src, size_t bytes)
     {
         if (bytes == 0) return true;
         D3D11_MAPPED_SUBRESOURCE mapped{};
-        if (FAILED(context->Map(buf, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
+        if (FAILED(context->Map(buf, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+        {
+            CheckDeviceLost();
+            return false;
+        }
         std::memcpy(mapped.pData, src, bytes);
         context->Unmap(buf, 0);
         return true;

@@ -14,6 +14,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+foreach ($part in $Version.Split('.')) {
+    $num = [int]$part
+    if ($num -lt 0 -or $num -gt 65535) {
+        throw "Invalid MSIX version component '$part' in '$Version'; each component must be in 0..65535."
+    }
+}
+
 $resolvedPath = (Resolve-Path -Path $ManifestPath).Path
 [xml]$xml = Get-Content -Path $resolvedPath -Raw -Encoding UTF8
 

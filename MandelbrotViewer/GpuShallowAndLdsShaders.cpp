@@ -297,10 +297,10 @@ void CSPrimary(uint3 tid : SV_DispatchThreadID)
 }
 
 [numthreads(256, 1, 1)]
-void CSSubpixels(uint3 tid : SV_DispatchThreadID)
+void CSSubpixels(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
 {
     uint activeTotal = (subpixelTotal == 0xFFFFFFFFu) ? (SubpixelCountSrv[0] * 4u) : subpixelTotal;
-    uint sIdx = tid.x;
+    uint sIdx = (gid.y * 32768u + gid.x) * 256u + gi;
     if (sIdx >= activeTotal) return;
     uint pix = SubpixelIndices[sIdx >> 2];
     uint corner = sIdx & 3u;
@@ -604,7 +604,7 @@ void CSPrimary(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
 }
 
 [numthreads(512, 1, 1)]
-void CSSubpixels(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
+void CSSubpixels(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
 {
     uint sharedLim = min(refLen + 1u, LDS_ORBIT_SIZE);
     for (uint i = gi; i < sharedLim; i += 512u)
@@ -612,7 +612,7 @@ void CSSubpixels(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
     GroupMemoryBarrierWithGroupSync();
 
     uint activeTotal = (subpixelTotal == 0xFFFFFFFFu) ? (SubpixelCountSrv[0] * 4u) : subpixelTotal;
-    uint sIdx = tid.x;
+    uint sIdx = (gid.y * 32768u + gid.x) * 512u + gi;
     if (sIdx >= activeTotal) return;
     uint pix = SubpixelIndices[sIdx >> 2];
     uint corner = sIdx & 3u;
@@ -720,7 +720,7 @@ bool StepPerturbLdsBla(
                 float zy = r.y + dy;
                 float mod2 = zx * zx + zy * zy;
                 float dz2 = dx * dx + dy * dy;
-                if (mod2 > 16.0f || mod2 < dz2) break;
+                if (mod2 > 16.0f || mod2 < dz2 || dz2 < 1e-30f) break;
                 float sx = r.x + zx;
                 float sy = r.y + zy;
                 float nextDx = sx * dx - sy * dy + dcx;
@@ -768,7 +768,7 @@ bool StepPerturbLdsBla(
             }
         }
 
-        if (m >= 1u && (stopIter - iter) >= 4u && ((m - 1u) & 3u) == 0u && m + 4u <= refLen && maxD < blaMaxRadius)
+        if (m >= 1u && (maxIter - iter) >= 4u && ((m - 1u) & 3u) == 0u && m + 4u <= refLen && maxD < blaMaxRadius)
         {
             uint start = m - 1u;
             uint aligned = (start != 0u) ? firstbitlow(start) : 30u;
@@ -777,7 +777,7 @@ bool StepPerturbLdsBla(
             for (int lv = int(top); lv >= 2; --lv)
             {
                 uint len = 1u << uint(lv);
-                if (len > (stopIter - iter) || m + len > refLen) continue;
+                if (len > (maxIter - iter) || m + len > refLen) continue;
                 uint2 meta = BlaMeta[lv];
                 uint idx = start >> uint(lv);
                 if (idx >= meta.y) continue;
@@ -910,7 +910,7 @@ void CSPrimaryStage0(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
 }
 
 [numthreads(512, 1, 1)]
-void CSPrimaryResume(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
+void CSPrimaryResume(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
 {
     if (gi == 0u) s_groupCount = 0u;
     uint sharedLim = min(refLen + 1u, LDS_ORBIT_SIZE);
@@ -919,13 +919,14 @@ void CSPrimaryResume(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
     GroupMemoryBarrierWithGroupSync();
 
     uint activeTotal = SubpixelCountSrv[0];
-    bool valid = (tid.x < activeTotal);
+    uint activeIdx = (gid.y * 32768u + gid.x) * 512u + gi;
+    bool valid = (activeIdx < activeTotal);
     bool keepAlive = false;
     uint pix = 0u;
 
     if (valid)
     {
-        pix = SubpixelIndices[tid.x];
+        pix = SubpixelIndices[activeIdx];
         uint py = pix / width;
         uint px = pix - py * width;
         GpuPerturbState st = ActiveState[pix];
@@ -968,7 +969,7 @@ void CSPrimaryResume(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
 }
 
 [numthreads(512, 1, 1)]
-void CSSubpixels(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
+void CSSubpixels(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
 {
     uint sharedLim = min(refLen + 1u, LDS_ORBIT_SIZE);
     for (uint i = gi; i < sharedLim; i += 512u)
@@ -976,7 +977,7 @@ void CSSubpixels(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
     GroupMemoryBarrierWithGroupSync();
 
     uint activeTotal = (subpixelTotal == 0xFFFFFFFFu) ? (SubpixelCountSrv[0] * 4u) : subpixelTotal;
-    uint sIdx = tid.x;
+    uint sIdx = (gid.y * 32768u + gid.x) * 512u + gi;
     if (sIdx >= activeTotal) return;
     uint pix = SubpixelIndices[sIdx >> 2];
     uint corner = sIdx & 3u;

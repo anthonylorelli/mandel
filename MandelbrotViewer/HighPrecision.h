@@ -1,19 +1,20 @@
 #pragma once
 #include <cstdint>
+#include <cstdio>
 #include <cmath>
 #include <cstring>
 #include <string>
 #include <string_view>
 #include <algorithm>
-#include <sstream>
+#include <vector>
 #if defined(_MSC_VER)
 #include <intrin.h>
 #endif
 
 namespace Mandelbrot
 {
-    // 1024-bit significand floating-point number (16 x 64-bit limbs in base 2^64)
-    // Provides ~308 decimal digits of precision with zero heap allocations.
+    // 1088-bit significand floating-point number (17 x 64-bit limbs in base 2^64)
+    // Provides ~308+ decimal digits of precision with zero heap allocations for arithmetic.
     // Value = (-1)^sign * sum_{i=0}^{W-1} (limbs[i] * B^{-(i+1)}) * B^exp, where B = 2^64.
     class BigFloat
     {
@@ -634,12 +635,20 @@ namespace Mandelbrot
 
         std::string ToString(size_t maxDecimals = 24) const
         {
-            if (isZero) return "+0.00000000";
+            if (isZero)
+            {
+                if (maxDecimals == 0) return "+0";
+                std::string z;
+                z.reserve(3 + maxDecimals);
+                z += "+0.";
+                z.append(maxDecimals, '0');
+                return z;
+            }
 
             BigFloat val = Abs();
             std::string out = sign ? "-" : "+";
 
-            // Extract integer part (for fractal coordinates, integer part is small)
+            // Extract integer part exactly without UB for arbitrarily large 64-bit-limb values.
             if (val.exp <= 0)
             {
                 out += "0";
@@ -650,28 +659,81 @@ namespace Mandelbrot
                 val.limbs[0] = 0;
                 val.Normalize();
             }
-            else
+            else if (val.exp <= 64)
             {
-                uint64_t intVal = static_cast<uint64_t>(std::floor(val.ToDouble()));
-                out += std::to_string(intVal);
-                val = val - BigFloat(static_cast<double>(intVal));
-                if (val.sign) val.SetZero();
-            }
-
-            out += ".";
-            for (size_t d = 0; d < maxDecimals; ++d)
-            {
-                val = val.MulUInt32(10);
-                if (!val.isZero && val.exp >= 1)
+                const size_t intLimbs64 = static_cast<size_t>(val.exp);
+                const size_t copyLimbs = std::min<size_t>(intLimbs64, static_cast<size_t>(W));
+                // Build big-endian 32-bit word array representing floor(val).
+                std::vector<uint32_t> words(intLimbs64 * 2, 0u);
+                for (size_t i = 0; i < copyLimbs; ++i)
                 {
-                    uint32_t digit = static_cast<uint32_t>(std::min<uint64_t>(val.limbs[0], 9ULL));
-                    out += static_cast<char>('0' + digit);
-                    val.limbs[0] = 0;
-                    val.Normalize();
+                    words[i * 2 + 0] = static_cast<uint32_t>(val.limbs[i] >> 32);
+                    words[i * 2 + 1] = static_cast<uint32_t>(val.limbs[i] & 0xFFFFFFFFULL);
+                    val.limbs[i] = 0;
+                }
+                val.Normalize();
+
+                std::vector<uint32_t> chunks;
+                size_t start = 0;
+                while (start < words.size())
+                {
+                    while (start < words.size() && words[start] == 0u) ++start;
+                    if (start >= words.size()) break;
+                    uint64_t rem = 0;
+                    for (size_t i = start; i < words.size(); ++i)
+                    {
+                        const uint64_t cur = (rem << 32) | words[i];
+                        words[i] = static_cast<uint32_t>(cur / 1000000000ULL);
+                        rem = cur % 1000000000ULL;
+                    }
+                    chunks.push_back(static_cast<uint32_t>(rem));
+                }
+
+                if (chunks.empty())
+                {
+                    out += "0";
                 }
                 else
                 {
-                    out += '0';
+                    out += std::to_string(chunks.back());
+                    for (size_t i = chunks.size() - 1; i-- > 0;)
+                    {
+                        std::string part = std::to_string(chunks[i]);
+                        if (part.size() < 9) out.append(9 - part.size(), '0');
+                        out += part;
+                    }
+                }
+            }
+            else
+            {
+                // Extreme exponent (> 2^4096): format in scientific form to avoid unbounded allocation.
+                const double log10Val = (static_cast<double>(val.exp - 1) * 64.0
+                    + std::log2(static_cast<double>(val.limbs[0]))) * 0.3010299956639812;
+                const int64_t exp10 = static_cast<int64_t>(std::floor(log10Val));
+                const double mant = std::pow(10.0, log10Val - static_cast<double>(exp10));
+                char buf[64];
+                std::snprintf(buf, sizeof(buf), "%.15fe%+lld", mant, static_cast<long long>(exp10));
+                out += buf;
+                return out;
+            }
+
+            if (maxDecimals > 0)
+            {
+                out += ".";
+                for (size_t d = 0; d < maxDecimals; ++d)
+                {
+                    val = val.MulUInt32(10);
+                    if (!val.isZero && val.exp >= 1)
+                    {
+                        uint32_t digit = static_cast<uint32_t>(std::min<uint64_t>(val.limbs[0], 9ULL));
+                        out += static_cast<char>('0' + digit);
+                        val.limbs[0] = 0;
+                        val.Normalize();
+                    }
+                    else
+                    {
+                        out += '0';
+                    }
                 }
             }
             return out;
@@ -720,8 +782,8 @@ namespace Mandelbrot
                 pos++;
             }
 
+            static const BigFloat tenth = BigFloat(1.0) / BigFloat(10.0);
             BigFloat fracPart(0.0);
-            const BigFloat tenth = BigFloat(1.0) / BigFloat(10.0);
             if (pos < str.size() && str[pos] == '.')
             {
                 pos++;
@@ -741,7 +803,9 @@ namespace Mandelbrot
 
             if (!hasDigits) return false;
 
+            constexpr int kMaxAbsExp10 = 10000;
             int exp10 = 0;
+            bool expOverflow = false;
             if (pos < str.size() && (str[pos] == 'e' || str[pos] == 'E'))
             {
                 pos++;
@@ -753,9 +817,14 @@ namespace Mandelbrot
                 while (pos < str.size() && str[pos] >= '0' && str[pos] <= '9')
                 {
                     hasExpDigits = true;
-                    if (exp10 < 10000)
+                    if (exp10 <= kMaxAbsExp10)
                     {
                         exp10 = exp10 * 10 + static_cast<int>(str[pos] - '0');
+                        if (exp10 > kMaxAbsExp10) expOverflow = true;
+                    }
+                    else
+                    {
+                        expOverflow = true;
                     }
                     pos++;
                 }
@@ -772,16 +841,21 @@ namespace Mandelbrot
             out = intPart + fracPart;
             if (!out.isZero)
             {
+                if (expOverflow)
+                {
+                    out.SetZero();
+                    return false;
+                }
                 if (exp10 > 0)
                 {
                     BigFloat pow10(1.0);
                     BigFloat base(10.0);
-                    int e = std::min(exp10, 308);
+                    int e = exp10;
                     while (e > 0)
                     {
                         if (e & 1) pow10 = pow10 * base;
-                        base = base.Sqr();
                         e >>= 1;
+                        if (e > 0) base = base.Sqr();
                     }
                     out = out * pow10;
                 }
@@ -789,12 +863,12 @@ namespace Mandelbrot
                 {
                     BigFloat pow10Inv(1.0);
                     BigFloat base = tenth;
-                    int e = std::min(-exp10, 308);
+                    int e = -exp10;
                     while (e > 0)
                     {
                         if (e & 1) pow10Inv = pow10Inv * base;
-                        base = base.Sqr();
                         e >>= 1;
+                        if (e > 0) base = base.Sqr();
                     }
                     out = out * pow10Inv;
                 }
@@ -809,7 +883,7 @@ namespace Mandelbrot
             ascii.reserve(wstr.size());
             for (wchar_t wc : wstr)
             {
-                if (wc > 127) return false;
+                if (wc < 0 || wc > 127) return false;
                 ascii.push_back(static_cast<char>(wc));
             }
             return TryParse(std::string_view(ascii), out);

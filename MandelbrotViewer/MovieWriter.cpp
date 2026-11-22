@@ -290,6 +290,8 @@ namespace Mandelbrot
                         eventGen.Reset();
                         mft.Reset();
                         candidate.Reset();
+                        providesSamples = false;
+                        outBufSize = 0;
                         vps.clear();
                         sps.clear();
                         pps.clear();
@@ -443,41 +445,59 @@ namespace Mandelbrot
         // Pulls a single output buffer from the MFT. Returns false if the MFT needs more input.
         bool PullOneOutput(const char* errorContext)
         {
-            MFT_OUTPUT_DATA_BUFFER odb{};
-            odb.dwStreamID = outId;
-            ComPtr<IMFSample> allocSample;
-            if (!providesSamples)
+            for (int renegotiate = 0; renegotiate < 4; ++renegotiate)
             {
-                ComPtr<IMFMediaBuffer> obuf;
-                Check(MFCreateMemoryBuffer(outBufSize, &obuf));
-                Check(MFCreateSample(&allocSample));
-                Check(allocSample->AddBuffer(obuf.Get()));
-                odb.pSample = allocSample.Get();
-            }
+                MFT_OUTPUT_DATA_BUFFER odb{};
+                odb.dwStreamID = outId;
+                ComPtr<IMFSample> allocSample;
+                if (!providesSamples)
+                {
+                    ComPtr<IMFMediaBuffer> obuf;
+                    Check(MFCreateMemoryBuffer(outBufSize, &obuf));
+                    Check(MFCreateSample(&allocSample));
+                    Check(allocSample->AddBuffer(obuf.Get()));
+                    odb.pSample = allocSample.Get();
+                }
 
-            DWORD status = 0;
-            const HRESULT hr = mft->ProcessOutput(0, 1, &odb, &status);
-            if (odb.pEvents) odb.pEvents->Release();
-            struct SampleReleaseGuard
-            {
-                bool release;
-                IMFSample* s;
-                ~SampleReleaseGuard() { if (release && s) s->Release(); }
-            } relGuard{ providesSamples, odb.pSample };
+                DWORD status = 0;
+                const HRESULT hr = mft->ProcessOutput(0, 1, &odb, &status);
+                if (odb.pEvents) odb.pEvents->Release();
+                struct SampleReleaseGuard
+                {
+                    bool release;
+                    IMFSample* s;
+                    ~SampleReleaseGuard() { if (release && s) s->Release(); }
+                } relGuard{ providesSamples, odb.pSample };
 
-            if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) return false;
-            if (hr == MF_E_TRANSFORM_STREAM_CHANGE)
-            {
-                ComPtr<IMFMediaType> newOut;
-                Check(mft->GetOutputAvailableType(outId, 0, &newOut));
-                Check(mft->SetOutputType(outId, newOut.Get(), 0));
-                UpdateOutputStreamInfo();
-                CaptureSequenceHeader();
+                if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) return false;
+                if (hr == MF_E_TRANSFORM_STREAM_CHANGE)
+                {
+                    const GUID wantSubtype = (activeCodec == MovieCodec::Hevc) ? MFVideoFormat_HEVC : MFVideoFormat_H264;
+                    ComPtr<IMFMediaType> chosenOut;
+                    for (DWORD idx = 0;; ++idx)
+                    {
+                        ComPtr<IMFMediaType> avail;
+                        if (FAILED(mft->GetOutputAvailableType(outId, idx, &avail))) break;
+                        GUID sub{};
+                        if (SUCCEEDED(avail->GetGUID(MF_MT_SUBTYPE, &sub)) && sub == wantSubtype)
+                        {
+                            chosenOut = avail;
+                            break;
+                        }
+                        if (!chosenOut) chosenOut = avail;
+                    }
+                    if (!chosenOut) Check(E_FAIL, errorContext);
+                    Check(mft->SetOutputType(outId, chosenOut.Get(), 0));
+                    UpdateOutputStreamInfo();
+                    CaptureSequenceHeader();
+                    continue;
+                }
+                Check(hr, errorContext);
+                HandleEncodedSample(odb.pSample);
                 return true;
             }
-            Check(hr, errorContext);
-            HandleEncodedSample(odb.pSample);
-            return true;
+            Check(E_FAIL, errorContext);
+            return false;
         }
 
         void PullOneAsyncOutput()

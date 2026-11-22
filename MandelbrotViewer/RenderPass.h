@@ -21,12 +21,17 @@
 
 namespace Mandelbrot::detail
 {
+    inline int NewtonBasinIndex(float value) noexcept
+    {
+        return static_cast<int>(value / NewtonRootStride);
+    }
+
     inline bool SameBasin(float a, float b, FractalType type) noexcept
     {
         if ((a < 0.0f) != (b < 0.0f)) return false;
         if (type == FractalType::Newton && a >= 0.0f)
         {
-            return static_cast<int>(a / NewtonRootStride) == static_cast<int>(b / NewtonRootStride);
+            return NewtonBasinIndex(a) == NewtonBasinIndex(b);
         }
         return true;
     }
@@ -295,7 +300,17 @@ namespace Mandelbrot::detail
                                     const float bot = v01 + tx * (v11 - v01);
                                     const float bilinear = top + ty * (bot - top);
                                     const float centerWeight = std::max(0.0f, 1.0f - 2.0f * std::max(std::abs(tx - 0.5f), std::abs(ty - 0.5f)));
-                                    rowPtr[px] = std::max(0.0f, bilinear + centerWeight * (vm - avg4));
+                                    float value = bilinear + centerWeight * (vm - avg4);
+                                    if (type == FractalType::Newton)
+                                    {
+                                        const float basinFloor = static_cast<float>(NewtonBasinIndex(v00)) * NewtonRootStride;
+                                        value = std::clamp(value, basinFloor, basinFloor + NewtonRootStride - 1.0f);
+                                    }
+                                    else
+                                    {
+                                        value = std::max(0.0f, value);
+                                    }
+                                    rowPtr[px] = value;
                                 }
                             }
                             continue;

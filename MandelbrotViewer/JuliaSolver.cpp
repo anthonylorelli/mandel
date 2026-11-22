@@ -26,7 +26,7 @@ namespace Mandelbrot
         const bool burningShip = (config.fractalType == FractalType::BurningShip);
         const double cx = config.juliaX.ToDouble(), cy = config.juliaY.ToDouble();
         if (!std::isfinite(cx) || !std::isfinite(cy)) throw std::invalid_argument("Invalid Julia parameter.");
-        const double zoom = std::clamp(config.zoom, MinZoom, MaxZoom);
+        const double zoom = std::clamp(config.zoom, 1e-12, MaxZoom);
         const double step = 3.0 / zoom / config.width;
         // R >= 4 and R^2 >= 4|c| guarantees escape, including parameters outside Mandelbrot/Burning Ship.
         const double bailout2 = std::max(16.0, 4.0 * std::hypot(cx, cy));

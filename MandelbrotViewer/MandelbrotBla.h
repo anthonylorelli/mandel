@@ -553,7 +553,7 @@ namespace Mandelbrot::detail
             dcx0, dcy, bla, dxArr[0], dyArr[0], m, iter, usedBla, ordinaryTail);
         out1 = FinishMandelbrotPerturbationLane<UseBla>(orbit, refLength, maxIter,
             dcx1, dcy, bla, dxArr[1], dyArr[1], m, iter, usedBla, ordinaryTail);
-        return loopSteps + std::max(out0.iterations - iter, out1.iterations - iter);
+        return loopSteps + std::max(0, std::max(out0.iterations - iter, out1.iterations - iter));
     }
 
     template<bool UseBla, class Point>

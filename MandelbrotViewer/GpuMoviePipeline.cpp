@@ -15,6 +15,10 @@ namespace Mandelbrot
         }
 
         std::lock_guard lock(m_impl->mutex);
+        m_impl->movieFullFrameAccum = false;
+        m_impl->movieShutterBlur = false;
+        m_impl->movieFrameWidth = 0;
+        m_impl->movieFrameHeight = 0;
         const size_t totalPixels = static_cast<size_t>(width) * static_cast<size_t>(height);
         if (totalPixels <= kMaxFullFrameAccumPixels)
         {
@@ -32,11 +36,8 @@ namespace Mandelbrot
             }
             m_impl->movieFullFrameAccum = true;
             m_impl->movieShutterBlur = enableShutterBlur;
-        }
-        else
-        {
-            m_impl->movieFullFrameAccum = false;
-            m_impl->movieShutterBlur = false;
+            m_impl->movieFrameWidth = width;
+            m_impl->movieFrameHeight = height;
         }
         return true;
     }
@@ -116,7 +117,16 @@ namespace Mandelbrot
             return false;
         }
 
-        if (!m_impl->movieFullFrameAccum)
+        if (m_impl->movieFullFrameAccum)
+        {
+            if (width != m_impl->movieFrameWidth ||
+                destRowOffset + visibleRows > m_impl->movieFrameHeight ||
+                static_cast<size_t>(destRowOffset + visibleRows) * static_cast<size_t>(width) > m_impl->accumPixelsCapElems)
+            {
+                return false;
+            }
+        }
+        else
         {
             if (!m_impl->EnsureStructuredUavSrvBuffer(
                     visiblePixels, sizeof(uint32_t),
@@ -250,6 +260,7 @@ namespace Mandelbrot
             D3D11_MAPPED_SUBRESOURCE mapped{};
             if (FAILED(m_impl->context->Map(m_impl->accumPixelsStaging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
             {
+                m_impl->CheckDeviceLost();
                 return false;
             }
             std::memcpy(ioBandPixels, mapped.pData, stripBytes);
@@ -280,10 +291,26 @@ namespace Mandelbrot
             return true;
         }
 
-        ID3D11Buffer* readbackSrc = m_impl->accumPixelsBuf.Get();
-        if (m_impl->movieShutterBlur && shutterParams && shutterParams->tapCount > 1)
+        const bool useShutter = m_impl->movieShutterBlur;
+        const int expectedW = m_impl->movieFrameWidth;
+        const int expectedH = m_impl->movieFrameHeight;
+        m_impl->movieFullFrameAccum = false;
+        m_impl->movieShutterBlur = false;
+        m_impl->movieFrameWidth = 0;
+        m_impl->movieFrameHeight = 0;
+
+        const size_t totalPixels = static_cast<size_t>(width) * static_cast<size_t>(height);
+        const size_t totalBytes = totalPixels * sizeof(uint32_t);
+        if (width != expectedW || height != expectedH ||
+            totalPixels > m_impl->accumPixelsCapElems ||
+            totalBytes > m_impl->accumPixelsStagingCapBytes)
         {
-            const size_t totalPixels = static_cast<size_t>(width) * static_cast<size_t>(height);
+            return false;
+        }
+
+        ID3D11Buffer* readbackSrc = m_impl->accumPixelsBuf.Get();
+        if (useShutter && shutterParams && shutterParams->tapCount > 1)
+        {
             if (!m_impl->EnsureStructuredUavBuffer(
                     totalPixels, sizeof(uint32_t),
                     m_impl->shutterPixelsBuf, m_impl->shutterPixelsUav, m_impl->shutterPixelsCapElems))
@@ -324,7 +351,6 @@ namespace Mandelbrot
             readbackSrc = m_impl->shutterPixelsBuf.Get();
         }
 
-        const size_t totalBytes = static_cast<size_t>(width) * static_cast<size_t>(height) * sizeof(uint32_t);
         D3D11_BOX box{ 0, 0, 0, static_cast<UINT>(totalBytes), 1, 1 };
         m_impl->context->CopySubresourceRegion(
             m_impl->accumPixelsStaging.Get(), 0, 0, 0, 0, readbackSrc, 0, &box);
@@ -332,6 +358,7 @@ namespace Mandelbrot
         D3D11_MAPPED_SUBRESOURCE mapped{};
         if (FAILED(m_impl->context->Map(m_impl->accumPixelsStaging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
         {
+            m_impl->CheckDeviceLost();
             return false;
         }
         std::memcpy(outFramePixels, mapped.pData, totalBytes);

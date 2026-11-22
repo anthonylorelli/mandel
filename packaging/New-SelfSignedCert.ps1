@@ -8,13 +8,17 @@ param(
     [string]$CerPath,
     [Parameter(Mandatory = $true)]
     [string]$Password,
+    [ValidateRange(1, 100)]
     [int]$ValidityYears = 5,
     [switch]$PrintBase64
 )
 
 $ErrorActionPreference = 'Stop'
 
-foreach ($outPath in @($PfxPath, $CerPath)) {
+$resolvedPfx = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PfxPath)
+$resolvedCer = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($CerPath)
+
+foreach ($outPath in @($resolvedPfx, $resolvedCer)) {
     $dir = Split-Path -Parent $outPath
     if (-not [string]::IsNullOrWhiteSpace($dir) -and -not (Test-Path $dir)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
@@ -39,18 +43,18 @@ $cert = New-SelfSignedCertificate `
 
 try {
     $securePassword = ConvertTo-SecureString -String $Password -Force -AsPlainText
-    Export-PfxCertificate -Cert $cert -FilePath $PfxPath -Password $securePassword | Out-Null
-    Export-Certificate -Cert $cert -FilePath $CerPath | Out-Null
+    Export-PfxCertificate -Cert $cert -FilePath $resolvedPfx -Password $securePassword | Out-Null
+    Export-Certificate -Cert $cert -FilePath $resolvedCer | Out-Null
 
     Write-Host "Generated self-signed code-signing certificate:"
     Write-Host "  Subject   : $($cert.Subject)"
     Write-Host "  Thumbprint: $($cert.Thumbprint)"
     Write-Host "  Expires   : $($cert.NotAfter.ToString('u'))"
-    Write-Host "  PFX       : $PfxPath"
-    Write-Host "  CER       : $CerPath"
+    Write-Host "  PFX       : $resolvedPfx"
+    Write-Host "  CER       : $resolvedCer"
 
     if ($PrintBase64) {
-        $b64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($PfxPath))
+        $b64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($resolvedPfx))
         Write-Host ""
         Write-Host "Store the following as GitHub Actions secret MSIX_CERT_BASE64:"
         Write-Host $b64

@@ -257,6 +257,7 @@ namespace winrt::MandelbrotViewer::implementation
         winrt::Windows::UI::ViewManagement::AccessibilitySettings::HighContrastChanged_revoker m_highContrastChangedRevoker{};
         int m_suppressEventDepth{ 0 };
         bool m_isClosed{ false };
+        bool m_imageExporting{ false };
         winrt::hstring m_targetXText;
         winrt::hstring m_targetYText;
         float m_frequency{ 1.0f };

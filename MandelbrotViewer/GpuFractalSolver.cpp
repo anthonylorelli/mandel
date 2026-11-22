@@ -16,6 +16,7 @@ namespace Mandelbrot
 
     bool GpuFractalSolver::Impl::SyncReferenceAndBla(
         const FractalConfig& config,
+        const DeepReferenceCache* cacheKey,
         const DeepReferenceState& refState,
         double cMax,
         const std::atomic<bool>* cancelToken,
@@ -24,7 +25,8 @@ namespace Mandelbrot
         const size_t orbitCount = static_cast<size_t>(refState.refLen) + 1;
         const bool zoomDeepExp = (config.zoom >= kGpuDeepExpThreshold);
 
-        if (refState.orbitVersion != uploadedOrbitVersion ||
+        if (cacheKey != uploadedCachePtr ||
+            refState.orbitVersion != uploadedOrbitVersion ||
             refState.refLen > uploadedRefLen ||
             config.fractalType != uploadedType)
         {
@@ -43,6 +45,7 @@ namespace Mandelbrot
             {
                 return false;
             }
+            uploadedCachePtr = cacheKey;
             uploadedOrbitVersion = refState.orbitVersion;
             uploadedRefLen = refState.refLen;
             uploadedType = config.fractalType;
@@ -51,12 +54,23 @@ namespace Mandelbrot
 
         if (config.fractalType == FractalType::Mandelbrot)
         {
-            if (refState.orbitVersion != uploadedBlaOrbitVersion ||
+            if (cacheKey != uploadedBlaCachePtr ||
+                refState.orbitVersion != uploadedBlaOrbitVersion ||
                 refState.refLen != uploadedBlaRefLen ||
                 uploadedBlaForceDeepExp != zoomDeepExp ||
                 cMax > uploadedBlaCMax * (1.0 + 1e-12) ||
                 cMax < uploadedBlaCMax * 0.25)
             {
+                // Invalidate cached BLA keys before Build() clears the previous table so
+                // cancellation or upload failure can never leave stale metadata enabled.
+                uploadedBlaCachePtr = nullptr;
+                uploadedBlaOrbitVersion = 0;
+                uploadedBlaRefLen = -1;
+                uploadedBlaCMax = 0.0;
+                uploadedBlaForceDeepExp = false;
+                uploadedHasBlaF32 = false;
+                uploadedHasBlaExp = false;
+
                 // Add cMax headroom at deep zooms so zoom-out trajectories and small pans reuse
                 // the same BLA table across many frames instead of rebuilding every frame.
                 const double headroomCMax = (cMax < 1e-6) ? (cMax * 1.5) : cMax;
@@ -75,12 +89,6 @@ namespace Mandelbrot
                         return false;
                     }
                 }
-                uploadedBlaOrbitVersion = refState.orbitVersion;
-                uploadedBlaRefLen = refState.refLen;
-                uploadedBlaCMax = builtCMax;
-                uploadedBlaForceDeepExp = zoomDeepExp;
-                uploadedHasBlaF32 = false;
-                uploadedHasBlaExp = false;
 
                 if (blaBuilder.numLevels >= 3)
                 {
@@ -89,11 +97,18 @@ namespace Mandelbrot
                         return false;
                     }
                 }
+
+                uploadedBlaCachePtr = cacheKey;
+                uploadedBlaOrbitVersion = refState.orbitVersion;
+                uploadedBlaRefLen = refState.refLen;
+                uploadedBlaCMax = builtCMax;
+                uploadedBlaForceDeepExp = zoomDeepExp;
             }
         }
         else
         {
             blaBuilder.Clear();
+            uploadedBlaCachePtr = nullptr;
             uploadedBlaOrbitVersion = 0;
             uploadedBlaRefLen = -1;
             uploadedBlaCMax = 0.0;
@@ -269,7 +284,7 @@ namespace Mandelbrot
         const double cMax = std::hypot(maxCx, maxCy);
 
         bool runDeepExp = false;
-        if (!SyncReferenceAndBla(config, outRefState, cMax, cancelToken, runDeepExp))
+        if (!SyncReferenceAndBla(config, &referenceCache, outRefState, cMax, cancelToken, runDeepExp))
         {
             return (cancelToken && cancelToken->load(std::memory_order_relaxed))
                 ? PrepResult::Canceled
@@ -404,15 +419,20 @@ namespace Mandelbrot
         uint32_t rowOffset,
         uint32_t outRowOffset,
         uint32_t subTotal,
-        uint32_t stageIterLimit)
+        uint32_t stageIterLimit,
+        uint32_t heightLimit)
     {
+        const uint32_t effectiveHeight = (heightLimit > 0u)
+            ? std::min<uint32_t>(heightLimit, static_cast<uint32_t>(config.height))
+            : static_cast<uint32_t>(config.height);
+
         switch (mode)
         {
         case GpuShaderMode::Shallow:
         {
             ShallowCb cb{};
             cb.width = static_cast<uint32_t>(config.width);
-            cb.height = static_cast<uint32_t>(config.height);
+            cb.height = effectiveHeight;
             cb.maxIter = static_cast<uint32_t>(config.maxIterations);
             cb.smoothFlag = config.smooth ? 1u : 0u;
             cb.fractalType = static_cast<uint32_t>(config.fractalType);
@@ -429,7 +449,7 @@ namespace Mandelbrot
         {
             PerturbLdsCb cb{};
             cb.width = static_cast<uint32_t>(config.width);
-            cb.height = static_cast<uint32_t>(config.height);
+            cb.height = effectiveHeight;
             cb.maxIter = static_cast<uint32_t>(config.maxIterations);
             cb.refLen = static_cast<uint32_t>(refState.refLen);
             cb.fractalType = static_cast<uint32_t>(config.fractalType);
@@ -447,7 +467,7 @@ namespace Mandelbrot
         {
             PerturbLdsBlaCb cb{};
             cb.width = static_cast<uint32_t>(config.width);
-            cb.height = static_cast<uint32_t>(config.height);
+            cb.height = effectiveHeight;
             cb.maxIter = static_cast<uint32_t>(config.maxIterations);
             cb.refLen = static_cast<uint32_t>(refState.refLen);
             cb.smoothFlag = config.smooth ? 1u : 0u;
@@ -468,7 +488,7 @@ namespace Mandelbrot
             const bool useBla = (config.fractalType == FractalType::Mandelbrot && blaBuilder.numLevels >= 3);
             PerturbDeepExpCb cb{};
             cb.width = static_cast<uint32_t>(config.width);
-            cb.height = static_cast<uint32_t>(config.height);
+            cb.height = effectiveHeight;
             cb.maxIter = static_cast<uint32_t>(config.maxIterations);
             cb.refLen = static_cast<uint32_t>(refState.refLen);
             cb.smoothFlag = config.smooth ? 1u : 0u;
@@ -580,7 +600,7 @@ namespace Mandelbrot
         const double cMax = std::hypot(maxCx, maxCy);
 
         bool unusedRunDeepExp = false;
-        m_impl->SyncReferenceAndBla(config, refState, cMax, cancelToken, unusedRunDeepExp);
+        m_impl->SyncReferenceAndBla(config, &referenceCache, refState, cMax, cancelToken, unusedRunDeepExp);
     }
 
     bool GpuFractalSolver::Impl::DispatchPrimaryPass(
@@ -708,6 +728,7 @@ namespace Mandelbrot
                     return false;
                 }
                 context->DispatchIndirect(indirectArgsBuf.Get(), 0);
+                context->Flush();
 
                 activeIn = activeOut;
                 prevLimit = nextLimit;
@@ -726,7 +747,12 @@ namespace Mandelbrot
             1,
             static_cast<size_t>(kMaxPrimaryIterBudget /
                 (static_cast<uint64_t>(width) * static_cast<uint64_t>(std::max(1, config.maxIterations)))));
-        const int maxChunkRows = static_cast<int>(std::min<size_t>(static_cast<size_t>(height), maxRowsByTdr));
+        size_t chunkRowsCap = std::min<size_t>(static_cast<size_t>(height), maxRowsByTdr);
+        if (chunkRowsCap < static_cast<size_t>(height) && chunkRowsCap >= 16)
+        {
+            chunkRowsCap &= ~static_cast<size_t>(15);
+        }
+        const int maxChunkRows = static_cast<int>(chunkRowsCap);
 
         for (int rowStart = 0; rowStart < height; rowStart += maxChunkRows)
         {
@@ -739,7 +765,8 @@ namespace Mandelbrot
             const int chunkRows = std::min(maxChunkRows, height - rowStart);
             if (!UploadFractalCb(
                 mode, config, refState, juliaCx, juliaCy, juliaBailout2,
-                static_cast<uint32_t>(rowStart), static_cast<uint32_t>(rowStart), 0u))
+                static_cast<uint32_t>(rowStart), static_cast<uint32_t>(rowStart), 0u, 0u,
+                static_cast<uint32_t>(rowStart + chunkRows)))
             {
                 UnbindComputeResources();
                 return false;
@@ -946,6 +973,7 @@ namespace Mandelbrot
             D3D11_MAPPED_SUBRESOURCE mappedIters{};
             if (FAILED(m_impl->context->Map(m_impl->outItersStaging.Get(), 0, D3D11_MAP_READ, 0, &mappedIters)))
             {
+                m_impl->CheckDeviceLost();
                 return false;
             }
             std::memcpy(outIterations.data(), mappedIters.pData, itersBytes);
@@ -956,6 +984,7 @@ namespace Mandelbrot
                 D3D11_MAPPED_SUBRESOURCE mappedCount{};
                 if (FAILED(m_impl->context->Map(m_impl->subCounterStaging.Get(), 0, D3D11_MAP_READ, 0, &mappedCount)))
                 {
+                    m_impl->CheckDeviceLost();
                     subpixelSamples->clear();
                     return false;
                 }
@@ -986,6 +1015,7 @@ namespace Mandelbrot
                     D3D11_MAPPED_SUBRESOURCE mappedInfo{};
                     if (FAILED(m_impl->context->Map(m_impl->pixelSubInfoStaging.Get(), 0, D3D11_MAP_READ, 0, &mappedInfo)))
                     {
+                        m_impl->CheckDeviceLost();
                         subpixelSamples->clear();
                         return false;
                     }
@@ -993,6 +1023,7 @@ namespace Mandelbrot
                     if (FAILED(m_impl->context->Map(m_impl->subOutStaging.Get(), 0, D3D11_MAP_READ, 0, &mappedSub)))
                     {
                         m_impl->context->Unmap(m_impl->pixelSubInfoStaging.Get(), 0);
+                        m_impl->CheckDeviceLost();
                         subpixelSamples->clear();
                         return false;
                     }
@@ -1062,7 +1093,12 @@ namespace Mandelbrot
             1,
             static_cast<size_t>(kMaxPrimaryIterBudget /
                 (static_cast<uint64_t>(width) * static_cast<uint64_t>(std::max(1, maxIter)))));
-        const int maxChunkRows = static_cast<int>(std::min<size_t>({ static_cast<size_t>(height), maxRowsByMem, maxRowsByTdr }));
+        size_t chunkRowsCap = std::min<size_t>({ static_cast<size_t>(height), maxRowsByMem, maxRowsByTdr });
+        if (chunkRowsCap < static_cast<size_t>(height) && chunkRowsCap >= 16)
+        {
+            chunkRowsCap &= ~static_cast<size_t>(15);
+        }
+        const int maxChunkRows = static_cast<int>(chunkRowsCap);
         const size_t primaryChunkCap = static_cast<size_t>(width) * static_cast<size_t>(maxChunkRows);
 
         if (!m_impl->EnsureStructuredUavSrvBuffer(
@@ -1100,7 +1136,8 @@ namespace Mandelbrot
 
             if (!m_impl->UploadFractalCb(
                 mode, config, refState, juliaCx, juliaCy, juliaBailout2,
-                static_cast<uint32_t>(rowStart), 0u, 0u))
+                static_cast<uint32_t>(rowStart), 0u, 0u, 0u,
+                static_cast<uint32_t>(rowStart + chunkRows)))
             {
                 m_impl->UnbindComputeResources();
                 return false;
@@ -1116,6 +1153,7 @@ namespace Mandelbrot
             D3D11_MAPPED_SUBRESOURCE mapped{};
             if (FAILED(m_impl->context->Map(m_impl->outItersStaging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
             {
+                m_impl->CheckDeviceLost();
                 m_impl->UnbindComputeResources();
                 return false;
             }
@@ -1256,6 +1294,7 @@ namespace Mandelbrot
                     D3D11_MAPPED_SUBRESOURCE mapped{};
                     if (FAILED(m_impl->context->Map(m_impl->subOutStaging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
                     {
+                        m_impl->CheckDeviceLost();
                         subpixelSamples->clear();
                         m_impl->UnbindComputeResources();
                         return false;

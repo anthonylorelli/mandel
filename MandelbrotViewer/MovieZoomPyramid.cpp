@@ -121,8 +121,13 @@ namespace Mandelbrot
             std::vector<float>& outLinearBgr,
             const std::atomic<bool>& cancel)
         {
+            if (outW <= 0 || outH <= 0 || srcKf.width <= 0 || srcKf.height <= 0 ||
+                srcPixels.size() < static_cast<size_t>(srcKf.width) * static_cast<size_t>(srcKf.height))
+            {
+                outLinearBgr.clear();
+                return;
+            }
             outLinearBgr.resize(static_cast<size_t>(outW) * static_cast<size_t>(outH) * 3);
-            if (outW <= 0 || outH <= 0) return;
 
             const auto t = ComputeCameraToKeyframe(srcKf, dstCam);
             const auto& colors = detail::LinearSrgbTables::Instance();
@@ -507,7 +512,9 @@ namespace Mandelbrot
             const double subZoom = outerKeyframe.zoom * (static_cast<double>(outerKeyframe.width) / static_cast<double>(stripW));
             return std::isfinite(subZoom) && subZoom <= MaxZoom * 0.99;
         };
-        if (!stripZoomOk(sx0 + 1) || !stripZoomOk(outerKeyframe.width - sx1 + 1))
+        const bool leftOk = (sx0 == 0) || stripZoomOk(sx0 + 1);
+        const bool rightOk = (sx1 == outerKeyframe.width) || stripZoomOk(outerKeyframe.width - sx1 + 1);
+        if (!leftOk || !rightOk)
         {
             return rect;
         }
@@ -750,12 +757,15 @@ namespace Mandelbrot
     {
         const int outW = outputCamera.width;
         const int outH = outputCamera.height;
-        const size_t totalPixels = static_cast<size_t>(outW) * static_cast<size_t>(outH);
-        outPixels.resize(totalPixels);
-        if (outW <= 0 || outH <= 0 || cancel.load(std::memory_order_relaxed))
+        if (outW <= 0 || outH <= 0 || primaryKf.width <= 0 || primaryKf.height <= 0 ||
+            primaryPixels.size() < static_cast<size_t>(primaryKf.width) * static_cast<size_t>(primaryKf.height) ||
+            cancel.load(std::memory_order_relaxed))
         {
+            outPixels.clear();
             return;
         }
+        const size_t totalPixels = static_cast<size_t>(outW) * static_cast<size_t>(outH);
+        outPixels.resize(totalPixels);
 
         const auto& colors = detail::LinearSrgbTables::Instance();
         const bool hasCrossfade =
@@ -832,7 +842,7 @@ namespace Mandelbrot
             boxOffB = (rhoB > 1.15f) ? (0.25f * (rhoB - 1.0f)) : 0.0f;
         }
 
-        const uint32_t tapCount = shutter->tapCount;
+        const uint32_t tapCount = std::min<uint32_t>(shutter->tapCount, GpuMovieShutterParams::kMaxTaps);
         const float invTapCount = 1.0f / static_cast<float>(tapCount);
         const float halfW = static_cast<float>(outW) * 0.5f;
         const float halfH = static_cast<float>(outH) * 0.5f;

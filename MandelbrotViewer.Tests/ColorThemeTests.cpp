@@ -182,7 +182,7 @@ TEST_CASE(ColorTheme, Recolor_HorizontalNeighborsStayWithinRows)
         std::vector<float> iterations(64 * width, 10.0f);
         for (size_t i = 0; i < iterations.size(); ++i)
         {
-            if (i % width < width / 2) iterations[i] = 10000.0f;
+            if (i % static_cast<size_t>(width) < static_cast<size_t>(width / 2)) iterations[i] = 10000.0f;
         }
         std::vector<uint32_t> pixels(iterations.size());
         theme.Recolor(iterations, pixels.data(), pixels.size(), 1.0f, 0.0f, false,

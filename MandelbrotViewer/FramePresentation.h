@@ -24,6 +24,7 @@ namespace Mandelbrot
         // pressure instead of changing which fine features are reconstructed each frame.
         frame.renderStride = 2;
         frame.edgeRefine = true;
+        if (viewport.width <= 0 || viewport.height <= 0) return frame;
         // Preserve complex-plane pixel spacing while adding an 8% guard band on each edge.
         frame.width += 2 * static_cast<int>(std::ceil(viewport.width * 0.08));
         frame.height += 2 * static_cast<int>(std::ceil(viewport.height * 0.08));
@@ -36,20 +37,27 @@ namespace Mandelbrot
         auto view = frame;
         view.width = width;
         view.height = height;
-        view.zoom *= static_cast<double>(frame.width) / width;
+        if (width > 0 && frame.width > 0)
+        {
+            view.zoom *= static_cast<double>(frame.width) / width;
+        }
         return view;
     }
 
     // Pixel-boundary coordinates: a sample at index (x,y) is located at (x+0.5,y+0.5).
     inline FrameTransform FrameToViewport(const MandelbrotConfig& frame, const MandelbrotConfig& view)
     {
+        if (frame.width <= 0 || view.width <= 0 || !(frame.zoom > 0.0) || !(view.zoom > 0.0)) return {};
+        BigFloat frameCx, frameCy, viewCx, viewCy;
+        frame.ResolveHpCenter(frameCx, frameCy);
+        view.ResolveHpCenter(viewCx, viewCy);
         const double pixelsPerUnit = (view.zoom / 3.0) * view.width;
         const double scale = (view.zoom / frame.zoom) * (static_cast<double>(view.width) / frame.width);
         return { scale,
             view.width * 0.5 - frame.width * 0.5 * scale +
-                (frame.hpCenterX - view.hpCenterX).ToDouble() * pixelsPerUnit,
+                (frameCx - viewCx).ToDouble() * pixelsPerUnit,
             view.height * 0.5 - frame.height * 0.5 * scale +
-                (view.hpCenterY - frame.hpCenterY).ToDouble() * pixelsPerUnit };
+                (viewCy - frameCy).ToDouble() * pixelsPerUnit };
     }
 
     inline bool FrameCoversViewport(const MandelbrotConfig& frame, const MandelbrotConfig& view)
@@ -71,22 +79,28 @@ namespace Mandelbrot
     // Centers must be weighted by zoom to make translation linear along with scale.
     inline MandelbrotConfig InterpolateCamera(const MandelbrotConfig& from, const MandelbrotConfig& to, double progress)
     {
-        if (progress <= 0.0) return from;
+        if (progress <= 0.0 || !(from.zoom > 0.0) || !(to.zoom > 0.0)) return from;
         if (progress >= 1.0) return to;
+        BigFloat fromCx, fromCy, toCx, toCy;
+        from.ResolveHpCenter(fromCx, fromCy);
+        to.ResolveHpCenter(toCx, toCy);
         auto view = to;
         const double ratio = to.zoom / from.zoom;
         const double scale = 1.0 + progress * (ratio - 1.0);
         view.zoom = std::clamp(from.zoom * scale, MandelbrotEngine::MinZoom, MandelbrotEngine::MaxZoom);
         const BigFloat weight(progress * ratio / scale);
-        view.SetCenter(from.hpCenterX + (to.hpCenterX - from.hpCenterX) * weight,
-            from.hpCenterY + (to.hpCenterY - from.hpCenterY) * weight);
+        view.SetCenter(fromCx + (toCx - fromCx) * weight,
+            fromCy + (toCy - fromCy) * weight);
         return view;
     }
 
     inline MandelbrotConfig LimitCameraToFrame(
         const MandelbrotConfig& frame, const MandelbrotConfig& from, const MandelbrotConfig& requested)
     {
-        if (requested.fractalType != from.fractalType || requested.width != from.width || requested.height != from.height)
+        if (requested.fractalType != from.fractalType ||
+            requested.juliaSet != from.juliaSet ||
+            (from.juliaSet && (requested.juliaX != from.juliaX || requested.juliaY != from.juliaY)) ||
+            requested.width != from.width || requested.height != from.height)
             return from;
         if (!FrameCoversViewport(frame, from)) return FrameViewport(frame, requested.width, requested.height);
         const auto a = FrameToViewport(frame, from);

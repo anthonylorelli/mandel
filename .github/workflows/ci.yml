@@ -7,6 +7,9 @@ on:
     branches: [ main, dev ]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     name: Build & Test (${{ matrix.platform }} ${{ matrix.configuration }})
@@ -49,21 +52,32 @@ jobs:
         if: matrix.platform == 'ARM64'
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vsPath = & $vswhere -latest -products * -Property installationPath
+          if ([string]::IsNullOrWhiteSpace($vsPath)) {
+            throw "Visual Studio installation not found via vswhere."
+          }
           $arm64Cl = Get-ChildItem -Path "$vsPath\VC\Tools\MSVC" -Filter "cl.exe" -Recurse -ErrorAction SilentlyContinue |
             Where-Object { $_.FullName -match "Hostx64\\arm64\\cl\.exe$" }
           if (-not $arm64Cl) {
             Write-Host "Installing MSVC ARM64 build tools..."
             $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
-            Start-Process -FilePath $installer -ArgumentList "modify --installPath `"$vsPath`" --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --add Microsoft.VisualStudio.Component.VC.Runtimes.ARM64.Spectre --quiet --norestart" -Wait -NoNewWindow
+            $proc = Start-Process -FilePath $installer -ArgumentList "modify --installPath `"$vsPath`" --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --add Microsoft.VisualStudio.Component.VC.Runtimes.ARM64.Spectre --quiet --norestart" -Wait -NoNewWindow -PassThru
+            if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
+              throw "vs_installer.exe failed with exit code $($proc.ExitCode)"
+            }
           }
 
       - name: Build solution (${{ matrix.platform }} | ${{ matrix.configuration }})
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vsPath = & $vswhere -latest -products * -Property installationPath
+          if ([string]::IsNullOrWhiteSpace($vsPath)) {
+            throw "Visual Studio installation not found via vswhere."
+          }
 
           # Use v145 (VS 2026) if available on the runner; otherwise fall back to v143 (VS 2022)
           $v145Props = Join-Path $vsPath "MSBuild\Microsoft\VC\v180\Platforms\${{ matrix.platform }}\PlatformToolsets\v145\Toolset.props"
@@ -96,17 +110,20 @@ jobs:
             /p:TargetPlatformVersion=$targetSdk `
             /p:MultiProcessorCompilation=true `
             /v:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run unit tests (${{ matrix.platform }})
         if: matrix.run_tests
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $testExe = ".\${{ matrix.platform }}\${{ matrix.configuration }}\MandelbrotViewer.Tests.exe"
           if (-not (Test-Path $testExe)) {
             Write-Error "Test executable not found at $testExe"
             exit 1
           }
           & $testExe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload build artifacts (${{ matrix.platform }})
         uses: actions/upload-artifact@v7

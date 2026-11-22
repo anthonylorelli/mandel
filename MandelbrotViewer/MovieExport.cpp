@@ -86,7 +86,8 @@ namespace Mandelbrot
             const detail::LinearSrgbTables& colors,
             const std::atomic<bool>& cancel)
         {
-            const uint32_t tapCount = shutter.tapCount;
+            const uint32_t tapCount = std::min<uint32_t>(shutter.tapCount, GpuMovieShutterParams::kMaxTaps);
+            if (tapCount == 0 || width <= 0 || height <= 0) return;
             const float halfW = static_cast<float>(width) * 0.5f;
             const float halfH = static_cast<float>(height) * 0.5f;
             const float maxPx = static_cast<float>(width - 1);
@@ -296,10 +297,9 @@ namespace Mandelbrot
                 gpuMultiPassEligible
                     ? std::min(std::max(1, camera.maxIterations), 12288)
                     : std::max(1, camera.maxIterations));
-            const int maxStripByTdr = std::max(
-                16,
-                static_cast<int>(12'000'000'000ULL /
-                    (static_cast<uint64_t>(plan.width) * effectiveDispatchIters)));
+            const uint64_t maxStripByTdr64 = 12'000'000'000ULL /
+                (static_cast<uint64_t>(plan.width) * effectiveDispatchIters);
+            const int maxStripByTdr = static_cast<int>(std::clamp<uint64_t>(maxStripByTdr64, 16ULL, static_cast<uint64_t>(plan.height)));
             const int gpuBandRows = std::min({ bandRows, maxStripByMem, maxStripByTdr });
 
             if (hasShutter && !gpuFullFrame)
@@ -354,6 +354,11 @@ namespace Mandelbrot
                 }
                 return output;
             }
+        }
+
+        if (engine.GetExecutionMode() == ExecutionMode::Gpu)
+        {
+            engine.SetExecutionMode(ExecutionMode::Automatic);
         }
 
         if (hasShutter)
@@ -474,10 +479,9 @@ namespace Mandelbrot
                     gpuMultiPassEligible
                         ? std::min(std::max(1, subCam.maxIterations), 12288)
                         : std::max(1, subCam.maxIterations));
-                const int maxStripByTdr = std::max(
-                    16,
-                    static_cast<int>(12'000'000'000ULL /
-                        (static_cast<uint64_t>(subW) * effectiveDispatchIters)));
+                const uint64_t maxStripByTdr64 = 12'000'000'000ULL /
+                    (static_cast<uint64_t>(subW) * effectiveDispatchIters);
+                const int maxStripByTdr = static_cast<int>(std::clamp<uint64_t>(maxStripByTdr64, 16ULL, static_cast<uint64_t>(rh)));
                 const int gpuBandRows = std::min({ bandRows, maxStripByMem, maxStripByTdr });
 
                 std::vector<uint32_t> gpuRectScratch;
@@ -575,6 +579,17 @@ namespace Mandelbrot
             }
 
             // CPU fallback path
+            const ExecutionMode savedRectMode = engine.GetExecutionMode();
+            struct RectFallbackModeGuard
+            {
+                MandelbrotEngine& eng;
+                ExecutionMode prev;
+                ~RectFallbackModeGuard() { eng.SetExecutionMode(prev); }
+            } rectModeGuard{ engine, savedRectMode };
+            if (savedRectMode == ExecutionMode::Gpu)
+            {
+                engine.SetExecutionMode(ExecutionMode::Automatic);
+            }
             std::vector<float> iterations;
             std::vector<SubpixelSamples> subpixels;
             std::vector<uint32_t> painted;
@@ -735,12 +750,22 @@ namespace Mandelbrot
         , m_total(plan.FrameCount())
         , m_startTime(std::chrono::steady_clock::now())
     {
+        if (destination.empty())
+            throw std::invalid_argument("Movie export destination path is empty.");
         plan.Validate();
         m_planning.store(plan.autoRetarget);
         m_worker = std::thread([this, plan = std::move(plan), destination = std::move(destination)]() mutable
         { Run(std::move(plan), std::move(destination)); });
     }
     MovieExporter::~MovieExporter() { Stop(); }
+    void MovieExporter::Cancel()
+    {
+        {
+            std::lock_guard lock(m_queueMutex);
+            m_cancel.store(true, std::memory_order_release);
+        }
+        m_queueCv.notify_all();
+    }
     void MovieExporter::Stop() { Cancel(); if (m_worker.joinable()) m_worker.join(); }
     MovieProgress MovieExporter::Progress() const
     {
@@ -791,10 +816,9 @@ namespace Mandelbrot
                     }
                 }
                 struct PendingFrame { uint32_t frame{}; std::vector<uint32_t> pixels; };
-                std::mutex queueMutex;
-                std::condition_variable queueCv;
                 std::optional<PendingFrame> pending;
                 bool renderDone = false;
+                bool encoderDone = false;
                 std::exception_ptr writerException;
 
                 std::thread encoderThread([&]()
@@ -806,12 +830,12 @@ namespace Mandelbrot
                         {
                             PendingFrame item;
                             {
-                                std::unique_lock lock(queueMutex);
-                                queueCv.wait(lock, [&]
+                                std::unique_lock lock(m_queueMutex);
+                                m_queueCv.wait(lock, [&]
                                 {
-                                    return pending.has_value() || renderDone || m_cancel.load(std::memory_order_relaxed);
+                                    return pending.has_value() || renderDone || m_cancel.load(std::memory_order_acquire);
                                 });
-                                if (m_cancel.load(std::memory_order_relaxed)) break;
+                                if (m_cancel.load(std::memory_order_acquire)) break;
                                 if (!pending.has_value())
                                 {
                                     if (renderDone) break;
@@ -820,7 +844,7 @@ namespace Mandelbrot
                                 item = std::move(*pending);
                                 pending.reset();
                             }
-                            queueCv.notify_one();
+                            m_queueCv.notify_one();
 
                             ThrowIfCanceled(m_cancel);
                             writer.WriteFrame(item.pixels);
@@ -838,10 +862,15 @@ namespace Mandelbrot
                     }
                     catch (...)
                     {
-                        std::lock_guard lock(queueMutex);
+                        std::lock_guard lock(m_queueMutex);
                         writerException = std::current_exception();
                     }
-                    queueCv.notify_all();
+                    {
+                        std::lock_guard lock(m_queueMutex);
+                        pending.reset();
+                        encoderDone = true;
+                    }
+                    m_queueCv.notify_all();
                 });
 
                 struct EncoderGuard
@@ -856,14 +885,14 @@ namespace Mandelbrot
                         cv.notify_all();
                         if (thread.joinable()) thread.join();
                     }
-                } guard{queueMutex, queueCv, renderDone, encoderThread};
+                } guard{m_queueMutex, m_queueCv, renderDone, encoderThread};
 
                 const int bandBudgetPixels = (plan.useGpu && engine.IsGpuAvailable()) ? (3840 * 1080) : (1920 * 270);
                 const int exportBandRows = std::clamp(bandBudgetPixels / std::max(1, plan.width), 64, plan.height);
 
                 auto checkWriterError = [&]()
                 {
-                    std::lock_guard lock(queueMutex);
+                    std::lock_guard lock(m_queueMutex);
                     if (writerException) std::rethrow_exception(writerException);
                 };
 
@@ -871,17 +900,18 @@ namespace Mandelbrot
                 {
                     ThrowIfCanceled(m_cancel);
                     {
-                        std::unique_lock lock(queueMutex);
-                        queueCv.wait(lock, [&]
+                        std::unique_lock lock(m_queueMutex);
+                        m_queueCv.wait(lock, [&]
                         {
-                            return !pending.has_value() || writerException != nullptr || m_cancel.load(std::memory_order_relaxed);
+                            return !pending.has_value() || encoderDone || writerException != nullptr || m_cancel.load(std::memory_order_acquire);
                         });
                         if (writerException) std::rethrow_exception(writerException);
                         ThrowIfCanceled(m_cancel);
+                        if (encoderDone) throw Canceled{};
                         pending = PendingFrame{ frameIdx, std::move(framePixels) };
                         m_fraction.store(0.0f);
                     }
-                    queueCv.notify_one();
+                    m_queueCv.notify_one();
                 };
 
                 ZoomPyramidPlan pyramid = PlanZoomKeyframes(plan);
@@ -938,6 +968,9 @@ namespace Mandelbrot
                     {
                         // Zoom-out: keyframes are already ordered deepest -> shallowest, so every
                         // subsequent keyframe directly reuses the previous keyframe's interior.
+                        // Equalize maxIterations within small chunks when autoScaleIterations is on
+                        // so stitched interiors and exteriors never have mismatched iteration limits.
+                        constexpr int kZoomOutEqualizeChunk = 4;
                         std::vector<uint32_t> prevKfPixels;
                         std::vector<uint32_t> currKfPixels;
                         const int numKf = static_cast<int>(pyramid.keyframes.size());
@@ -946,9 +979,16 @@ namespace Mandelbrot
                             ThrowIfCanceled(m_cancel);
                             checkWriterError();
 
+                            const bool chunkBoundary = (k % kZoomOutEqualizeChunk) == 0;
+                            if (plan.autoScaleIterations && !chunkBoundary)
+                            {
+                                pyramid.keyframes[static_cast<size_t>(k)].camera.maxIterations =
+                                    pyramid.keyframes[static_cast<size_t>(k - 1)].camera.maxIterations;
+                            }
+
                             const auto& kfCam = pyramid.keyframes[static_cast<size_t>(k)].camera;
                             KeyframeInnerRect innerRect{};
-                            if (k > 0)
+                            if (k > 0 && (!plan.autoScaleIterations || !chunkBoundary))
                             {
                                 innerRect = ComputeInnerSkipRect(kfCam, pyramid.keyframes[static_cast<size_t>(k - 1)].camera);
                             }
@@ -1083,10 +1123,10 @@ namespace Mandelbrot
                 }
 
                 {
-                    std::lock_guard lock(queueMutex);
+                    std::lock_guard lock(m_queueMutex);
                     renderDone = true;
                 }
-                queueCv.notify_all();
+                m_queueCv.notify_all();
                 if (encoderThread.joinable()) encoderThread.join();
                 if (writerException) std::rethrow_exception(writerException);
                 ThrowIfCanceled(m_cancel);
@@ -1101,7 +1141,34 @@ namespace Mandelbrot
         catch (const std::exception& error)
         {
             std::lock_guard lock(m_mutex);
-            const std::string message(error.what()); m_error.assign(message.begin(), message.end());
+            const std::string message(error.what());
+#ifdef _WIN32
+            const int needed = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, message.data(), static_cast<int>(message.size()), nullptr, 0);
+            if (needed > 0)
+            {
+                m_error.resize(static_cast<size_t>(needed));
+                MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, message.data(), static_cast<int>(message.size()), m_error.data(), needed);
+            }
+            else
+            {
+                const int acpNeeded = MultiByteToWideChar(CP_ACP, 0, message.data(), static_cast<int>(message.size()), nullptr, 0);
+                if (acpNeeded > 0)
+                {
+                    m_error.resize(static_cast<size_t>(acpNeeded));
+                    MultiByteToWideChar(CP_ACP, 0, message.data(), static_cast<int>(message.size()), m_error.data(), acpNeeded);
+                }
+                else
+                {
+                    m_error.clear();
+                    m_error.reserve(message.size());
+                    for (unsigned char c : message) m_error.push_back(static_cast<wchar_t>(c));
+                }
+            }
+#else
+            m_error.clear();
+            m_error.reserve(message.size());
+            for (unsigned char c : message) m_error.push_back(static_cast<wchar_t>(c));
+#endif
         }
         catch (...) { std::lock_guard lock(m_mutex); m_error = L"Unexpected movie export error."; }
         if (ownsStaging && !staging.empty()) { std::error_code ignored; std::filesystem::remove(staging, ignored); }

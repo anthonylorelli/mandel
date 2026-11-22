@@ -82,16 +82,25 @@ groupshared uint s_groupBase;
 void Renorm2(inout float mx, inout float my, inout int e)
 {
     float a = max(abs(mx), abs(my));
-    if (a == 0.0f) { mx = 0.0f; my = 0.0f; e = -1073741824; return; }
+    if (!(a > 0.0f)) { mx = 0.0f; my = 0.0f; e = -1073741824; return; }
     if (a < 1.1754944e-38f)
     {
         mx *= 16777216.0f;
         my *= 16777216.0f;
         e -= 24;
         a = max(abs(mx), abs(my));
+        if (!(a > 0.0f)) { mx = 0.0f; my = 0.0f; e = -1073741824; return; }
     }
     uint bits = asuint(a);
     int biasedExp = int((bits >> 23) & 255u);
+    if (biasedExp >= 255) { mx = 0.0f; my = 0.0f; e = -1073741824; return; }
+    if (biasedExp >= 253)
+    {
+        mx *= 0.25f;
+        my *= 0.25f;
+        e += 2;
+        biasedExp -= 2;
+    }
     int rawExp = biasedExp - 126;
     int scaleBiased = clamp(253 - biasedExp, 1, 254);
     float scale = asfloat(uint(scaleBiased) << 23);
@@ -162,6 +171,7 @@ bool StepDeepExp(
 
     uint stopIter = min(iterLimit, maxIter);
     float escZx = 0.0f, escZy = 0.0f;
+    int escExp = 0;
     bool escaped = false;
 
     // Exact cycle check on m == 0 rebases (zero instructions inside tight inner loops)
@@ -246,18 +256,19 @@ bool StepDeepExp(
 
         if (dExp > 10)
         {
-            escZx = dmx * 1024.0f;
-            escZy = dmy * 1024.0f;
+            escZx = dmx;
+            escZy = dmy;
+            escExp = dExp;
             escaped = true;
             break;
         }
-        if (rExp >= 2 || dExp >= 2)
+        if (rExp >= 1 || dExp >= 1)
         {
             float rScale = (rExp >= -125 && rExp <= 10) ? asfloat(uint(127 + rExp) << 23) : 0.0f;
             float dScale = (dExp >= -125 && dExp <= 10) ? asfloat(uint(127 + dExp) << 23) : 0.0f;
             float zx = rmx * rScale + dmx * dScale;
             float zy = rmy * rScale + dmy * dScale;
-            if (zx * zx + zy * zy > 16.0f) { escZx = zx; escZy = zy; escaped = true; break; }
+            if (zx * zx + zy * zy > 16.0f) { escZx = zx; escZy = zy; escExp = 0; escaped = true; break; }
         }
 
         bool doRebase = (m == refLen);
@@ -296,7 +307,7 @@ bool StepDeepExp(
             }
         }
 
-        if (useBla != 0u && m >= 1u && (stopIter - iter) >= 4u && ((m - 1u) & 3u) == 0u && m + 4u <= refLen &&
+        if (useBla != 0u && m >= 1u && (maxIter - iter) >= 4u && ((m - 1u) & 3u) == 0u && m + 4u <= refLen &&
             FloatExpLess(dmx, dmy, dExp, blaMaxRadMant, blaMaxRadExp))
         {
             uint start = m - 1u;
@@ -306,7 +317,7 @@ bool StepDeepExp(
             for (int lv = int(top); lv >= 2; --lv)
             {
                 uint len = 1u << uint(lv);
-                if (len > (stopIter - iter) || m + len > refLen) continue;
+                if (len > (maxIter - iter) || m + len > refLen) continue;
                 uint2 meta = BlaMeta[lv];
                 uint idx = start >> uint(lv);
                 if (idx >= meta.y) continue;
@@ -351,6 +362,14 @@ bool StepDeepExp(
     if (smoothFlag == 0u)
     {
         outResult = float(iter);
+        return true;
+    }
+
+    if (escExp > 0)
+    {
+        float log2Mod = float(escExp) + 0.5f * log2(max(escZx * escZx + escZy * escZy, 1e-30f));
+        float logZ = max(log2Mod * 0.69314718f, 1e-6f);
+        outResult = max(0.0f, float(iter) + 1.0f - log2(logZ));
         return true;
     }
 
@@ -458,7 +477,7 @@ void CSPrimaryStage0(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
 }
 
 [numthreads(256, 1, 1)]
-void CSPrimaryResume(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
+void CSPrimaryResume(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
 {
     if (gi == 0u) s_groupCount = 0u;
     uint fastLim, expLim;
@@ -466,13 +485,14 @@ void CSPrimaryResume(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
     GroupMemoryBarrierWithGroupSync();
 
     uint activeTotal = SubpixelCountSrv[0];
-    bool valid = (tid.x < activeTotal);
+    uint activeIdx = (gid.y * 32768u + gid.x) * 256u + gi;
+    bool valid = (activeIdx < activeTotal);
     bool keepAlive = false;
     uint pix = 0u;
 
     if (valid)
     {
-        pix = SubpixelIndices[tid.x];
+        pix = SubpixelIndices[activeIdx];
         uint py = pix / width;
         uint px = pix - py * width;
         GpuPerturbState st = ActiveState[pix];
@@ -516,14 +536,14 @@ void CSPrimaryResume(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
 }
 
 [numthreads(256, 1, 1)]
-void CSSubpixels(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
+void CSSubpixels(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
 {
     uint fastLim, expLim;
     LoadDeepLds(gi, fastLim, expLim);
     GroupMemoryBarrierWithGroupSync();
 
     uint activeTotal = (subpixelTotal == 0xFFFFFFFFu) ? (SubpixelCountSrv[0] * 4u) : subpixelTotal;
-    uint sIdx = tid.x;
+    uint sIdx = (gid.y * 32768u + gid.x) * 256u + gi;
     if (sIdx >= activeTotal) return;
     uint pix = SubpixelIndices[sIdx >> 2];
     uint corner = sIdx & 3u;
@@ -672,8 +692,9 @@ void CSDetectBoundaries(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex
 void CSBuildIndirectArgs(uint3 tid : SV_DispatchThreadID)
 {
     uint subTotal = InSubCounter[0] * 4u;
-    OutSubpixelIndices[0] = (subTotal > 0u) ? ((subTotal + subGroupThreads - 1u) / subGroupThreads) : 0u;
-    OutSubpixelIndices[1] = 1u;
+    uint groups = (subTotal > 0u) ? ((subTotal + subGroupThreads - 1u) / subGroupThreads) : 0u;
+    OutSubpixelIndices[0] = (groups > 32768u) ? 32768u : groups;
+    OutSubpixelIndices[1] = (groups > 32768u) ? ((groups + 32767u) / 32768u) : 1u;
     OutSubpixelIndices[2] = 1u;
 }
 
@@ -681,8 +702,9 @@ void CSBuildIndirectArgs(uint3 tid : SV_DispatchThreadID)
 void CSBuildActiveIndirectArgs(uint3 tid : SV_DispatchThreadID)
 {
     uint activeTotal = InSubCounter[0];
-    OutSubpixelIndices[0] = (activeTotal > 0u) ? ((activeTotal + subGroupThreads - 1u) / subGroupThreads) : 0u;
-    OutSubpixelIndices[1] = 1u;
+    uint groups = (activeTotal > 0u) ? ((activeTotal + subGroupThreads - 1u) / subGroupThreads) : 0u;
+    OutSubpixelIndices[0] = (groups > 32768u) ? 32768u : groups;
+    OutSubpixelIndices[1] = (groups > 32768u) ? ((groups + 32767u) / 32768u) : 1u;
     OutSubpixelIndices[2] = 1u;
 }
 )";

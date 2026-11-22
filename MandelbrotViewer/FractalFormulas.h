@@ -99,7 +99,8 @@ namespace Mandelbrot::detail
         constexpr double invLn3 = 0.91023922662683739361; // 1.0 / ln(3)
         const double invLnDegree = (type == FractalType::CubicMultibrot) ? invLn3 : invLn2;
         const double mod2 = zr2 + zi2;
-        if (!std::isfinite(mod2) || mod2 <= 1.0) return 0.0f;
+        if (!std::isfinite(mod2)) return static_cast<float>(iter);
+        if (mod2 <= 1.0) return 0.0f;
         const double logZn = std::log(mod2) * 0.5;
         const double nu = smoothIter + 1.0 - std::log(logZn) * invLnDegree;
         return static_cast<float>(nu > 0.0 ? nu : 0.0);

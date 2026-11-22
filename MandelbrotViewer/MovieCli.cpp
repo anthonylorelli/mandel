@@ -4,6 +4,8 @@
 #endif
 #include <windows.h>
 #include <shellapi.h>
+#include <fcntl.h>
+#include <io.h>
 #pragma comment(lib, "shell32.lib")
 #endif
 
@@ -40,6 +42,7 @@ namespace Mandelbrot
         {
             std::wstring out;
             out.reserve(utf8.size());
+            auto isCont = [](uint8_t b) noexcept { return (b & 0xC0u) == 0x80u; };
             size_t i = 0;
             while (i < utf8.size())
             {
@@ -49,34 +52,40 @@ namespace Mandelbrot
                     out.push_back(static_cast<wchar_t>(b0));
                     ++i;
                 }
-                else if ((b0 & 0xE0) == 0xC0 && i + 1 < utf8.size())
+                else if ((b0 & 0xE0u) == 0xC0u && i + 1 < utf8.size() &&
+                         isCont(static_cast<uint8_t>(utf8[i + 1])))
                 {
                     const uint32_t cp = ((b0 & 0x1Fu) << 6) | (static_cast<uint8_t>(utf8[i + 1]) & 0x3Fu);
+                    if (cp < 0x80u) { out.push_back(L'?'); ++i; continue; }
                     out.push_back(static_cast<wchar_t>(cp));
                     i += 2;
                 }
-                else if ((b0 & 0xF0) == 0xE0 && i + 2 < utf8.size())
+                else if ((b0 & 0xF0u) == 0xE0u && i + 2 < utf8.size() &&
+                         isCont(static_cast<uint8_t>(utf8[i + 1])) &&
+                         isCont(static_cast<uint8_t>(utf8[i + 2])))
                 {
                     const uint32_t cp = ((b0 & 0x0Fu) << 12) |
                         ((static_cast<uint8_t>(utf8[i + 1]) & 0x3Fu) << 6) |
                         (static_cast<uint8_t>(utf8[i + 2]) & 0x3Fu);
+                    if (cp < 0x800u || (cp >= 0xD800u && cp <= 0xDFFFu)) { out.push_back(L'?'); ++i; continue; }
                     out.push_back(static_cast<wchar_t>(cp));
                     i += 3;
                 }
-                else if ((b0 & 0xF8) == 0xF0 && i + 3 < utf8.size())
+                else if ((b0 & 0xF8u) == 0xF0u && i + 3 < utf8.size() &&
+                         isCont(static_cast<uint8_t>(utf8[i + 1])) &&
+                         isCont(static_cast<uint8_t>(utf8[i + 2])) &&
+                         isCont(static_cast<uint8_t>(utf8[i + 3])))
                 {
                     const uint32_t cp = ((b0 & 0x07u) << 18) |
                         ((static_cast<uint8_t>(utf8[i + 1]) & 0x3Fu) << 12) |
                         ((static_cast<uint8_t>(utf8[i + 2]) & 0x3Fu) << 6) |
                         (static_cast<uint8_t>(utf8[i + 3]) & 0x3Fu);
+                    if (cp < 0x10000u || cp > 0x10FFFFu) { out.push_back(L'?'); ++i; continue; }
                     if constexpr (sizeof(wchar_t) == 2)
                     {
-                        if (cp >= 0x10000u && cp <= 0x10FFFFu)
-                        {
-                            const uint32_t v = cp - 0x10000u;
-                            out.push_back(static_cast<wchar_t>(0xD800u + (v >> 10)));
-                            out.push_back(static_cast<wchar_t>(0xDC00u + (v & 0x3FFu)));
-                        }
+                        const uint32_t v = cp - 0x10000u;
+                        out.push_back(static_cast<wchar_t>(0xD800u + (v >> 10)));
+                        out.push_back(static_cast<wchar_t>(0xDC00u + (v & 0x3FFu)));
                     }
                     else
                     {
@@ -491,21 +500,47 @@ namespace Mandelbrot
                         case 't': result.push_back('\t'); break;
                         case 'u':
                         {
-                            if (m_pos + 4 > m_text.size()) throw std::invalid_argument("Invalid \\u escape in JSON string.");
-                            uint32_t cp = 0;
-                            const auto [ptr, ec] = std::from_chars(m_text.data() + m_pos, m_text.data() + m_pos + 4, cp, 16);
-                            if (ec != std::errc{} || ptr != m_text.data() + m_pos + 4)
-                                throw std::invalid_argument("Invalid hex digits in \\u escape in JSON string.");
-                            m_pos += 4;
-                            if (cp < 0x80) result.push_back(static_cast<char>(cp));
-                            else if (cp < 0x800)
+                            auto parseHex4 = [&]() -> uint32_t
+                            {
+                                if (m_pos + 4 > m_text.size()) throw std::invalid_argument("Invalid \\u escape in JSON string.");
+                                uint32_t v = 0;
+                                const auto [ptr, ec] = std::from_chars(m_text.data() + m_pos, m_text.data() + m_pos + 4, v, 16);
+                                if (ec != std::errc{} || ptr != m_text.data() + m_pos + 4)
+                                    throw std::invalid_argument("Invalid hex digits in \\u escape in JSON string.");
+                                m_pos += 4;
+                                return v;
+                            };
+                            uint32_t cp = parseHex4();
+                            if (cp >= 0xD800u && cp <= 0xDBFFu)
+                            {
+                                if (m_pos + 2 > m_text.size() || m_text[m_pos] != '\\' || m_text[m_pos + 1] != 'u')
+                                    throw std::invalid_argument("Unpaired high surrogate in JSON string.");
+                                m_pos += 2;
+                                const uint32_t lo = parseHex4();
+                                if (lo < 0xDC00u || lo > 0xDFFFu)
+                                    throw std::invalid_argument("Invalid low surrogate in JSON string.");
+                                cp = 0x10000u + (((cp - 0xD800u) << 10) | (lo - 0xDC00u));
+                            }
+                            else if (cp >= 0xDC00u && cp <= 0xDFFFu)
+                            {
+                                throw std::invalid_argument("Unpaired low surrogate in JSON string.");
+                            }
+                            if (cp < 0x80u) result.push_back(static_cast<char>(cp));
+                            else if (cp < 0x800u)
                             {
                                 result.push_back(static_cast<char>(0xC0u | (cp >> 6)));
                                 result.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
                             }
-                            else
+                            else if (cp < 0x10000u)
                             {
                                 result.push_back(static_cast<char>(0xE0u | (cp >> 12)));
+                                result.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+                                result.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+                            }
+                            else
+                            {
+                                result.push_back(static_cast<char>(0xF0u | (cp >> 18)));
+                                result.push_back(static_cast<char>(0x80u | ((cp >> 12) & 0x3Fu)));
                                 result.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
                                 result.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
                             }
@@ -562,6 +597,11 @@ namespace Mandelbrot
                 const std::string raw(m_text.substr(start, m_pos - start));
                 double value = 0.0;
                 const auto [ptr, ec] = std::from_chars(raw.data(), raw.data() + raw.size(), value);
+                if (ec == std::errc::result_out_of_range && ptr == raw.data() + raw.size() && value == 0.0)
+                {
+                    // Sub-double underflow (e.g., 1e-350): retain exact raw text for BigFloat fields.
+                    return JsonValue{ JsonValue::Number{ raw, 0.0 } };
+                }
                 if (ec != std::errc{} || ptr != raw.data() + raw.size() || !std::isfinite(value))
                 {
                     throw std::invalid_argument("Out-of-range number in JSON config.");
@@ -569,8 +609,12 @@ namespace Mandelbrot
                 return JsonValue{ JsonValue::Number{ raw, value } };
             }
 
+            static constexpr int kMaxNestingDepth = 64;
+
             JsonValue ParseArray()
             {
+                if (++m_depth > kMaxNestingDepth) throw std::invalid_argument("JSON config exceeds maximum nesting depth.");
+                struct DepthGuard { int& d; ~DepthGuard() { --d; } } guard{ m_depth };
                 ++m_pos; // '['
                 JsonValue::Array arr;
                 SkipWhitespace();
@@ -593,6 +637,8 @@ namespace Mandelbrot
 
             JsonValue ParseObject()
             {
+                if (++m_depth > kMaxNestingDepth) throw std::invalid_argument("JSON config exceeds maximum nesting depth.");
+                struct DepthGuard { int& d; ~DepthGuard() { --d; } } guard{ m_depth };
                 ++m_pos; // '{'
                 JsonValue::Object obj;
                 SkipWhitespace();
@@ -621,6 +667,7 @@ namespace Mandelbrot
 
             std::string_view m_text;
             size_t m_pos{ 0 };
+            int m_depth{ 0 };
         };
 
         bool TryExtractJsonBigFloat(const JsonValue& v, BigFloat& out)
@@ -736,7 +783,7 @@ namespace Mandelbrot
                 const bool hadStdout = IsValidStdHandle(GetStdHandle(STD_OUTPUT_HANDLE));
                 const bool hadStderr = IsValidStdHandle(GetStdHandle(STD_ERROR_HANDLE));
                 const bool hadStdin = IsValidStdHandle(GetStdHandle(STD_INPUT_HANDLE));
-                if (!hadStdout || !hadStderr || (allowAllocConsole && !hadStdin))
+                if (GetConsoleWindow() == nullptr)
                 {
                     bool acquired = AttachConsole(ATTACH_PARENT_PROCESS) != 0;
                     if (!acquired && allowAllocConsole && !hadStdout)
@@ -766,6 +813,9 @@ namespace Mandelbrot
                         }
                     }
                 }
+                // ConsoleAscii writes narrow UTF-8 bytes to std::cout; wide CLI modes write to std::wcout.
+                if (!allowAllocConsole && _fileno(stdout) >= 0) (void)_setmode(_fileno(stdout), _O_U8TEXT);
+                if (_fileno(stderr) >= 0) (void)_setmode(_fileno(stderr), _O_U8TEXT);
                 stdoutIsConsole = IsConsoleHandle(GetStdHandle(STD_OUTPUT_HANDLE));
             }
 
@@ -978,17 +1028,19 @@ namespace Mandelbrot
         if (const auto it = obj->find("frequency"); it != obj->end())
         {
             const auto* n = std::get_if<JsonValue::Number>(&it->second.data);
-            if (!n || !std::isfinite(n->numeric) || n->numeric <= 0.0)
+            const float f = n ? static_cast<float>(n->numeric) : 0.0f;
+            if (!n || !std::isfinite(f) || !(f > 0.0f))
                 throw std::invalid_argument("Invalid 'frequency' in config JSON.");
-            plan.frequency = static_cast<float>(n->numeric);
+            plan.frequency = f;
         }
 
         if (const auto it = obj->find("phaseOffset"); it != obj->end())
         {
             const auto* n = std::get_if<JsonValue::Number>(&it->second.data);
-            if (!n || !std::isfinite(n->numeric))
+            const float f = n ? static_cast<float>(n->numeric) : 0.0f;
+            if (!n || !std::isfinite(f))
                 throw std::invalid_argument("Invalid 'phaseOffset' in config JSON.");
-            plan.phase = static_cast<float>(n->numeric);
+            plan.phase = f;
         }
 
         if (const auto it = obj->find("invert"); it != obj->end())
@@ -1209,7 +1261,7 @@ namespace Mandelbrot
                         if (!outputPath.empty()) return fail(L"Output path specified more than once.");
                         outputPath.assign(*inlineValue);
                     }
-                    else if (i + 1 < args.size() && !args[i + 1].empty() && args[i + 1][0] != L'-')
+                    else if (i + 1 < args.size() && !args[i + 1].empty() && args[i + 1][0] != L'-' && args[i + 1] != L"/?")
                     {
                         if (!outputPath.empty()) return fail(L"Output path specified more than once.");
                         outputPath = args[++i];
@@ -1434,17 +1486,21 @@ namespace Mandelbrot
                 {
                     double v = 0.0;
                     const auto val = takeValue("--frequency");
-                    if (!TryParseDouble(val, v) || v <= 0.0)
+                    const bool ok = TryParseDouble(val, v);
+                    const float f = static_cast<float>(v);
+                    if (!ok || !std::isfinite(f) || !(f > 0.0f))
                         return fail(L"Invalid --frequency (expected positive number): " + std::wstring(val));
-                    frequency = static_cast<float>(v);
+                    frequency = f;
                 }
                 else if (flagView == L"--phase")
                 {
                     double v = 0.0;
                     const auto val = takeValue("--phase");
-                    if (!TryParseDouble(val, v))
+                    const bool ok = TryParseDouble(val, v);
+                    const float f = static_cast<float>(v);
+                    if (!ok || !std::isfinite(f))
                         return fail(L"Invalid --phase (expected finite number): " + std::wstring(val));
-                    phase = static_cast<float>(v);
+                    phase = f;
                 }
                 else if (flagView == L"--invert")
                 {
@@ -1763,7 +1819,7 @@ namespace Mandelbrot
                 {
                     return fail(L"Julia mode is only supported for Mandelbrot and Burning Ship.");
                 }
-                if (juliaRequested)
+                if (juliaRequested || (fractalImpliedJulia && *fractalImpliedJulia))
                 {
                     plan.start.juliaSet = true;
                     if (juliaX) plan.start.juliaX = *juliaX;
@@ -2045,7 +2101,9 @@ namespace Mandelbrot
                 ? (plan.start.fractalType == FractalType::BurningShip ? L"Burning Ship Julia Set" : L"Julia Set")
                 : GetFractalTypeName(plan.start.fractalType);
             const wchar_t* codecName = (plan.codec == MovieCodec::Hevc) ? L"HEVC" : L"H.264";
-            out << L"Exporting zoom movie: " << options.outputPath << L"\n"
+            std::wostringstream hdr;
+            hdr.imbue(std::locale::classic());
+            hdr << L"Exporting zoom movie: " << options.outputPath << L"\n"
                 << L"  Fractal: " << fractalName
                 << L" | " << plan.width << L"x" << plan.height
                 << L" @ " << plan.fps << L" fps | " << plan.seconds << L"s (" << plan.FrameCount() << L" frames) | "
@@ -2053,12 +2111,13 @@ namespace Mandelbrot
                 << L"  Zoom: " << FormatZoomShort(plan.start.zoom) << L" -> " << FormatZoomShort(plan.endZoom);
             if (plan.autoRetarget)
             {
-                out << L" | Target: Auto-Pick (seed " << plan.targetSeed << L")\n";
+                hdr << L" | Target: Auto-Pick (seed " << plan.targetSeed << L")\n";
             }
             else
             {
-                out << L" | Target: (" << plan.targetX.ToWString(12) << L", " << plan.targetY.ToWString(12) << L")\n";
+                hdr << L" | Target: (" << plan.targetX.ToWString(12) << L", " << plan.targetY.ToWString(12) << L")\n";
             }
+            out << hdr.str();
             out.flush();
         }
 

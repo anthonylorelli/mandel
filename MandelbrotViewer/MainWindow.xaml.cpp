@@ -1075,6 +1075,7 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::OnZoomSpeedSliderChanged(IInspectable const&, Primitives::RangeBaseValueChangedEventArgs const& e)
     {
+        if (IsSuppressingEvents()) return;
         m_zoomSpeed = e.NewValue();
         if (ZoomSpeedValueText())
         {
@@ -1433,6 +1434,7 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::OnFrequencySliderChanged(IInspectable const&, Primitives::RangeBaseValueChangedEventArgs const& e)
     {
+        if (IsSuppressingEvents()) return;
         m_frequency = static_cast<float>(e.NewValue());
         if (FrequencyValueText())
         {
@@ -1440,19 +1442,18 @@ namespace winrt::MandelbrotViewer::implementation
             FrequencyValueText().Text(FormatFloat(m_frequency, decimals) + L"x");
         }
 
-        if (IsSuppressingEvents()) return;
         RecolorBuffer();
     }
 
     void MainWindow::OnPhaseSliderChanged(IInspectable const&, Primitives::RangeBaseValueChangedEventArgs const& e)
     {
+        if (IsSuppressingEvents()) return;
         m_phaseOffset = static_cast<float>(e.NewValue());
         if (PhaseValueText())
         {
             PhaseValueText().Text(FormatFloat(m_phaseOffset, 2));
         }
 
-        if (IsSuppressingEvents()) return;
         RecolorBuffer();
     }
 
@@ -1470,12 +1471,14 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::OnInvertChecked(IInspectable const&, RoutedEventArgs const&)
     {
+        if (IsSuppressingEvents()) return;
         m_invertColors = true;
         RecolorBuffer();
     }
 
     void MainWindow::OnInvertUnchecked(IInspectable const&, RoutedEventArgs const&)
     {
+        if (IsSuppressingEvents()) return;
         m_invertColors = false;
         RecolorBuffer();
     }
@@ -1563,18 +1566,25 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::OnStopPositionSliderChanged(IInspectable const&, Primitives::RangeBaseValueChangedEventArgs const& e)
     {
+        if (IsSuppressingEvents()) return;
         const float pos = static_cast<float>(e.NewValue());
         if (StopPositionText())
         {
             StopPositionText().Text(FormatFloat(pos, 2));
         }
 
-        if (IsSuppressingEvents()) return;
         const int index = StopSelectorComboBox().SelectedIndex();
         if (index >= 0 && index < static_cast<int>(m_theme.Stops().size()))
         {
             auto stop = m_theme.Stops()[index];
             m_theme.UpdateStop(index, pos, stop.r, stop.g, stop.b);
+            {
+                ScopedEventSuppress suppress(m_suppressEventDepth);
+                std::wostringstream ss;
+                ss << L"Stop " << (index + 1) << L" (" << static_cast<int>(pos * 100.0f) << L"%)";
+                StopSelectorComboBox().Items().SetAt(static_cast<uint32_t>(index), box_value(ss.str()));
+                StopSelectorComboBox().SelectedIndex(index);
+            }
             UpdateGradientPreview();
             RecolorBuffer();
         }
@@ -1615,8 +1625,10 @@ namespace winrt::MandelbrotViewer::implementation
 
     winrt::Windows::Foundation::IAsyncAction MainWindow::ExportViewport(bool julia)
     {
-        if (julia ? !m_juliaHasFrame : (!m_bitmap || !m_hasPresentation)) co_return;
+        if (m_imageExporting || (julia ? !m_juliaHasFrame : (!m_bitmap || !m_hasPresentation))) co_return;
         auto lifetime = get_strong();
+        m_imageExporting = true;
+        struct ExportFlagGuard { bool& flag; ~ExportFlagGuard() { flag = false; } } exportGuard{ m_imageExporting };
 
         try
         {
@@ -1640,7 +1652,7 @@ namespace winrt::MandelbrotViewer::implementation
 
             // WinUI 3 Desktop requires HWND initialization for FileSavePicker
             HWND hwnd = nullptr;
-            winrt::check_hresult(this->try_as<IWindowNative>()->get_WindowHandle(&hwnd));
+            winrt::check_hresult(this->as<IWindowNative>()->get_WindowHandle(&hwnd));
             auto initializeWithWindow = picker.as<IInitializeWithWindow>();
             winrt::check_hresult(initializeWithWindow->Initialize(hwnd));
 

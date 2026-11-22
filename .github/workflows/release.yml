@@ -32,7 +32,7 @@ on:
         type: boolean
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   prepare:
@@ -66,17 +66,29 @@ jobs:
             BUILD_NUM=$(( GITHUB_RUN_NUMBER % 65535 ))
             TAG="v0.1.0-pr.${BUILD_NUM}"
             SHOULD_PUBLISH="false"
-          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+          elif [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF}" == refs/tags/v* ]]; then
             TAG="${GITHUB_REF#refs/tags/}"
             SHOULD_PUBLISH="true"
           elif [[ -n "${INPUT_VERSION}" ]]; then
             RAW="${INPUT_VERSION#v}"
             TAG="v${RAW}"
             SHOULD_PUBLISH="${INPUT_PUBLISH:-false}"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            SHOULD_PUBLISH="${INPUT_PUBLISH:-false}"
           else
+            if [[ "${INPUT_PUBLISH:-false}" == "true" ]]; then
+              echo "Refusing to publish a GitHub Release without an explicit version or tag." >&2
+              exit 1
+            fi
             BUILD_NUM=$(( GITHUB_RUN_NUMBER % 65535 ))
             TAG="v0.1.0-ci.${BUILD_NUM}"
-            SHOULD_PUBLISH="${INPUT_PUBLISH:-false}"
+            SHOULD_PUBLISH="false"
+          fi
+
+          if ! [[ "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release tag format '${TAG}'." >&2
+            exit 1
           fi
 
           # Strip leading 'v' and any prerelease/build suffix to extract numeric version parts
@@ -89,6 +101,10 @@ jobs:
           NUMERIC="${NUMERIC%%+*}"
 
           IFS='.' read -r MAJOR MINOR PATCH BUILD REST <<< "${NUMERIC}"
+          if [[ -n "${REST:-}" ]]; then
+            echo "Invalid MSIX version '${NUMERIC}' derived from '${TAG}': expected 3 or 4 numeric components." >&2
+            exit 1
+          fi
           MAJOR="${MAJOR:-0}"
           MINOR="${MINOR:-0}"
           PATCH="${PATCH:-0}"
@@ -101,23 +117,28 @@ jobs:
           fi
 
           for PART in "${MAJOR}" "${MINOR}" "${PATCH}" "${BUILD}"; do
-            if ! [[ "${PART}" =~ ^[0-9]+$ ]] || (( PART < 0 || PART > 65535 )); then
+            if ! [[ "${PART}" =~ ^[0-9]+$ ]] || (( 10#${PART} < 0 || 10#${PART} > 65535 )); then
               echo "Invalid MSIX version component '${PART}' derived from '${TAG}'. Components must be integers 0..65535." >&2
               exit 1
             fi
           done
 
-          MSIX_VERSION="${MAJOR}.${MINOR}.${PATCH}.${BUILD}"
+          MSIX_VERSION="$((10#${MAJOR})).$((10#${MINOR})).$((10#${PATCH})).$((10#${BUILD}))"
           PACKAGE_NAME="${VAR_PACKAGE_NAME:-AnthonyLorelli.MandelbrotViewer}"
           PUBLISHER="${VAR_PUBLISHER:-CN=AnthonyLorelli}"
+
+          if [[ "${PACKAGE_NAME}" == *$'\n'* || "${PACKAGE_NAME}" == *$'\r'* || "${PUBLISHER}" == *$'\n'* || "${PUBLISHER}" == *$'\r'* ]]; then
+            echo "MSIX_PACKAGE_NAME and MSIX_PUBLISHER must not contain newlines." >&2
+            exit 1
+          fi
 
           {
             echo "tag=${TAG}"
             echo "msix_version=${MSIX_VERSION}"
-            echo "ver_major=${MAJOR}"
-            echo "ver_minor=${MINOR}"
-            echo "ver_patch=${PATCH}"
-            echo "ver_build=${BUILD}"
+            echo "ver_major=$((10#${MAJOR}))"
+            echo "ver_minor=$((10#${MINOR}))"
+            echo "ver_patch=$((10#${PATCH}))"
+            echo "ver_build=$((10#${BUILD}))"
             echo "package_name=${PACKAGE_NAME}"
             echo "publisher=${PUBLISHER}"
             echo "should_publish=${SHOULD_PUBLISH}"
@@ -168,29 +189,42 @@ jobs:
         if: matrix.platform == 'ARM64'
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vsPath = & $vswhere -latest -products * -Property installationPath
+          if ([string]::IsNullOrWhiteSpace($vsPath)) {
+            throw "Visual Studio installation not found via vswhere."
+          }
           $arm64Cl = Get-ChildItem -Path "$vsPath\VC\Tools\MSVC" -Filter "cl.exe" -Recurse -ErrorAction SilentlyContinue |
             Where-Object { $_.FullName -match "Hostx64\\arm64\\cl\.exe$" }
           if (-not $arm64Cl) {
             Write-Host "Installing MSVC ARM64 build tools..."
             $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
-            Start-Process -FilePath $installer -ArgumentList "modify --installPath `"$vsPath`" --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --add Microsoft.VisualStudio.Component.VC.Runtimes.ARM64.Spectre --quiet --norestart" -Wait -NoNewWindow
+            $proc = Start-Process -FilePath $installer -ArgumentList "modify --installPath `"$vsPath`" --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --add Microsoft.VisualStudio.Component.VC.Runtimes.ARM64.Spectre --quiet --norestart" -Wait -NoNewWindow -PassThru
+            if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
+              throw "vs_installer.exe failed with exit code $($proc.ExitCode)"
+            }
           }
 
       - name: Stamp Package.appxmanifest
         shell: pwsh
+        env:
+          MSIX_VERSION: ${{ needs.prepare.outputs.msix_version }}
+          MSIX_PUBLISHER: ${{ needs.prepare.outputs.publisher }}
+          MSIX_PACKAGE_NAME: ${{ needs.prepare.outputs.package_name }}
         run: |
+          $ErrorActionPreference = 'Stop'
           .\packaging\Update-AppxManifest.ps1 `
             -ManifestPath "MandelbrotViewer\Package.appxmanifest" `
-            -Version "${{ needs.prepare.outputs.msix_version }}" `
-            -Publisher "${{ needs.prepare.outputs.publisher }}" `
-            -PackageName "${{ needs.prepare.outputs.package_name }}"
+            -Version $env:MSIX_VERSION `
+            -Publisher $env:MSIX_PUBLISHER `
+            -PackageName $env:MSIX_PACKAGE_NAME
 
       - name: Build and run unit tests (${{ matrix.platform }})
         if: matrix.run_tests
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vsPath = & $vswhere -latest -products * -Property installationPath
 
@@ -232,7 +266,14 @@ jobs:
 
       - name: Build self-contained MSIX (${{ matrix.platform }})
         shell: pwsh
+        env:
+          MSIX_VERSION: ${{ needs.prepare.outputs.msix_version }}
+          VER_MAJOR: ${{ needs.prepare.outputs.ver_major }}
+          VER_MINOR: ${{ needs.prepare.outputs.ver_minor }}
+          VER_PATCH: ${{ needs.prepare.outputs.ver_patch }}
+          VER_BUILD: ${{ needs.prepare.outputs.ver_build }}
         run: |
+          $ErrorActionPreference = 'Stop'
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vsPath = & $vswhere -latest -products * -Property installationPath
 
@@ -254,8 +295,8 @@ jobs:
           $vcRedistDir = ""
           if (Test-Path $redistRoot) {
             $redistMatch = Get-ChildItem -Path $redistRoot -Directory |
-              Where-Object { Test-Path (Join-Path $_.FullName "${{ matrix.platform }}") } |
-              Sort-Object Name -Descending |
+              Where-Object { $_.Name -match '^\d+\.\d+\.\d+(\.\d+)?$' -and (Test-Path (Join-Path $_.FullName "${{ matrix.platform }}")) } |
+              Sort-Object { [version]$_.Name } -Descending |
               Select-Object -First 1
             if ($redistMatch) {
               $vcRedistDir = $redistMatch.FullName
@@ -281,10 +322,10 @@ jobs:
             /p:BuildMsix=true `
             /p:VcRedistDir="$vcRedistDir" `
             /p:AppxPackageDir="$appPackagesDir" `
-            /p:AppVersionMajor=${{ needs.prepare.outputs.ver_major }} `
-            /p:AppVersionMinor=${{ needs.prepare.outputs.ver_minor }} `
-            /p:AppVersionPatch=${{ needs.prepare.outputs.ver_patch }} `
-            /p:AppVersionBuild=${{ needs.prepare.outputs.ver_build }} `
+            /p:AppVersionMajor=$env:VER_MAJOR `
+            /p:AppVersionMinor=$env:VER_MINOR `
+            /p:AppVersionPatch=$env:VER_PATCH `
+            /p:AppVersionBuild=$env:VER_BUILD `
             /p:MultiProcessorCompilation=true `
             /v:minimal
 
@@ -300,13 +341,17 @@ jobs:
           }
 
           New-Item -ItemType Directory -Path "msix-stage" -Force | Out-Null
-          $destName = "MandelbrotViewer_${{ needs.prepare.outputs.msix_version }}_${{ matrix.platform }}.msix"
+          $destName = "MandelbrotViewer_$($env:MSIX_VERSION)_${{ matrix.platform }}.msix"
           $destPath = Join-Path "msix-stage" $destName
           Copy-Item -Path $msix.FullName -Destination $destPath -Force
           Write-Host "Staged MSIX: $destPath ($([math]::Round((Get-Item $destPath).Length / 1MB, 2)) MB)"
 
       - name: Verify MSIX payload and manifest (${{ matrix.platform }})
         shell: pwsh
+        env:
+          MSIX_VERSION: ${{ needs.prepare.outputs.msix_version }}
+          MSIX_PUBLISHER: ${{ needs.prepare.outputs.publisher }}
+          MSIX_PACKAGE_NAME: ${{ needs.prepare.outputs.package_name }}
         run: |
           $ErrorActionPreference = 'Stop'
           Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -321,6 +366,9 @@ jobs:
 
           $identity = $manifest.SelectSingleNode('/ns:Package/ns:Identity', $ns)
           Write-Host "Manifest Identity: Name=$($identity.Name), Arch=$($identity.ProcessorArchitecture), Version=$($identity.Version), Publisher=$($identity.Publisher)"
+          if ($identity.Name -ne $env:MSIX_PACKAGE_NAME -or $identity.Version -ne $env:MSIX_VERSION -or $identity.Publisher -ne $env:MSIX_PUBLISHER -or $identity.ProcessorArchitecture.ToLowerInvariant() -ne "${{ matrix.platform }}".ToLowerInvariant()) {
+            throw "AppxManifest.xml Identity mismatch!"
+          }
 
           $pkgDeps = $manifest.SelectNodes('/ns:Package/ns:Dependencies/ns:PackageDependency', $ns)
           Write-Host "PackageDependencies count: $($pkgDeps.Count)"
@@ -352,6 +400,9 @@ jobs:
             'msvcp140.dll',
             'vcomp140.dll'
           )
+          if ("${{ matrix.platform }}" -eq "x64") {
+            $required += 'vcruntime140_1.dll'
+          }
           $missing = @()
           foreach ($rel in $required) {
             if (-not (Test-Path (Join-Path $inspectDir $rel))) {
@@ -382,6 +433,8 @@ jobs:
     name: Bundle, Sign & Release MSIX
     needs: [ prepare, build-and-package ]
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -404,6 +457,8 @@ jobs:
         env:
           MSIX_CERT_BASE64: ${{ secrets.MSIX_CERT_BASE64 }}
           MSIX_CERT_PASSWORD: ${{ secrets.MSIX_CERT_PASSWORD }}
+          MSIX_VERSION: ${{ needs.prepare.outputs.msix_version }}
+          MSIX_PUBLISHER: ${{ needs.prepare.outputs.publisher }}
         run: |
           $ErrorActionPreference = 'Stop'
 
@@ -421,8 +476,8 @@ jobs:
           $signtool = Join-Path $sdkVerDir.FullName "x64\signtool.exe"
           Write-Host "Using Windows SDK tools from $($sdkVerDir.FullName)"
 
-          $version = "${{ needs.prepare.outputs.msix_version }}"
-          $publisher = "${{ needs.prepare.outputs.publisher }}"
+          $version = $env:MSIX_VERSION
+          $publisher = $env:MSIX_PUBLISHER
           $bundleName = "MandelbrotViewer_${version}.msixbundle"
           $releaseDir = Join-Path $PWD "release-assets"
           New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
@@ -438,14 +493,15 @@ jobs:
           $cerPath = Join-Path $releaseDir "MandelbrotViewer.cer"
           $certMode = ""
           $pfxPassword = ""
+          $x509 = $null
 
           try {
             if (-not [string]::IsNullOrWhiteSpace($env:MSIX_CERT_BASE64)) {
               Write-Host "Using signing certificate from MSIX_CERT_BASE64 secret."
               [System.IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:MSIX_CERT_BASE64.Trim()))
-              $pfxPassword = $env:MSIX_CERT_PASSWORD
+              $pfxPassword = if ($null -ne $env:MSIX_CERT_PASSWORD) { $env:MSIX_CERT_PASSWORD } else { "" }
 
-              $flags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
+              $flags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
               $x509 = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($pfxPath, $pfxPassword, $flags)
               Write-Host "Certificate Subject   : $($x509.Subject)"
               Write-Host "Certificate Issuer    : $($x509.Issuer)"
@@ -472,6 +528,11 @@ jobs:
                 -Password $pfxPassword
             }
 
+            $baseSignArgs = @('sign', '/fd', 'SHA256', '/f', $pfxPath)
+            if (-not [string]::IsNullOrEmpty($pfxPassword)) {
+              $baseSignArgs += @('/p', $pfxPassword)
+            }
+
             $tsaServers = @(
               'http://timestamp.digicert.com',
               'http://timestamp.sectigo.com'
@@ -479,7 +540,7 @@ jobs:
             $signed = $false
             foreach ($tsa in $tsaServers) {
               Write-Host "Signing $bundleName with timestamp server $tsa..."
-              & $signtool sign /fd SHA256 /f $pfxPath /p $pfxPassword /tr $tsa /td SHA256 $bundlePath
+              & $signtool @baseSignArgs /tr $tsa /td SHA256 $bundlePath
               if ($LASTEXITCODE -eq 0) {
                 $signed = $true
                 break
@@ -488,7 +549,7 @@ jobs:
             }
             if (-not $signed) {
               Write-Warning "Signing without RFC 3161 timestamp as fallback..."
-              & $signtool sign /fd SHA256 /f $pfxPath /p $pfxPassword $bundlePath
+              & $signtool @baseSignArgs $bundlePath
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             }
 
@@ -532,6 +593,9 @@ jobs:
             "cert_mode=$certMode" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
             "thumbprint=$($sig.SignerCertificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           } finally {
+            if ($null -ne $x509) {
+              $x509.Dispose()
+            }
             if (Test-Path $pfxPath) {
               Remove-Item -Path $pfxPath -Force -ErrorAction SilentlyContinue
             }
@@ -539,21 +603,35 @@ jobs:
 
       - name: Generate AppInstaller and SHA256SUMS
         shell: pwsh
+        env:
+          REPO_NAME: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          MSIX_VERSION: ${{ needs.prepare.outputs.msix_version }}
+          MSIX_PACKAGE_NAME: ${{ needs.prepare.outputs.package_name }}
+          MSIX_PUBLISHER: ${{ needs.prepare.outputs.publisher }}
+          IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
+          BUNDLE_NAME: ${{ steps.sign.outputs.bundle_name }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $repo = "${{ github.repository }}"
-          $tag = "${{ needs.prepare.outputs.tag }}"
-          $version = "${{ needs.prepare.outputs.msix_version }}"
-          $bundleName = "${{ steps.sign.outputs.bundle_name }}"
+          $repo = $env:REPO_NAME
+          $tag = $env:RELEASE_TAG
+          $escapedTag = [Uri]::EscapeDataString($tag)
+          $version = $env:MSIX_VERSION
+          $bundleName = $env:BUNDLE_NAME
+          $escapedBundle = [Uri]::EscapeDataString($bundleName)
 
-          $appInstallerUri = "https://github.com/$repo/releases/latest/download/MandelbrotViewer.appinstaller"
-          $mainBundleUri = "https://github.com/$repo/releases/download/$tag/$bundleName"
+          if ($env:IS_PRERELEASE -eq 'true') {
+            $appInstallerUri = "https://github.com/$repo/releases/download/$escapedTag/MandelbrotViewer.appinstaller"
+          } else {
+            $appInstallerUri = "https://github.com/$repo/releases/latest/download/MandelbrotViewer.appinstaller"
+          }
+          $mainBundleUri = "https://github.com/$repo/releases/download/$escapedTag/$escapedBundle"
 
           .\packaging\New-AppInstaller.ps1 `
             -OutputPath "release-assets\MandelbrotViewer.appinstaller" `
             -Version $version `
-            -PackageName "${{ needs.prepare.outputs.package_name }}" `
-            -Publisher "${{ needs.prepare.outputs.publisher }}" `
+            -PackageName $env:MSIX_PACKAGE_NAME `
+            -Publisher $env:MSIX_PUBLISHER `
             -AppInstallerUri $appInstallerUri `
             -MainBundleUri $mainBundleUri
 
@@ -573,18 +651,25 @@ jobs:
 
       - name: Write job summary
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          MSIX_VERSION: ${{ needs.prepare.outputs.msix_version }}
+          SHOULD_PUBLISH: ${{ needs.prepare.outputs.should_publish }}
+          CERT_MODE: ${{ steps.sign.outputs.cert_mode }}
+          BUNDLE_NAME: ${{ steps.sign.outputs.bundle_name }}
+          THUMBPRINT: ${{ steps.sign.outputs.thumbprint }}
         run: |
-          $certMode = "${{ steps.sign.outputs.cert_mode }}"
-          $bundleName = "${{ steps.sign.outputs.bundle_name }}"
-          $thumbprint = "${{ steps.sign.outputs.thumbprint }}"
+          $certMode = $env:CERT_MODE
+          $bundleName = $env:BUNDLE_NAME
+          $thumbprint = $env:THUMBPRINT
           $lines = @(
             "### MSIX Release Build Summary",
             "",
-            "- **Tag:** ``${{ needs.prepare.outputs.tag }}``",
-            "- **MSIX Version:** ``${{ needs.prepare.outputs.msix_version }}``",
+            "- **Tag:** ``$($env:RELEASE_TAG)``",
+            "- **MSIX Version:** ``$($env:MSIX_VERSION)``",
             "- **Bundle:** ``$bundleName`` (x64 + ARM64, self-contained)",
             "- **Signing Mode:** ``$certMode`` (Thumbprint: ``$thumbprint``)",
-            "- **Published to GitHub Releases:** ``${{ needs.prepare.outputs.should_publish }}``"
+            "- **Published to GitHub Releases:** ``$($env:SHOULD_PUBLISH)``"
           )
           if ($certMode -eq 'self-signed-ephemeral') {
             $lines += @(
@@ -606,13 +691,19 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          MSIX_VERSION: ${{ needs.prepare.outputs.msix_version }}
+          IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
+          COMMIT_SHA: ${{ github.sha }}
+          BUNDLE_NAME: ${{ steps.sign.outputs.bundle_name }}
+          CERT_MODE: ${{ steps.sign.outputs.cert_mode }}
+          THUMBPRINT: ${{ steps.sign.outputs.thumbprint }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $tag = "${{ needs.prepare.outputs.tag }}"
-          $version = "${{ needs.prepare.outputs.msix_version }}"
-          $bundleName = "${{ steps.sign.outputs.bundle_name }}"
-          $certMode = "${{ steps.sign.outputs.cert_mode }}"
-          $thumbprint = "${{ steps.sign.outputs.thumbprint }}"
+          $tag = $env:RELEASE_TAG
+          $bundleName = $env:BUNDLE_NAME
+          $certMode = $env:CERT_MODE
+          $thumbprint = $env:THUMBPRINT
 
           $notesLines = @(
             "## Installation (Windows 10 / 11 — x64 & ARM64)",
@@ -654,15 +745,17 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag @assets --clobber
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            gh release edit $tag --notes-file $notesFile
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } else {
             $ghArgs = @(
               'release', 'create', $tag,
-              '--target', "${{ github.sha }}",
+              '--target', $env:COMMIT_SHA,
               '--title', "Mandelbrot Viewer $tag",
               '--notes-file', $notesFile,
               '--generate-notes'
             )
-            if ("${{ needs.prepare.outputs.is_prerelease }}" -eq "true") {
+            if ($env:IS_PRERELEASE -eq "true") {
               $ghArgs += '--prerelease'
             }
             $ghArgs += $assets
