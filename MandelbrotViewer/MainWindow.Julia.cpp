@@ -149,6 +149,7 @@ namespace winrt::MandelbrotViewer::implementation
 
     void MainWindow::OnJuliaTravelSpeedChanged(IInspectable const&, Controls::Primitives::RangeBaseValueChangedEventArgs const& e)
     {
+        if (IsSuppressingEvents()) return;
         m_juliaTravelSpeed = std::clamp(e.NewValue(), 0.2, 2.0);
         if (JuliaTravelSpeedText())
         {
@@ -402,7 +403,7 @@ namespace winrt::MandelbrotViewer::implementation
         if (!m_juliaDragging || e.Pointer().PointerId() != m_juliaDragPointerId) return;
         m_juliaDragging = false;
         JuliaSurface().ReleasePointerCapture(e.Pointer());
-        if (m_juliaConfig.renderStride != 1)
+        if (!m_juliaTraveling && m_juliaConfig.renderStride != 1)
         {
             m_juliaConfig.renderStride = 1;
             RenderJulia();

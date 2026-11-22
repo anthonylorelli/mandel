@@ -317,3 +317,47 @@ TEST_CASE(FramePresentation, SnapshotViewportRejectsInvalidInputsAndCopiesIdenti
     ASSERT_TRUE(copied == source);
 }
 
+TEST_CASE(FramePresentation, ResolveHpCenterZeroGuardsAndJuliaLimitChecks)
+{
+    // FrameToViewport and InterpolateCamera must respect directly modified centerX/Y via ResolveHpCenter.
+    MandelbrotConfig frame;
+    frame.width = 100;
+    frame.height = 100;
+    frame.zoom = 1.0;
+    frame.SetCenter(-0.5, 0.25);
+
+    MandelbrotConfig moved = frame;
+    moved.centerX = -0.25; // Deliberately update double center without calling SetCenter.
+    const auto transform = FrameToViewport(frame, moved);
+    ASSERT_NEAR((-0.5 - (-0.25)) * (1.0 / 3.0) * 100.0, transform.x, 1e-9);
+
+    const auto mid = InterpolateCamera(frame, moved, 0.5);
+    ASSERT_NEAR(-0.375, mid.centerX, 1e-9);
+
+    // Zero-dimension / non-positive zoom inputs do not divide by zero or produce NaN.
+    MandelbrotConfig zeroCfg = frame;
+    zeroCfg.width = 0;
+    const auto animZero = AnimationRenderConfig(zeroCfg);
+    ASSERT_EQ(0, animZero.width);
+    ASSERT_TRUE(std::isfinite(animZero.zoom));
+
+    const auto viewZero = FrameViewport(frame, 0, 100);
+    ASSERT_TRUE(std::isfinite(viewZero.zoom));
+
+    MandelbrotConfig zeroZoom = frame;
+    zeroZoom.zoom = 0.0;
+    ASSERT_TRUE(std::isfinite(InterpolateCamera(zeroZoom, frame, 0.5).zoom));
+
+    // LimitCameraToFrame rejects mismatched Julia mode or parameter.
+    MandelbrotConfig juliaFrom = frame;
+    juliaFrom.juliaSet = true;
+    juliaFrom.juliaX = BigFloat(-0.7);
+    juliaFrom.juliaY = BigFloat(0.27);
+    auto juliaReq = juliaFrom;
+    juliaReq.juliaX = BigFloat(-0.4);
+    juliaReq.zoom = 2.0;
+    const auto limited = LimitCameraToFrame(juliaFrom, juliaFrom, juliaReq);
+    ASSERT_TRUE(limited.juliaX == juliaFrom.juliaX);
+    ASSERT_NEAR(juliaFrom.zoom, limited.zoom, 1e-12);
+}
+

@@ -273,7 +273,7 @@ namespace Mandelbrot::detail
         const std::vector<uint8_t>& sps,
         const std::vector<uint8_t>& pps)
     {
-        if (m_entries.empty() || sps.empty() || pps.empty())
+        if (m_entries.empty() || sps.empty() || pps.empty() || (codec == MovieCodec::Hevc && vps.empty()))
             throw std::runtime_error("Video encoder did not produce valid MP4 stream headers.");
 
         const auto end = Pos();
@@ -315,7 +315,9 @@ namespace Mandelbrot::detail
             U8(1); // 1 PPS
             U16(static_cast<uint16_t>(pps.size()));
             Bytes(pps.data(), pps.size());
-            if (profileIdc == 100 || profileIdc == 110 || profileIdc == 122 || profileIdc == 244)
+            if (profileIdc == 100 || profileIdc == 110 || profileIdc == 122 || profileIdc == 244 ||
+                profileIdc == 44  || profileIdc == 83  || profileIdc == 86  || profileIdc == 118 ||
+                profileIdc == 128 || profileIdc == 134 || profileIdc == 138 || profileIdc == 139)
             {
                 U8(0xFD); // chroma_format = 1 (4:2:0)
                 U8(0xF8); // bit_depth_luma_minus8 = 0

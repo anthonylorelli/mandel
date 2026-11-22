@@ -15,6 +15,10 @@ namespace Mandelbrot
         }
 
         std::lock_guard lock(m_impl->mutex);
+        m_impl->movieFullFrameAccum = false;
+        m_impl->movieShutterBlur = false;
+        m_impl->movieFrameWidth = 0;
+        m_impl->movieFrameHeight = 0;
         const size_t totalPixels = static_cast<size_t>(width) * static_cast<size_t>(height);
         if (totalPixels <= kMaxFullFrameAccumPixels)
         {
@@ -32,11 +36,8 @@ namespace Mandelbrot
             }
             m_impl->movieFullFrameAccum = true;
             m_impl->movieShutterBlur = enableShutterBlur;
-        }
-        else
-        {
-            m_impl->movieFullFrameAccum = false;
-            m_impl->movieShutterBlur = false;
+            m_impl->movieFrameWidth = width;
+            m_impl->movieFrameHeight = height;
         }
         return true;
     }
@@ -116,7 +117,16 @@ namespace Mandelbrot
             return false;
         }
 
-        if (!m_impl->movieFullFrameAccum)
+        if (m_impl->movieFullFrameAccum)
+        {
+            if (width != m_impl->movieFrameWidth ||
+                destRowOffset + visibleRows > m_impl->movieFrameHeight ||
+                static_cast<size_t>(destRowOffset + visibleRows) * static_cast<size_t>(width) > m_impl->accumPixelsCapElems)
+            {
+                return false;
+            }
+        }
+        else
         {
             if (!m_impl->EnsureStructuredUavSrvBuffer(
                     visiblePixels, sizeof(uint32_t),
@@ -134,7 +144,6 @@ namespace Mandelbrot
         m_impl->UnbindComputeResources();
 
         // Step A: Evaluate primary center pixels across the band (including halo rows) into OutIters in VRAM
-        const UINT zeros[4]{ 0, 0, 0, 0 };
         bool primaryCanceled = false;
         if (!m_impl->DispatchPrimaryPass(
                 mode, bandConfig, refState, juliaCx, juliaCy, juliaBailout2,
@@ -143,19 +152,7 @@ namespace Mandelbrot
             return false;
         }
 
-        // Step B: GPU 3x3 boundary detection + 16x16 LDS spatial compaction
-        m_impl->context->ClearUnorderedAccessViewUint(m_impl->subCounterUav.Get(), zeros);
-
-        ID3D11UnorderedAccessView* detectUavs[3]{
-            m_impl->gpuSubIdxUav.Get(),
-            m_impl->pixelSubInfoUav.Get(),
-            m_impl->subCounterUav.Get()
-        };
-        m_impl->context->CSSetUnorderedAccessViews(0, 3, detectUavs, nullptr);
-
-        ID3D11ShaderResourceView* detectSrvs[8]{ m_impl->outItersSrv.Get() };
-        m_impl->context->CSSetShaderResources(0, 8, detectSrvs);
-
+        // Steps B-D: GPU 3x3 boundary detection, indirect-args build, and 4x subpixel evaluation
         PostProcessCb postCb{};
         postCb.width = static_cast<uint32_t>(width);
         postCb.bandHeight = static_cast<uint32_t>(bandHeight);
@@ -172,46 +169,16 @@ namespace Mandelbrot
         postCb.subGroupThreads =
             (mode == GpuShaderMode::PerturbLds || mode == GpuShaderMode::PerturbLdsBla) ? 512u : 256u;
 
-        if (!m_impl->UploadBufferDiscard(m_impl->constantBuffer.Get(), &postCb, sizeof(postCb)))
+        if (!m_impl->DispatchGpuSubpixelPass(
+            mode, bandConfig, refState, juliaCx, juliaCy, juliaBailout2, postCb))
         {
-            m_impl->UnbindComputeResources();
             return false;
         }
-
-        const UINT visGroupX = static_cast<UINT>((width + 15) / 16);
-        const UINT visGroupY = static_cast<UINT>((visibleRows + 15) / 16);
-        m_impl->context->CSSetShader(m_impl->csPostDetect.Get(), nullptr, 0);
-        m_impl->context->Dispatch(visGroupX, visGroupY, 1);
-
-        // Step C: Build DispatchIndirect thread-group count from compacted boundary counter
-        ID3D11ShaderResourceView* nullSrvs8[8]{};
-        m_impl->context->CSSetShaderResources(0, 8, nullSrvs8);
-
-        ID3D11UnorderedAccessView* buildIndUavs[3]{ m_impl->indirectArgsUav.Get(), nullptr, nullptr };
-        m_impl->context->CSSetUnorderedAccessViews(0, 3, buildIndUavs, nullptr);
-
-        ID3D11ShaderResourceView* buildIndSrvs[8]{};
-        buildIndSrvs[5] = m_impl->subCounterSrv.Get();
-        m_impl->context->CSSetShaderResources(0, 8, buildIndSrvs);
-        m_impl->context->CSSetShader(m_impl->csPostBuildIndirect.Get(), nullptr, 0);
-        m_impl->context->Dispatch(1, 1, 1);
-
-        // Step D: GPU-driven 4x subpixel evaluation via DispatchIndirect (zero CPU round-trip)
-        ID3D11UnorderedAccessView* subUavs[3]{ nullptr, m_impl->subOutUav.Get(), nullptr };
-        m_impl->context->CSSetUnorderedAccessViews(0, 3, subUavs, nullptr);
-        m_impl->BindFractalSrvs(mode, m_impl->gpuSubIdxSrv.Get(), m_impl->subCounterSrv.Get());
-
-        if (!m_impl->UploadFractalCb(
-            mode, bandConfig, refState, juliaCx, juliaCy, juliaBailout2,
-            0u, 0u, kIndirectSubpixelSentinel))
-        {
-            m_impl->UnbindComputeResources();
-            return false;
-        }
-        m_impl->SetSubpixelShader(mode);
-        m_impl->context->DispatchIndirect(m_impl->indirectArgsBuf.Get(), 0);
 
         // Step E: Fused 4x supersampled palette coloring into the full-frame (or strip) BGRA buffer
+        const UINT visGroupX = static_cast<UINT>((width + 15) / 16);
+        const UINT visGroupY = static_cast<UINT>((visibleRows + 15) / 16);
+        ID3D11ShaderResourceView* nullSrvs8[8]{};
         m_impl->context->CSSetShaderResources(0, 8, nullSrvs8);
         ID3D11UnorderedAccessView* resolveUavs[3]{ m_impl->accumPixelsUav.Get(), nullptr, nullptr };
         m_impl->context->CSSetUnorderedAccessViews(0, 3, resolveUavs, nullptr);
@@ -243,17 +210,11 @@ namespace Mandelbrot
         if (!m_impl->movieFullFrameAccum)
         {
             const size_t stripBytes = visiblePixels * sizeof(uint32_t);
-            D3D11_BOX box{ 0, 0, 0, static_cast<UINT>(stripBytes), 1, 1 };
-            m_impl->context->CopySubresourceRegion(
-                m_impl->accumPixelsStaging.Get(), 0, 0, 0, 0, m_impl->accumPixelsBuf.Get(), 0, &box);
-
-            D3D11_MAPPED_SUBRESOURCE mapped{};
-            if (FAILED(m_impl->context->Map(m_impl->accumPixelsStaging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
+            if (!m_impl->ReadbackBuffer(
+                m_impl->accumPixelsBuf.Get(), m_impl->accumPixelsStaging.Get(), ioBandPixels, stripBytes))
             {
                 return false;
             }
-            std::memcpy(ioBandPixels, mapped.pData, stripBytes);
-            m_impl->context->Unmap(m_impl->accumPixelsStaging.Get(), 0);
         }
         else
         {
@@ -280,10 +241,26 @@ namespace Mandelbrot
             return true;
         }
 
-        ID3D11Buffer* readbackSrc = m_impl->accumPixelsBuf.Get();
-        if (m_impl->movieShutterBlur && shutterParams && shutterParams->tapCount > 1)
+        const bool useShutter = m_impl->movieShutterBlur;
+        const int expectedW = m_impl->movieFrameWidth;
+        const int expectedH = m_impl->movieFrameHeight;
+        m_impl->movieFullFrameAccum = false;
+        m_impl->movieShutterBlur = false;
+        m_impl->movieFrameWidth = 0;
+        m_impl->movieFrameHeight = 0;
+
+        const size_t totalPixels = static_cast<size_t>(width) * static_cast<size_t>(height);
+        const size_t totalBytes = totalPixels * sizeof(uint32_t);
+        if (width != expectedW || height != expectedH ||
+            totalPixels > m_impl->accumPixelsCapElems ||
+            totalBytes > m_impl->accumPixelsStagingCapBytes)
         {
-            const size_t totalPixels = static_cast<size_t>(width) * static_cast<size_t>(height);
+            return false;
+        }
+
+        ID3D11Buffer* readbackSrc = m_impl->accumPixelsBuf.Get();
+        if (useShutter && shutterParams && shutterParams->tapCount > 1)
+        {
             if (!m_impl->EnsureStructuredUavBuffer(
                     totalPixels, sizeof(uint32_t),
                     m_impl->shutterPixelsBuf, m_impl->shutterPixelsUav, m_impl->shutterPixelsCapElems))
@@ -324,18 +301,7 @@ namespace Mandelbrot
             readbackSrc = m_impl->shutterPixelsBuf.Get();
         }
 
-        const size_t totalBytes = static_cast<size_t>(width) * static_cast<size_t>(height) * sizeof(uint32_t);
-        D3D11_BOX box{ 0, 0, 0, static_cast<UINT>(totalBytes), 1, 1 };
-        m_impl->context->CopySubresourceRegion(
-            m_impl->accumPixelsStaging.Get(), 0, 0, 0, 0, readbackSrc, 0, &box);
-
-        D3D11_MAPPED_SUBRESOURCE mapped{};
-        if (FAILED(m_impl->context->Map(m_impl->accumPixelsStaging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
-        {
-            return false;
-        }
-        std::memcpy(outFramePixels, mapped.pData, totalBytes);
-        m_impl->context->Unmap(m_impl->accumPixelsStaging.Get(), 0);
-        return true;
+        return m_impl->ReadbackBuffer(
+            readbackSrc, m_impl->accumPixelsStaging.Get(), outFramePixels, totalBytes);
     }
 }

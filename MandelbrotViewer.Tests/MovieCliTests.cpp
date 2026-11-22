@@ -510,3 +510,36 @@ TEST_CASE(MovieCli, EndToEndHeadlessExportCancellationPreservesExistingFile)
     ASSERT_TRUE(err.str().find(L"canceled") != std::wstring::npos);
     ASSERT_TRUE(ReadBytes(movieFile.path) == sentinel);
 }
+
+TEST_CASE(MovieCli, EdgeCaseRegressionsHelpJuliaResetFloatBoundsAndJsonDepth)
+{
+    // --export-movie /? must display help instead of treating /? as an output filename.
+    const auto helpParsed = ParseMovieCli({ L"--export-movie", L"/?" });
+    ASSERT_TRUE(helpParsed.action == CliAction::ShowHelp);
+
+    // --fractal julia must reset the camera to Julia's centered view rather than Mandelbrot (-0.75, 0).
+    const auto juliaParsed = ParseMovieCli({ L"--export-movie", L"julia.mp4", L"--fractal", L"julia" });
+    ASSERT_TRUE(juliaParsed.action == CliAction::ExportMovie);
+    ASSERT_TRUE(juliaParsed.options.plan.start.juliaSet);
+    ASSERT_NEAR(0.0, juliaParsed.options.plan.start.centerX, 1e-12);
+    ASSERT_NEAR(0.0, juliaParsed.options.plan.start.centerY, 1e-12);
+
+    // --frequency 1e-50 underflows to 0.0f and must be rejected during CLI parsing.
+    const auto underflowFreq = ParseMovieCli({ L"--export-movie", L"out.mp4", L"--frequency", L"1e-50" });
+    ASSERT_TRUE(underflowFreq.action == CliAction::Error);
+
+    // --frequency 1e100 overflows float to +inf and must be rejected.
+    const auto overflowFreq = ParseMovieCli({ L"--export-movie", L"out.mp4", L"--frequency", L"1e100" });
+    ASSERT_TRUE(overflowFreq.action == CliAction::Error);
+
+    // Deeply nested JSON config must fail cleanly with a nesting depth error instead of overflowing the stack.
+    TempFile deepJson(L".json");
+    {
+        std::string nested(100, '[');
+        nested += std::string(100, ']');
+        std::ofstream f(deepJson.path, std::ios::binary);
+        f.write(nested.data(), static_cast<std::streamsize>(nested.size()));
+    }
+    const auto deepParsed = ParseMovieCli({ L"--export-movie", L"out.mp4", L"--config", deepJson.path.wstring() });
+    ASSERT_TRUE(deepParsed.action == CliAction::Error);
+}

@@ -2,6 +2,7 @@
 #include "MoviePlan.h"
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -37,7 +38,7 @@ namespace Mandelbrot
     public:
         MovieExporter(MoviePlan plan, std::wstring destination);
         ~MovieExporter();
-        void Cancel() { m_cancel.store(true, std::memory_order_relaxed); }
+        void Cancel();
         void Stop();
         MovieProgress Progress() const;
         std::optional<MoviePreview> TakePreview();
@@ -52,6 +53,8 @@ namespace Mandelbrot
         std::chrono::steady_clock::time_point m_startTime{};
         std::chrono::steady_clock::time_point m_endTime{};
         mutable std::mutex m_mutex;
+        std::mutex m_queueMutex;
+        std::condition_variable m_queueCv;
         std::optional<MoviePreview> m_preview;
         bool m_finished{}, m_canceled{};
         std::wstring m_error;

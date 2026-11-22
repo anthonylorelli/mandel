@@ -132,8 +132,10 @@
     <ClInclude Include="..\MandelbrotViewer\Mp4Muxer.h" />
     <ClInclude Include="..\MandelbrotViewer\MovieWriter.h" />
     <ClInclude Include="MoviePlayback.h" />
+    <ClInclude Include="..\MandelbrotViewer\MovieFrameRenderer.h" />
     <ClInclude Include="..\MandelbrotViewer\MovieExport.h" />
     <ClInclude Include="..\MandelbrotViewer\ConsoleAscii.h" />
+    <ClInclude Include="..\MandelbrotViewer\ViewStateJson.h" />
     <ClInclude Include="..\MandelbrotViewer\MovieCli.h" />
     <ClInclude Include="..\MandelbrotViewer\MovieZoomPyramid.h" />
   </ItemGroup>
@@ -161,11 +163,16 @@
     <ClCompile Include="ConsoleAsciiTests.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\MandelbrotViewer\VideoBitstream.cpp" />
     <ClCompile Include="..\MandelbrotViewer\Mp4Muxer.cpp" />
+    <ClCompile Include="..\MandelbrotViewer\MoviePlan.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\MandelbrotViewer\MovieWriter.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="..\MandelbrotViewer\MovieFrameRenderer.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\MandelbrotViewer\MovieExport.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\MandelbrotViewer\ConsoleAscii.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="..\MandelbrotViewer\ViewStateJson.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="..\MandelbrotViewer\MovieCliParser.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\MandelbrotViewer\MovieCli.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\MandelbrotViewer\MovieZoomPyramid.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="..\MandelbrotViewer\MovieZoomResampler.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\MandelbrotViewer\BackgroundRenderer.cpp" />
     <ClCompile Include="..\MandelbrotViewer\FractalCatalog.cpp" />
     <ClCompile Include="..\MandelbrotViewer\ViewportNavigation.cpp" />
@@ -174,9 +181,12 @@
     <ClCompile Include="..\MandelbrotViewer\DeepReferenceCache.cpp" />
     <ClCompile Include="..\MandelbrotViewer\DeepZoomSolver.cpp" />
     <ClCompile Include="..\MandelbrotViewer\GpuMandelbrotBla.cpp" />
-    <ClCompile Include="..\MandelbrotViewer\GpuShallowAndLdsShaders.cpp" />
-    <ClCompile Include="..\MandelbrotViewer\GpuDeepAndMovieShaders.cpp" />
+    <ClCompile Include="..\MandelbrotViewer\GpuShallowShader.cpp" />
+    <ClCompile Include="..\MandelbrotViewer\GpuPerturbLdsShaders.cpp" />
+    <ClCompile Include="..\MandelbrotViewer\GpuDeepExpShader.cpp" />
+    <ClCompile Include="..\MandelbrotViewer\GpuMovieShaders.cpp" />
     <ClCompile Include="..\MandelbrotViewer\GpuComputeContext.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="..\MandelbrotViewer\GpuSolverPrep.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\MandelbrotViewer\GpuFractalSolver.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\MandelbrotViewer\GpuMoviePipeline.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\MandelbrotViewer\MandelbrotEngine.cpp" />

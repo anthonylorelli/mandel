@@ -197,7 +197,7 @@ namespace Mandelbrot::detail
                                 const int32_t delta = r.ReadSE();
                                 if (r.overflow) return fallback();
                                 w.WriteSE(delta);
-                                nextScale = (lastScale + delta + 256) % 256;
+                                nextScale = static_cast<int>((static_cast<uint32_t>(lastScale) + static_cast<uint32_t>(delta)) & 255u);
                             }
                             lastScale = (nextScale == 0) ? lastScale : nextScale;
                         }

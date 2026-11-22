@@ -5,313 +5,6 @@ namespace Mandelbrot::detail
 {
     namespace
     {
-        // Shader 1: Direct FP32 evaluation for shallow zooms (zoom < 16.0), all 8 FractalTypes + Julia.
-        constexpr const char* kShallowShaderSrc = R"(
-cbuffer Params : register(b0)
-{
-    uint width;
-    uint height;
-    uint maxIter;
-    uint smoothFlag;
-    uint fractalType;
-    uint juliaFlag;
-    uint rowOffset;
-    uint subpixelTotal;
-    float juliaCx;
-    float juliaCy;
-    float bailout2;
-    float pad0;
-    uint outRowOffset, pad2, pad3, pad4;
-};
-
-Buffer<float> ColCoords : register(t0);
-Buffer<float> RowCoords : register(t1);
-Buffer<uint> SubpixelIndices : register(t4);
-Buffer<uint> SubpixelCountSrv : register(t7);
-RWStructuredBuffer<float> OutIters : register(u0);
-RWStructuredBuffer<float> OutSubpixelsFlat : register(u1);
-
-float FinishSmoothEscape(uint fType, uint iter, float zr, float zi, float prevZr, float prevZi, float cx, float cy)
-{
-    float zr2 = zr * zr;
-    float zi2 = zi * zi;
-    uint sIter = iter;
-    float maxExtraMod2 = (fType == 5u) ? 1e11f : 1e18f;
-
-    [loop]
-    for (uint extra = 0u; extra < 3u && (zr2 + zi2) < maxExtraMod2; ++extra)
-    {
-        if (fType == 0u)
-        {
-            zi = 2.0f * zr * zi + cy;
-            zr = zr2 - zi2 + cx;
-        }
-        else if (fType == 1u)
-        {
-            zi = -2.0f * abs(zr * zi) + cy;
-            zr = zr2 - zi2 + cx;
-        }
-        else if (fType == 2u)
-        {
-            zi = -2.0f * zr * zi + cy;
-            zr = zr2 - zi2 + cx;
-        }
-        else if (fType == 3u)
-        {
-            zi = 2.0f * zr * zi + cy;
-            zr = abs(zr2 - zi2) + cx;
-        }
-        else if (fType == 4u)
-        {
-            zi = -2.0f * abs(zr * zi) + cy;
-            zr = abs(zr2 - zi2) + cx;
-        }
-        else if (fType == 5u)
-        {
-            float nextZr = zr * (zr2 - 3.0f * zi2) + cx;
-            zi = zi * (3.0f * zr2 - zi2) + cy;
-            zr = nextZr;
-        }
-        else
-        {
-            float nextZr = zr2 - zi2 + 0.5667f - 0.5f * prevZr;
-            float nextZi = 2.0f * zr * zi - 0.5f * prevZi;
-            prevZr = zr;
-            prevZi = zi;
-            zr = nextZr;
-            zi = nextZi;
-        }
-        zr2 = zr * zr;
-        zi2 = zi * zi;
-        ++sIter;
-    }
-
-    float logZn = log(zr2 + zi2) * 0.5f;
-    float nu = (fType == 5u)
-        ? (float(sIter) + 1.0f - log(logZn) * 0.9102392266f)
-        : (float(sIter) + 1.0f - log2(logZn));
-    return max(0.0f, nu);
-}
-
-float EvalShallowSample(float xCoord, float yCoord)
-{
-    if (juliaFlag != 0u)
-    {
-        float zr = xCoord;
-        float zi = yCoord;
-        float jcx = juliaCx;
-        float jcy = juliaCy;
-        if (jcx == 0.0f && jcy == 0.0f && (zr * zr + zi * zi) <= 1.0f)
-            return -1.0f;
-
-        float chkZr = zr, chkZi = zi;
-        uint chkPeriod = 8u, stepsSince = 0u;
-        [loop]
-        for (uint iter = 0u; iter < maxIter; ++iter)
-        {
-            float zr2 = zr * zr;
-            float zi2 = zi * zi;
-            if (zr2 + zi2 > bailout2)
-            {
-                if (smoothFlag == 0u) return float(iter);
-                return FinishSmoothEscape(fractalType, iter, zr, zi, 0.0f, 0.0f, jcx, jcy);
-            }
-            float nextR = zr2 - zi2 + jcx;
-            zi = (fractalType == 1u) ? (-2.0f * abs(zr * zi) + jcy) : (2.0f * zr * zi + jcy);
-            zr = nextR;
-            if (zr == chkZr && zi == chkZi) return -1.0f;
-            if (++stepsSince == chkPeriod)
-            {
-                chkZr = zr; chkZi = zi; stepsSince = 0u;
-                if (chkPeriod < 1024u) chkPeriod <<= 1u;
-            }
-        }
-        return -1.0f;
-    }
-
-    float cx = xCoord;
-    float cy = yCoord;
-
-    if (fractalType == 0u)
-    {
-        float xm = cx - 0.25f;
-        float y2 = cy * cy;
-        float q = xm * xm + y2;
-        if (q * (q + xm) <= 0.25f * y2 || ((cx + 1.0f) * (cx + 1.0f) + y2) <= 0.0625f)
-            return -1.0f;
-    }
-    else if (fractalType == 7u)
-    {
-        float zr = cx;
-        float zi = cy;
-        uint iter = 0u;
-        int rootIndex = -1;
-        float distSq = 0.0f;
-        const float ROOT1_Y = 0.8660254038f;
-        const float TOL_SQ = 1e-8f;
-
-        [loop]
-        while (iter < maxIter)
-        {
-            float zr2 = zr * zr;
-            float zi2 = zi * zi;
-            float r2 = zr2 + zi2;
-            if (r2 < 1e-36f) break;
-
-            float d0 = (zr - 1.0f) * (zr - 1.0f) + zi2;
-            if (d0 < TOL_SQ) { rootIndex = 0; distSq = d0; break; }
-
-            float d1 = (zr + 0.5f) * (zr + 0.5f) + (zi - ROOT1_Y) * (zi - ROOT1_Y);
-            if (d1 < TOL_SQ) { rootIndex = 1; distSq = d1; break; }
-
-            float d2 = (zr + 0.5f) * (zr + 0.5f) + (zi + ROOT1_Y) * (zi + ROOT1_Y);
-            if (d2 < TOL_SQ) { rootIndex = 2; distSq = d2; break; }
-
-            float invR2 = 1.0f / r2;
-            float nextZr = (2.0f / 3.0f) * zr + (1.0f / 3.0f) * ((zr2 - zi2) * invR2) * invR2;
-            float nextZi = (2.0f / 3.0f) * zi - (1.0f / 3.0f) * ((2.0f * zr * zi) * invR2) * invR2;
-            zr = nextZr;
-            zi = nextZi;
-            ++iter;
-        }
-        if (rootIndex < 0 || iter >= maxIter) return -1.0f;
-        float smoothVal = float(iter);
-        if (smoothFlag != 0u)
-        {
-            float dist = max(sqrt(distSq), 1e-12f);
-            float ratio = log(dist) / (-9.21034037f);
-            if (ratio > 1.0f)
-            {
-                smoothVal = max(0.0f, float(iter) - log2(ratio));
-            }
-        }
-        return float(rootIndex) * 1000000.0f + smoothVal;
-    }
-
-    if (fractalType == 0u)
-    {
-        float zr = 0.0f, zi = 0.0f, zr2 = 0.0f, zi2 = 0.0f;
-        float chkZr = 0.0f, chkZi = 0.0f;
-        uint chkPeriod = 8u, stepsSince = 0u, iter = 0u;
-
-        [loop]
-        while (iter < maxIter && (zr2 + zi2) <= 16.0f)
-        {
-            zi = 2.0f * zr * zi + cy;
-            zr = zr2 - zi2 + cx;
-            zr2 = zr * zr;
-            zi2 = zi * zi;
-            ++iter;
-            if (zr == chkZr && zi == chkZi)
-            {
-                return -1.0f;
-            }
-            if (++stepsSince == chkPeriod)
-            {
-                chkZr = zr; chkZi = zi;
-                stepsSince = 0u;
-                if (chkPeriod < 1024u) chkPeriod <<= 1u;
-            }
-        }
-        if (iter >= maxIter) return -1.0f;
-        if (smoothFlag == 0u) return float(iter);
-        return FinishSmoothEscape(0u, iter, zr, zi, 0.0f, 0.0f, cx, cy);
-    }
-
-    float zr = (fractalType == 6u) ? cy : 0.0f;
-    float zi = (fractalType == 6u) ? cx : 0.0f;
-    float zr2 = zr * zr;
-    float zi2 = zi * zi;
-    float prevZr = 0.0f, prevZi = 0.0f;
-    float chkZr = 0.0f, chkZi = 0.0f, chkPrevZr = 0.0f, chkPrevZi = 0.0f;
-    uint chkPeriod = 8u, stepsSince = 0u, iter = 0u;
-
-    [loop]
-    while (iter < maxIter && (zr2 + zi2) <= 16.0f)
-    {
-        if (fractalType == 1u)
-        {
-            zi = -2.0f * abs(zr * zi) + cy;
-            zr = zr2 - zi2 + cx;
-        }
-        else if (fractalType == 2u)
-        {
-            zi = -2.0f * zr * zi + cy;
-            zr = zr2 - zi2 + cx;
-        }
-        else if (fractalType == 3u)
-        {
-            zi = 2.0f * zr * zi + cy;
-            zr = abs(zr2 - zi2) + cx;
-        }
-        else if (fractalType == 4u)
-        {
-            zi = -2.0f * abs(zr * zi) + cy;
-            zr = abs(zr2 - zi2) + cx;
-        }
-        else if (fractalType == 5u)
-        {
-            float nextZr = zr * (zr2 - 3.0f * zi2) + cx;
-            zi = zi * (3.0f * zr2 - zi2) + cy;
-            zr = nextZr;
-        }
-        else
-        {
-            float nextZr = zr2 - zi2 + 0.5667f - 0.5f * prevZr;
-            float nextZi = 2.0f * zr * zi - 0.5f * prevZi;
-            prevZr = zr;
-            prevZi = zi;
-            zr = nextZr;
-            zi = nextZi;
-        }
-        zr2 = zr * zr;
-        zi2 = zi * zi;
-        ++iter;
-        if (zr == chkZr && zi == chkZi && (fractalType != 6u || (prevZr == chkPrevZr && prevZi == chkPrevZi)))
-        {
-            iter = maxIter;
-            break;
-        }
-        if (++stepsSince == chkPeriod)
-        {
-            chkZr = zr; chkZi = zi;
-            chkPrevZr = prevZr; chkPrevZi = prevZi;
-            stepsSince = 0u;
-            if (chkPeriod < 1024u) chkPeriod <<= 1u;
-        }
-    }
-
-    if (iter >= maxIter) return -1.0f;
-    if (smoothFlag == 0u) return float(iter);
-    return FinishSmoothEscape(fractalType, iter, zr, zi, prevZr, prevZi, cx, cy);
-}
-
-[numthreads(16, 16, 1)]
-void CSPrimary(uint3 tid : SV_DispatchThreadID)
-{
-    uint py = tid.y + rowOffset;
-    if (tid.x >= width || py >= height) return;
-    float xc = ColCoords[tid.x * 3u + 1u];
-    float yc = RowCoords[py * 3u + 1u];
-    OutIters[(tid.y + outRowOffset) * width + tid.x] = EvalShallowSample(xc, yc);
-}
-
-[numthreads(256, 1, 1)]
-void CSSubpixels(uint3 tid : SV_DispatchThreadID)
-{
-    uint activeTotal = (subpixelTotal == 0xFFFFFFFFu) ? (SubpixelCountSrv[0] * 4u) : subpixelTotal;
-    uint sIdx = tid.x;
-    if (sIdx >= activeTotal) return;
-    uint pix = SubpixelIndices[sIdx >> 2];
-    uint corner = sIdx & 3u;
-    uint py = pix / width;
-    uint px = pix - py * width;
-    uint kx = (corner & 1u) ? 2u : 0u;
-    uint ky = (corner & 2u) ? 2u : 0u;
-    OutSubpixelsFlat[sIdx] = EvalShallowSample(ColCoords[px * 3u + kx], RowCoords[py * 3u + ky]);
-}
-)";
-
         // Shader 2: High-occupancy 512-thread LDS Perturbation (16.0 <= zoom < 1e32, without BLA).
         constexpr const char* kPerturbLdsShaderSrc = R"(
 #define LDS_ORBIT_SIZE 2048u
@@ -604,7 +297,7 @@ void CSPrimary(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
 }
 
 [numthreads(512, 1, 1)]
-void CSSubpixels(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
+void CSSubpixels(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
 {
     uint sharedLim = min(refLen + 1u, LDS_ORBIT_SIZE);
     for (uint i = gi; i < sharedLim; i += 512u)
@@ -612,7 +305,7 @@ void CSSubpixels(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
     GroupMemoryBarrierWithGroupSync();
 
     uint activeTotal = (subpixelTotal == 0xFFFFFFFFu) ? (SubpixelCountSrv[0] * 4u) : subpixelTotal;
-    uint sIdx = tid.x;
+    uint sIdx = (gid.y * 32768u + gid.x) * 512u + gi;
     if (sIdx >= activeTotal) return;
     uint pix = SubpixelIndices[sIdx >> 2];
     uint corner = sIdx & 3u;
@@ -720,7 +413,7 @@ bool StepPerturbLdsBla(
                 float zy = r.y + dy;
                 float mod2 = zx * zx + zy * zy;
                 float dz2 = dx * dx + dy * dy;
-                if (mod2 > 16.0f || mod2 < dz2) break;
+                if (mod2 > 16.0f || mod2 < dz2 || dz2 < 1e-30f) break;
                 float sx = r.x + zx;
                 float sy = r.y + zy;
                 float nextDx = sx * dx - sy * dy + dcx;
@@ -768,7 +461,7 @@ bool StepPerturbLdsBla(
             }
         }
 
-        if (m >= 1u && (stopIter - iter) >= 4u && ((m - 1u) & 3u) == 0u && m + 4u <= refLen && maxD < blaMaxRadius)
+        if (m >= 1u && (maxIter - iter) >= 4u && ((m - 1u) & 3u) == 0u && m + 4u <= refLen && maxD < blaMaxRadius)
         {
             uint start = m - 1u;
             uint aligned = (start != 0u) ? firstbitlow(start) : 30u;
@@ -777,7 +470,7 @@ bool StepPerturbLdsBla(
             for (int lv = int(top); lv >= 2; --lv)
             {
                 uint len = 1u << uint(lv);
-                if (len > (stopIter - iter) || m + len > refLen) continue;
+                if (len > (maxIter - iter) || m + len > refLen) continue;
                 uint2 meta = BlaMeta[lv];
                 uint idx = start >> uint(lv);
                 if (idx >= meta.y) continue;
@@ -910,7 +603,7 @@ void CSPrimaryStage0(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
 }
 
 [numthreads(512, 1, 1)]
-void CSPrimaryResume(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
+void CSPrimaryResume(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
 {
     if (gi == 0u) s_groupCount = 0u;
     uint sharedLim = min(refLen + 1u, LDS_ORBIT_SIZE);
@@ -919,13 +612,14 @@ void CSPrimaryResume(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
     GroupMemoryBarrierWithGroupSync();
 
     uint activeTotal = SubpixelCountSrv[0];
-    bool valid = (tid.x < activeTotal);
+    uint activeIdx = (gid.y * 32768u + gid.x) * 512u + gi;
+    bool valid = (activeIdx < activeTotal);
     bool keepAlive = false;
     uint pix = 0u;
 
     if (valid)
     {
-        pix = SubpixelIndices[tid.x];
+        pix = SubpixelIndices[activeIdx];
         uint py = pix / width;
         uint px = pix - py * width;
         GpuPerturbState st = ActiveState[pix];
@@ -968,7 +662,7 @@ void CSPrimaryResume(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
 }
 
 [numthreads(512, 1, 1)]
-void CSSubpixels(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
+void CSSubpixels(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
 {
     uint sharedLim = min(refLen + 1u, LDS_ORBIT_SIZE);
     for (uint i = gi; i < sharedLim; i += 512u)
@@ -976,7 +670,7 @@ void CSSubpixels(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
     GroupMemoryBarrierWithGroupSync();
 
     uint activeTotal = (subpixelTotal == 0xFFFFFFFFu) ? (SubpixelCountSrv[0] * 4u) : subpixelTotal;
-    uint sIdx = tid.x;
+    uint sIdx = (gid.y * 32768u + gid.x) * 512u + gi;
     if (sIdx >= activeTotal) return;
     uint pix = SubpixelIndices[sIdx >> 2];
     uint corner = sIdx & 3u;
@@ -987,11 +681,6 @@ void CSSubpixels(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
     OutSubpixelsFlat[sIdx] = EvalPerturbLdsBla(ColCoords[px * 3u + kx], RowCoords[py * 3u + ky], sharedLim);
 }
 )";
-    }
-
-    const char* GetShallowShaderSource() noexcept
-    {
-        return kShallowShaderSrc;
     }
 
     const char* GetPerturbLdsShaderSource() noexcept

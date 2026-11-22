@@ -60,10 +60,29 @@ namespace
         ASSERT_TRUE(exporter.Progress().finished);
     }
 
+    struct ScopedComMf
+    {
+        HRESULT hrCom{ E_FAIL };
+        bool mfStarted{ false };
+        ScopedComMf()
+        {
+            hrCom = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            ASSERT_TRUE(SUCCEEDED(hrCom) || hrCom == RPC_E_CHANGED_MODE);
+            ASSERT_TRUE(SUCCEEDED(MFStartup(MF_VERSION)));
+            mfStarted = true;
+        }
+        ~ScopedComMf()
+        {
+            if (mfStarted) MFShutdown();
+            if (SUCCEEDED(hrCom)) CoUninitialize();
+        }
+    };
+
     void DumpBitmap(const wchar_t* name, int width, int height, const std::vector<uint32_t>& pixels)
     {
-        std::filesystem::create_directories(L"ARM64/MovieDiagnostics");
-        std::ofstream file(std::filesystem::path(L"ARM64/MovieDiagnostics") / name, std::ios::binary);
+        const auto dir = std::filesystem::temp_directory_path() / L"MandelbrotMovieDiagnostics";
+        std::filesystem::create_directories(dir);
+        std::ofstream file(dir / name, std::ios::binary);
         BITMAPFILEHEADER header{}; header.bfType = 0x4D42; header.bfOffBits = sizeof(header) + sizeof(BITMAPINFOHEADER);
         header.bfSize = header.bfOffBits + static_cast<DWORD>(pixels.size() * 4);
         BITMAPINFOHEADER info{}; info.biSize = sizeof(info); info.biWidth = width; info.biHeight = -height;
@@ -313,8 +332,7 @@ TEST_CASE(Movie, Mp4SampleTablesPreserveFramesAndTiming)
         ASSERT_EQ(end, pos);
     }
     // Independent Windows media reader verifies frame count, timing, and decodability.
-    const auto apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED); ASSERT_TRUE(SUCCEEDED(apartment));
-    ASSERT_TRUE(SUCCEEDED(MFStartup(MF_VERSION)));
+    ScopedComMf comMf;
     {
         ComPtr<IMFSourceReader> reader;
         ComPtr<IMFAttributes> attributes; MFCreateAttributes(&attributes, 1);
@@ -335,7 +353,6 @@ TEST_CASE(Movie, Mp4SampleTablesPreserveFramesAndTiming)
         }
         ASSERT_EQ(3, frames);
     }
-    MFShutdown(); CoUninitialize();
 }
 
 TEST_CASE(Movie, PlaybackPreservesFractalGeometryAndColors)
@@ -422,9 +439,7 @@ TEST_CASE(Movie, VideoWriterSupportsBothCodecsAndEightKFrames)
 
     File file; std::vector<uint32_t> pixels(static_cast<size_t>(7680) * 4320, 0xFF27496D);
     { MovieWriter writer(file.path.wstring(), 7680, 4320, 60, MovieCodec::Hevc); writer.WriteFrame(pixels); writer.Finish(); }
-    const auto apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    ASSERT_TRUE(SUCCEEDED(apartment) || apartment == RPC_E_CHANGED_MODE);
-    ASSERT_TRUE(SUCCEEDED(MFStartup(MF_VERSION)));
+    ScopedComMf comMf;
     {
         ComPtr<IMFSourceReader> reader;
         ComPtr<IMFAttributes> attributes; MFCreateAttributes(&attributes, 1);
@@ -440,8 +455,6 @@ TEST_CASE(Movie, VideoWriterSupportsBothCodecsAndEightKFrames)
         ASSERT_TRUE(SUCCEEDED(reader->ReadSample(videoStream, 0, nullptr, &flags, &timestamp, &sample)));
         ASSERT_TRUE(sample != nullptr);
     }
-    MFShutdown();
-    if (SUCCEEDED(apartment)) CoUninitialize();
 }
 
 TEST_CASE(Movie, FullEightKRenderAndPreviewPreserveUniformRegions)

@@ -148,14 +148,21 @@ namespace winrt::MandelbrotViewer::implementation
                 });
             const bool autoIterations = m_autoScaleIterations;
             const int baseIterations = m_baseIterations;
-            dialog.PrimaryButtonClick([&](auto&&, ContentDialogButtonClickEventArgs const& args)
+            const auto clickToken = dialog.PrimaryButtonClick([&](auto&&, ContentDialogButtonClickEventArgs const& args)
             {
                 try
                 {
-                    plan.width = Mandelbrot::MovieResolutions.at(resolution.SelectedIndex()).width;
-                    plan.height = Mandelbrot::MovieResolutions.at(resolution.SelectedIndex()).height;
-                    plan.fps = Mandelbrot::MovieFrameRates.at(fps.SelectedIndex());
-                    plan.codec = Mandelbrot::MovieCodecs.at(codec.SelectedIndex()).codec;
+                    const int resIdx = resolution.SelectedIndex();
+                    const int fpsIdx = fps.SelectedIndex();
+                    const int codecIdx = codec.SelectedIndex();
+                    if (resIdx < 0 || static_cast<size_t>(resIdx) >= Mandelbrot::MovieResolutions.size() ||
+                        fpsIdx < 0 || static_cast<size_t>(fpsIdx) >= Mandelbrot::MovieFrameRates.size() ||
+                        codecIdx < 0 || static_cast<size_t>(codecIdx) >= Mandelbrot::MovieCodecs.size())
+                        throw std::invalid_argument("Select a valid resolution, frame rate, and codec.");
+                    plan.width = Mandelbrot::MovieResolutions[static_cast<size_t>(resIdx)].width;
+                    plan.height = Mandelbrot::MovieResolutions[static_cast<size_t>(resIdx)].height;
+                    plan.fps = Mandelbrot::MovieFrameRates[static_cast<size_t>(fpsIdx)];
+                    plan.codec = Mandelbrot::MovieCodecs[static_cast<size_t>(codecIdx)].codec;
                     if (!std::isfinite(duration.Value()) || duration.Value() < 1 || duration.Value() > 3600 ||
                         duration.Value() != std::floor(duration.Value()))
                         throw std::invalid_argument("Enter a whole number of seconds.");
@@ -185,9 +192,14 @@ namespace winrt::MandelbrotViewer::implementation
                 }
                 catch (const std::exception& error) { errorText.Text(to_hstring(error.what())); args.Cancel(true); }
             });
-            if (co_await dialog.ShowAsync() == ContentDialogResult::Primary && !m_isClosed)
+            const auto dialogResult = co_await dialog.ShowAsync();
+            dialog.PrimaryButtonClick(clickToken);
+            if (dialogResult == ContentDialogResult::Primary && !m_isClosed)
             {
-                HWND hwnd{}; check_hresult(try_as<IWindowNative>()->get_WindowHandle(&hwnd));
+                HWND hwnd{};
+                auto windowNative = try_as<IWindowNative>();
+                if (!windowNative) throw winrt::hresult_no_interface();
+                check_hresult(windowNative->get_WindowHandle(&hwnd));
                 com_ptr<IFileSaveDialog> picker;
                 check_hresult(CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER, __uuidof(IFileSaveDialog), picker.put_void()));
                 const COMDLG_FILTERSPEC filter{L"High-quality MP4 movie", L"*.mp4"};
@@ -237,19 +249,34 @@ namespace winrt::MandelbrotViewer::implementation
     {
         if (m_isClosed || !m_movieExporter) return;
         const auto progress = m_movieExporter->Progress();
-        MovieProgressBar().Value(100.0 * std::min(static_cast<double>(progress.total),
-            static_cast<double>(progress.completed) + progress.frameFraction) / progress.total);
+        if (progress.total > 0)
+        {
+            MovieProgressBar().Value(100.0 * std::min(static_cast<double>(progress.total),
+                static_cast<double>(progress.completed) + progress.frameFraction) / progress.total);
+        }
         MovieRenderedText().Text(L"Rendered " + FootageTime(progress.completed, m_movieFps) + L" of " +
             FootageTime(progress.total, m_movieFps) + L"  |  " + to_hstring(progress.completed) + L" / " + to_hstring(progress.total) + L" frames");
         MovieElapsedText().Text(L"Elapsed time: " + ElapsedTime(progress.elapsedSeconds));
         if (auto preview = m_movieExporter->TakePreview())
         {
-            Media::Imaging::WriteableBitmap bitmap(preview->width, preview->height);
-            auto bytes = bitmap.PixelBuffer().as<::Windows::Storage::Streams::IBufferByteAccess>();
-            uint8_t* raw{}; check_hresult(bytes->Buffer(&raw));
-            std::memcpy(raw, preview->pixels.data(), preview->pixels.size() * sizeof(uint32_t)); bitmap.Invalidate();
-            MoviePreviewImage().Source(bitmap);
-            MoviePreviewText().Text(L"Preview at " + FootageTime(preview->frame, m_movieFps) + L" of footage | updates about every 15 seconds");
+            if (preview->width > 0 && preview->height > 0 &&
+                preview->pixels.size() == static_cast<size_t>(preview->width) * static_cast<size_t>(preview->height))
+            {
+                try
+                {
+                    Media::Imaging::WriteableBitmap bitmap(preview->width, preview->height);
+                    auto bytes = bitmap.PixelBuffer().as<::Windows::Storage::Streams::IBufferByteAccess>();
+                    uint8_t* raw{}; check_hresult(bytes->Buffer(&raw));
+                    if (raw)
+                    {
+                        std::memcpy(raw, preview->pixels.data(), preview->pixels.size() * sizeof(uint32_t));
+                        bitmap.Invalidate();
+                        MoviePreviewImage().Source(bitmap);
+                        MoviePreviewText().Text(L"Preview at " + FootageTime(preview->frame, m_movieFps) + L" of footage | updates about every 15 seconds");
+                    }
+                }
+                catch (...) {}
+            }
         }
         if (progress.finished)
         {

@@ -174,7 +174,7 @@ namespace Mandelbrot
                         const double qy = 2.0 * pxTerm * pyTerm;
                         const double qMod2 = qx * qx + qy * qy;
 
-                        if (qMod2 < 1e-280)
+                        if (!(qMod2 >= 1e-280) || !std::isfinite(qMod2))
                         {
                             inPerturbation = false;
                             continue;

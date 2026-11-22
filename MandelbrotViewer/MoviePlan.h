@@ -87,7 +87,7 @@ namespace Mandelbrot
                 (autoScaleIterations && baseIterations < 1) ||
                 !std::isfinite(targetX.ToDouble()) || !std::isfinite(targetY.ToDouble()) ||
                 !std::isfinite(start.hpCenterX.ToDouble()) || !std::isfinite(start.hpCenterY.ToDouble()) ||
-                !std::isfinite(frequency) || !std::isfinite(phase))
+                !std::isfinite(frequency) || !(frequency > 0.0f) || !std::isfinite(phase))
                 throw std::invalid_argument("Invalid movie resolution, frame rate, duration, or zoom.");
             if (autoRetarget && (endZoom <= start.zoom || start.juliaSet))
                 throw std::invalid_argument("Auto-Pick Target requires zooming in on a fractal's main view.");
@@ -99,7 +99,8 @@ namespace Mandelbrot
             camera.width = width; camera.height = height;
             camera.renderStride = 1;
             camera.edgeRefine = false;
-            const double t = std::clamp(frameIndex / (FrameCount() - 1.0), 0.0, 1.0);
+            const uint32_t totalFrames = FrameCount();
+            const double t = (totalFrames <= 1) ? 0.0 : std::clamp(frameIndex / (totalFrames - 1.0), 0.0, 1.0);
             const double range = std::log(endZoom) - std::log(start.zoom);
             camera.zoom = ZoomAt(frameIndex);
             if (autoScaleIterations)

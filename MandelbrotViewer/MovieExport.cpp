@@ -3,11 +3,12 @@
 #endif
 #include <windows.h>
 #include "MovieExport.h"
+#include "MovieFrameRenderer.h"
 #include "MovieZoomPyramid.h"
 #include "GpuFractalSolver.h"
 #include "MovieWriter.h"
+#include <algorithm>
 #include <condition_variable>
-#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <system_error>
@@ -18,716 +19,6 @@ namespace Mandelbrot
     {
         struct Canceled {};
         void ThrowIfCanceled(const std::atomic<bool>& cancel) { if (cancel.load(std::memory_order_relaxed)) throw Canceled{}; }
-
-        bool BuildShutterParams(
-            const MoviePlan& plan,
-            double frameIndex,
-            const MandelbrotConfig& cam0,
-            GpuMovieShutterParams& outShutter)
-        {
-            outShutter = {};
-            if (!plan.motionSmoothing || plan.FrameCount() <= 1)
-            {
-                return false;
-            }
-
-            constexpr std::array<double, 7> kTapOffsets{
-                -0.25, -1.0 / 6.0, -1.0 / 12.0, 0.0, 1.0 / 12.0, 1.0 / 6.0, 0.25
-            };
-
-            const BigFloat invStep0(cam0.zoom * (static_cast<double>(plan.width) / 3.0));
-            const float halfW = static_cast<float>(plan.width) * 0.5f;
-            const float halfH = static_cast<float>(plan.height) * 0.5f;
-            float maxCornerMotionPx = 0.0f;
-
-            outShutter.tapCount = static_cast<uint32_t>(kTapOffsets.size());
-            for (size_t k = 0; k < kTapOffsets.size(); ++k)
-            {
-                if (kTapOffsets[k] == 0.0)
-                {
-                    outShutter.shiftX[k] = 0.0f;
-                    outShutter.shiftY[k] = 0.0f;
-                    outShutter.scale[k] = 1.0f;
-                    continue;
-                }
-
-                const auto camTau = plan.CameraAt(frameIndex + kTapOffsets[k]);
-                const float sx = static_cast<float>((camTau.hpCenterX - cam0.hpCenterX).Mul(invStep0).ToDouble());
-                const float sy = static_cast<float>(-(camTau.hpCenterY - cam0.hpCenterY).Mul(invStep0).ToDouble());
-                const float sc = static_cast<float>(cam0.zoom / camTau.zoom);
-
-                outShutter.shiftX[k] = sx;
-                outShutter.shiftY[k] = sy;
-                outShutter.scale[k] = sc;
-
-                const float ds = sc - 1.0f;
-                maxCornerMotionPx = std::max({
-                    maxCornerMotionPx,
-                    std::abs(sx + halfW * ds),
-                    std::abs(sx - halfW * ds),
-                    std::abs(sy + halfH * ds),
-                    std::abs(sy - halfH * ds) });
-            }
-
-            if (maxCornerMotionPx < 0.05f)
-            {
-                outShutter.tapCount = 0;
-                return false;
-            }
-            return true;
-        }
-
-        void ApplyCpuShutterBlur(
-            const std::vector<uint32_t>& rawPixels,
-            std::vector<uint32_t>& outPixels,
-            int width,
-            int height,
-            const GpuMovieShutterParams& shutter,
-            const detail::LinearSrgbTables& colors,
-            const std::atomic<bool>& cancel)
-        {
-            const uint32_t tapCount = shutter.tapCount;
-            const float halfW = static_cast<float>(width) * 0.5f;
-            const float halfH = static_cast<float>(height) * 0.5f;
-            const float maxPx = static_cast<float>(width - 1);
-            const float maxPy = static_cast<float>(height - 1);
-            const float firstSx = shutter.shiftX[0], firstSy = shutter.shiftY[0], firstSc = shutter.scale[0];
-            const float lastSx = shutter.shiftX[tapCount - 1], lastSy = shutter.shiftY[tapCount - 1], lastSc = shutter.scale[tapCount - 1];
-
-            #pragma omp parallel for schedule(static)
-            for (int y = 0; y < height; ++y)
-            {
-                if (cancel.load(std::memory_order_relaxed)) continue;
-                const float relY = static_cast<float>(y) + 0.5f - halfH;
-                const size_t rowBase = static_cast<size_t>(y) * static_cast<size_t>(width);
-
-                for (int x = 0; x < width; ++x)
-                {
-                    const size_t idx = rowBase + static_cast<size_t>(x);
-                    const uint32_t centerColor = rawPixels[idx];
-                    const float relX = static_cast<float>(x) + 0.5f - halfW;
-
-                    const float spanX = std::abs((lastSx - firstSx) + relX * (lastSc - firstSc));
-                    const float spanY = std::abs((lastSy - firstSy) + relY * (lastSc - firstSc));
-                    if (std::max(spanX, spanY) < 0.125f)
-                    {
-                        outPixels[idx] = centerColor;
-                        continue;
-                    }
-
-                    float sumB = 0.0f, sumG = 0.0f, sumR = 0.0f;
-                    uint32_t validCount = 0;
-                    bool allEqualCenter = true;
-
-                    for (uint32_t k = 0; k < tapCount; ++k)
-                    {
-                        const float px = halfW + shutter.shiftX[k] + relX * shutter.scale[k] - 0.5f;
-                        const float py = halfH + shutter.shiftY[k] + relY * shutter.scale[k] - 0.5f;
-                        if (px < 0.0f || px > maxPx || py < 0.0f || py > maxPy)
-                            continue;
-
-                        const int x0 = static_cast<int>(px);
-                        const int y0 = static_cast<int>(py);
-                        const int x1 = std::min(x0 + 1, width - 1);
-                        const int y1 = std::min(y0 + 1, height - 1);
-                        const float fx = px - static_cast<float>(x0);
-                        const float fy = py - static_cast<float>(y0);
-
-                        const size_t r0 = static_cast<size_t>(y0) * static_cast<size_t>(width);
-                        const size_t r1 = static_cast<size_t>(y1) * static_cast<size_t>(width);
-                        const uint32_t c00 = rawPixels[r0 + static_cast<size_t>(x0)];
-                        const uint32_t c10 = rawPixels[r0 + static_cast<size_t>(x1)];
-                        const uint32_t c01 = rawPixels[r1 + static_cast<size_t>(x0)];
-                        const uint32_t c11 = rawPixels[r1 + static_cast<size_t>(x1)];
-
-                        if (c00 == c10 && c00 == c01 && c00 == c11)
-                        {
-                            if (c00 != centerColor) allEqualCenter = false;
-                            sumB += colors.decode[c00 & 255];
-                            sumG += colors.decode[(c00 >> 8) & 255];
-                            sumR += colors.decode[(c00 >> 16) & 255];
-                        }
-                        else
-                        {
-                            allEqualCenter = false;
-                            const float w00 = (1.0f - fx) * (1.0f - fy);
-                            const float w10 = fx * (1.0f - fy);
-                            const float w01 = (1.0f - fx) * fy;
-                            const float w11 = fx * fy;
-                            sumB += colors.decode[c00 & 255] * w00 + colors.decode[c10 & 255] * w10 +
-                                    colors.decode[c01 & 255] * w01 + colors.decode[c11 & 255] * w11;
-                            sumG += colors.decode[(c00 >> 8) & 255] * w00 + colors.decode[(c10 >> 8) & 255] * w10 +
-                                    colors.decode[(c01 >> 8) & 255] * w01 + colors.decode[(c11 >> 8) & 255] * w11;
-                            sumR += colors.decode[(c00 >> 16) & 255] * w00 + colors.decode[(c10 >> 16) & 255] * w10 +
-                                    colors.decode[(c01 >> 16) & 255] * w01 + colors.decode[(c11 >> 16) & 255] * w11;
-                        }
-                        ++validCount;
-                    }
-
-                    if (validCount == 0 || allEqualCenter)
-                    {
-                        outPixels[idx] = centerColor;
-                        continue;
-                    }
-
-                    const float inv = 1.0f / static_cast<float>(validCount);
-                    const uint32_t b = colors.encode[static_cast<size_t>(std::clamp(sumB * inv * 4096.0f + 0.5f, 0.0f, 4096.0f))];
-                    const uint32_t g = colors.encode[static_cast<size_t>(std::clamp(sumG * inv * 4096.0f + 0.5f, 0.0f, 4096.0f))];
-                    const uint32_t r = colors.encode[static_cast<size_t>(std::clamp(sumR * inv * 4096.0f + 0.5f, 0.0f, 4096.0f))];
-                    outPixels[idx] = 0xFF000000u | (r << 16) | (g << 8) | b;
-                }
-            }
-        }
-    }
-
-    bool MoviePlan::PrepareAutoTargets(const std::atomic<bool>& cancel)
-    {
-        Validate();
-        m_autoTargets.clear();
-        if (!autoRetarget) return true;
-        MandelbrotEngine engine;
-        auto probe = start;
-        // Analyze the same small viewport at every output resolution and frame rate.
-        // Target decisions depend on footage time and magnification, not render speed.
-        const double scale = std::min(192.0 / width, 108.0 / height);
-        probe.width = std::max(8, static_cast<int>(std::lround(width * scale)));
-        probe.height = std::max(8, static_cast<int>(std::lround(height * scale)));
-        probe.renderStride = 1; probe.edgeRefine = false;
-        std::vector<float> iterations;
-        const double range = std::log(endZoom) - std::log(start.zoom);
-        const int checks = static_cast<int>(std::ceil(std::max(seconds / .5, range / std::log(1.2))));
-        AutoTarget state;
-        state.x = start.hpCenterX; state.y = start.hpCenterY;
-        state.targetX = state.x; state.targetY = state.y;
-        uint64_t seed = targetSeed;
-        for (int check = 0; check < checks; ++check)
-        {
-            if (cancel.load(std::memory_order_relaxed)) { m_autoTargets.clear(); return false; }
-            const double t = static_cast<double>(check) / checks;
-            if (check != 0) state = AdvanceAutoTarget(m_autoTargets.back(), t);
-            // Retarget hysteresis follows elapsed footage or a doubling in zoom,
-            // including very fast movies that cross several zoom decades per second.
-            if (check != 0 && (t - m_autoTargets.back().progress) * seconds < .5 &&
-                (t - m_autoTargets.back().progress) * range < std::log(2.0)) continue;
-            probe.zoom = check == 0 ? start.zoom : std::exp(std::log(start.zoom) + range * t);
-            if (autoScaleIterations)
-            {
-                probe.maxIterations = MandelbrotEngine::RecommendMaxIterations(
-                    probe.zoom, probe.fractalType, baseIterations);
-            }
-            probe.SetCenter(state.x, state.y);
-            engine.Compute(probe, iterations, &cancel);
-            if (cancel.load(std::memory_order_relaxed)) { m_autoTargets.clear(); return false; }
-            if (check == 0 || MandelbrotEngine::ShouldRetargetZoom(probe, iterations, state.targetX, state.targetY))
-            {
-                // A deterministic stream of nonzero seeds leaves subframe lookups
-                // independent of randomness and of the order in which they are rendered.
-                seed += 0x9e3779b97f4a7c15ull;
-                uint64_t sample = seed;
-                sample = (sample ^ (sample >> 30)) * 0xbf58476d1ce4e5b9ull;
-                sample = (sample ^ (sample >> 27)) * 0x94d049bb133111ebull;
-                sample ^= sample >> 31;
-                BigFloat x = state.targetX, y = state.targetY;
-                const bool found = MandelbrotEngine::PickInterestingTarget(probe, iterations, x, y, sample == 0 ? 1 : sample);
-                // The live picker can fall back to a distant bookmark when everything
-                // is uniform. A movie must not fly across millions of viewport widths;
-                // keep following the current target until visible detail is available.
-                const double span = 3.0 / probe.zoom;
-                if (found && std::abs((x - state.x).ToDouble()) <= span * .5 &&
-                    std::abs((y - state.y).ToDouble()) <= span * probe.height / probe.width * .5)
-                {
-                    state.targetX = x; state.targetY = y;
-                    m_autoTargets.push_back(state);
-                }
-                else if (check == 0) m_autoTargets.push_back(state);
-            }
-        }
-        if (cancel.load(std::memory_order_relaxed)) { m_autoTargets.clear(); return false; }
-        return true;
-    }
-
-    std::vector<uint32_t> RenderMovieFrame(const MoviePlan& plan, double frameIndex,
-        const std::atomic<bool>& cancel, const std::function<void(float)>& progress,
-        int bandRows, MandelbrotEngine* sharedEngine)
-    {
-        plan.Validate();
-        if (bandRows < 1) throw std::invalid_argument("Invalid movie render band size.");
-        if (cancel.load(std::memory_order_relaxed)) return {};
-        const auto& colors = detail::LinearSrgbTables::Instance();
-        const ExecutionMode requestedMode = plan.useGpu ? ExecutionMode::Gpu : ExecutionMode::Automatic;
-        std::optional<MandelbrotEngine> localEngine;
-        if (!sharedEngine)
-        {
-            localEngine.emplace(requestedMode);
-        }
-        MandelbrotEngine& engine = sharedEngine ? *sharedEngine : *localEngine;
-        const ExecutionMode previousMode = engine.GetExecutionMode();
-        const ExecutionMode effectiveMode = (previousMode == ExecutionMode::Scalar) ? ExecutionMode::Scalar : requestedMode;
-        struct ModeGuard
-        {
-            MandelbrotEngine& eng;
-            ExecutionMode prev;
-            ~ModeGuard() { eng.SetExecutionMode(prev); }
-        } modeGuard{ engine, previousMode };
-        engine.SetExecutionMode(effectiveMode);
-
-        const size_t totalPixels = static_cast<size_t>(plan.width) * plan.height;
-        std::vector<uint32_t> output(totalPixels), rawOutput, painted;
-        std::vector<float> iterations;
-        std::vector<SubpixelSamples> subpixels;
-        const MandelbrotConfig camera = plan.CameraAt(frameIndex);
-        const BigFloat step(3.0 / camera.zoom / plan.width);
-        GpuMovieShutterParams shutter{};
-        const bool hasShutter = BuildShutterParams(plan, frameIndex, camera, shutter);
-        const bool gpuFullFrame = (totalPixels <= 16ULL * 1024 * 1024);
-
-        if (effectiveMode == ExecutionMode::Gpu &&
-            engine.CanUseGpu(camera) &&
-            engine.BeginGpuMovieFrame(plan.width, plan.height, hasShutter && gpuFullFrame))
-        {
-            const int maxStripByMem = std::max(
-                1,
-                static_cast<int>((4ULL * 1024 * 1024) / static_cast<size_t>(plan.width)) - 2);
-            const bool gpuMultiPassEligible =
-                (camera.fractalType == FractalType::Mandelbrot &&
-                 !camera.juliaSet &&
-                 camera.zoom >= GpuPerturbationThreshold);
-            const uint64_t effectiveDispatchIters = static_cast<uint64_t>(
-                gpuMultiPassEligible
-                    ? std::min(std::max(1, camera.maxIterations), 12288)
-                    : std::max(1, camera.maxIterations));
-            const int maxStripByTdr = std::max(
-                16,
-                static_cast<int>(12'000'000'000ULL /
-                    (static_cast<uint64_t>(plan.width) * effectiveDispatchIters)));
-            const int gpuBandRows = std::min({ bandRows, maxStripByMem, maxStripByTdr });
-
-            if (hasShutter && !gpuFullFrame)
-            {
-                rawOutput.resize(totalPixels);
-            }
-            uint32_t* bandTargetBase = (hasShutter && !gpuFullFrame) ? rawOutput.data() : output.data();
-
-            bool gpuOk = true;
-            engine.PrepareDeepReference(camera, &cancel);
-            if (cancel.load(std::memory_order_relaxed)) return {};
-
-            for (int row = 0; row < plan.height && gpuOk; row += gpuBandRows)
-            {
-                if (cancel.load(std::memory_order_relaxed)) return {};
-                const int rows = std::min(gpuBandRows, plan.height - row);
-                const int topHalo = row > 0 ? 1 : 0;
-                const int bottomHalo = (row + rows < plan.height) ? 1 : 0;
-                const int firstRow = row - topHalo;
-                const int bandHeight = rows + topHalo + bottomHalo;
-                const BigFloat rowOffset((plan.height - bandHeight) * .5 - firstRow);
-
-                auto band = camera;
-                band.height = bandHeight;
-                band.SetCenter(camera.hpCenterX,
-                    camera.hpCenterY + step.Mul(rowOffset));
-
-                uint32_t* outBand = bandTargetBase + static_cast<size_t>(row) * plan.width;
-                gpuOk = engine.RenderGpuMovieBand(
-                    band, topHalo, rows, row,
-                    plan.theme, plan.frequency, plan.phase, plan.invert, plan.interior,
-                    outBand, &cancel);
-                if (cancel.load(std::memory_order_relaxed)) return {};
-
-                if (gpuOk && progress)
-                {
-                    progress(static_cast<float>(static_cast<double>(row + rows) / plan.height));
-                }
-            }
-
-            if (cancel.load(std::memory_order_relaxed)) return {};
-            if (gpuOk && engine.FinishGpuMovieFrame(
-                plan.width,
-                plan.height,
-                output.data(),
-                (hasShutter && gpuFullFrame) ? &shutter : nullptr))
-            {
-                if (hasShutter && !gpuFullFrame)
-                {
-                    ApplyCpuShutterBlur(rawOutput, output, plan.width, plan.height, shutter, colors, cancel);
-                    if (cancel.load(std::memory_order_relaxed)) return {};
-                }
-                return output;
-            }
-        }
-
-        if (hasShutter)
-        {
-            rawOutput.resize(totalPixels);
-        }
-        uint32_t* cpuTargetBase = hasShutter ? rawOutput.data() : output.data();
-
-        engine.PrepareDeepReference(camera, &cancel);
-        if (cancel.load(std::memory_order_relaxed)) return {};
-
-        for (int row = 0; row < plan.height; row += bandRows)
-        {
-            if (cancel.load(std::memory_order_relaxed)) return {};
-            const int rows = std::min(bandRows, plan.height - row);
-            const int topHalo = row > 0 ? 1 : 0;
-            const int bottomHalo = (row + rows < plan.height) ? 1 : 0;
-            const int firstRow = row - topHalo;
-            const int bandHeight = rows + topHalo + bottomHalo;
-            const size_t count = static_cast<size_t>(plan.width) * rows;
-            const size_t bandCount = static_cast<size_t>(plan.width) * bandHeight;
-            painted.resize(bandCount);
-            const BigFloat rowOffset((plan.height - bandHeight) * .5 - firstRow);
-
-            auto band = camera;
-            band.height = bandHeight;
-            band.SetCenter(camera.hpCenterX,
-                camera.hpCenterY + step.Mul(rowOffset));
-            engine.Compute(band, iterations, &cancel, &subpixels);
-            if (cancel.load(std::memory_order_relaxed)) return {};
-            // Halo rows provide complete 3x3 neighborhoods across band boundaries, making
-            // adaptive subpixel refinement and colors independent of render bands.
-            plan.theme.Recolor(iterations, painted.data(), bandCount, plan.frequency, plan.phase,
-                plan.invert, plan.interior, band.fractalType, band.width, &subpixels, false);
-            const uint32_t* bandPixels = painted.data() + static_cast<size_t>(topHalo) * plan.width;
-            uint32_t* outBand = cpuTargetBase + static_cast<size_t>(row) * plan.width;
-            std::memcpy(outBand, bandPixels, count * sizeof(uint32_t));
-            if (progress)
-            {
-                progress(static_cast<float>(static_cast<double>(row + rows) / plan.height));
-            }
-        }
-
-        if (hasShutter)
-        {
-            ApplyCpuShutterBlur(rawOutput, output, plan.width, plan.height, shutter, colors, cancel);
-            if (cancel.load(std::memory_order_relaxed)) return {};
-        }
-        return output;
-    }
-
-    namespace
-    {
-        bool RenderMovieCameraRect(
-            const MoviePlan& plan,
-            const FractalConfig& fullCamera,
-            int rx0,
-            int ry0,
-            int rw,
-            int rh,
-            uint32_t* dstPixels,
-            MandelbrotEngine& engine,
-            ExecutionMode effectiveMode,
-            const std::atomic<bool>& cancel,
-            int bandRows,
-            uint64_t& completedPixels,
-            uint64_t totalWorkPixels,
-            const std::function<void(float)>& progress)
-        {
-            if (rw <= 0 || rh <= 0) return true;
-            if (cancel.load(std::memory_order_relaxed)) return false;
-
-            const int leftHalo = (rx0 > 0) ? 1 : 0;
-            const int rightHalo = (rx0 + rw < fullCamera.width) ? 1 : 0;
-            const int subFirstX = rx0 - leftHalo;
-            const int subW = rw + leftHalo + rightHalo;
-            const bool fullWidthDirect = (leftHalo == 0 && rightHalo == 0 && rw == fullCamera.width);
-
-            const BigFloat step = BigFloat(3.0 / fullCamera.zoom).Mul(BigFloat(1.0 / static_cast<double>(fullCamera.width)));
-            auto subCam = fullCamera;
-            subCam.width = subW;
-            subCam.height = rh;
-            subCam.renderStride = 1;
-            subCam.edgeRefine = false;
-            subCam.zoom = fullWidthDirect
-                ? fullCamera.zoom
-                : (fullCamera.zoom * (static_cast<double>(fullCamera.width) / static_cast<double>(subW)));
-            const BigFloat subCenterX = fullWidthDirect
-                ? fullCamera.hpCenterX
-                : (fullCamera.hpCenterX + step.Mul(BigFloat(static_cast<double>(subFirstX) + static_cast<double>(subW) * 0.5 - static_cast<double>(fullCamera.width) * 0.5)));
-            subCam.SetCenter(subCenterX, fullCamera.hpCenterY);
-
-            const size_t subVisiblePixels = static_cast<size_t>(subW) * static_cast<size_t>(rh);
-            const bool gpuFullRect = (subVisiblePixels <= 16ULL * 1024 * 1024);
-
-            auto copySubRows = [&](const uint32_t* srcBase, int localStartRow, int rowCount)
-            {
-                for (int y = 0; y < rowCount; ++y)
-                {
-                    const uint32_t* srcRow = srcBase + static_cast<size_t>(y) * static_cast<size_t>(subW) + leftHalo;
-                    uint32_t* dstRow = dstPixels + static_cast<size_t>(ry0 + localStartRow + y) * static_cast<size_t>(fullCamera.width) + rx0;
-                    std::memcpy(dstRow, srcRow, static_cast<size_t>(rw) * sizeof(uint32_t));
-                }
-            };
-
-            if (effectiveMode == ExecutionMode::Gpu &&
-                engine.CanUseGpu(subCam) &&
-                engine.BeginGpuMovieFrame(subW, rh, false))
-            {
-                const int maxStripByMem = std::max(
-                    1,
-                    static_cast<int>((4ULL * 1024 * 1024) / static_cast<size_t>(subW)) - 2);
-                const bool gpuMultiPassEligible =
-                    (subCam.fractalType == FractalType::Mandelbrot &&
-                     !subCam.juliaSet &&
-                     subCam.zoom >= GpuPerturbationThreshold);
-                const uint64_t effectiveDispatchIters = static_cast<uint64_t>(
-                    gpuMultiPassEligible
-                        ? std::min(std::max(1, subCam.maxIterations), 12288)
-                        : std::max(1, subCam.maxIterations));
-                const int maxStripByTdr = std::max(
-                    16,
-                    static_cast<int>(12'000'000'000ULL /
-                        (static_cast<uint64_t>(subW) * effectiveDispatchIters)));
-                const int gpuBandRows = std::min({ bandRows, maxStripByMem, maxStripByTdr });
-
-                std::vector<uint32_t> gpuRectScratch;
-                uint32_t* gpuRectTarget = nullptr;
-                if (gpuFullRect)
-                {
-                    if (fullWidthDirect)
-                    {
-                        gpuRectTarget = dstPixels + static_cast<size_t>(ry0) * static_cast<size_t>(fullCamera.width);
-                    }
-                    else
-                    {
-                        gpuRectScratch.resize(subVisiblePixels);
-                        gpuRectTarget = gpuRectScratch.data();
-                    }
-                }
-                else if (!fullWidthDirect)
-                {
-                    gpuRectScratch.resize(static_cast<size_t>(subW) * static_cast<size_t>(gpuBandRows));
-                }
-
-                bool gpuOk = true;
-                uint64_t rectProgressDone = 0;
-                for (int localRow = 0; localRow < rh && gpuOk; localRow += gpuBandRows)
-                {
-                    if (cancel.load(std::memory_order_relaxed)) return false;
-                    const int rows = std::min(gpuBandRows, rh - localRow);
-                    const int globalRow = ry0 + localRow;
-                    const int topHalo = (globalRow > 0) ? 1 : 0;
-                    const int bottomHalo = (globalRow + rows < fullCamera.height) ? 1 : 0;
-                    const int firstGlobalY = globalRow - topHalo;
-                    const int bandHeight = rows + topHalo + bottomHalo;
-                    const BigFloat rowOffset((fullCamera.height - bandHeight) * 0.5 - firstGlobalY);
-
-                    auto band = subCam;
-                    band.height = bandHeight;
-                    band.SetCenter(subCenterX, fullCamera.hpCenterY + step.Mul(rowOffset));
-
-                    uint32_t* outBand = nullptr;
-                    if (!gpuFullRect)
-                    {
-                        outBand = fullWidthDirect
-                            ? (dstPixels + static_cast<size_t>(globalRow) * static_cast<size_t>(fullCamera.width))
-                            : gpuRectScratch.data();
-                    }
-                    else
-                    {
-                        outBand = gpuRectTarget + static_cast<size_t>(localRow) * static_cast<size_t>(subW);
-                    }
-
-                    gpuOk = engine.RenderGpuMovieBand(
-                        band, topHalo, rows, localRow,
-                        plan.theme, plan.frequency, plan.phase, plan.invert, plan.interior,
-                        outBand, &cancel);
-                    if (cancel.load(std::memory_order_relaxed)) return false;
-
-                    if (gpuOk)
-                    {
-                        if (!gpuFullRect && !fullWidthDirect)
-                        {
-                            copySubRows(gpuRectScratch.data(), localRow, rows);
-                        }
-                        rectProgressDone += static_cast<uint64_t>(rw) * static_cast<uint64_t>(rows);
-                        if (progress && totalWorkPixels > 0)
-                        {
-                            progress(static_cast<float>(static_cast<double>(completedPixels + rectProgressDone) / static_cast<double>(totalWorkPixels)));
-                        }
-                    }
-                }
-
-                if (cancel.load(std::memory_order_relaxed)) return false;
-                if (gpuOk)
-                {
-                    if (gpuFullRect)
-                    {
-                        if (!engine.FinishGpuMovieFrame(subW, rh, gpuRectTarget, nullptr))
-                        {
-                            gpuOk = false;
-                        }
-                        else if (!fullWidthDirect)
-                        {
-                            copySubRows(gpuRectTarget, 0, rh);
-                        }
-                    }
-                    else
-                    {
-                        gpuOk = engine.FinishGpuMovieFrame(subW, rh, dstPixels, nullptr);
-                    }
-                }
-                if (gpuOk)
-                {
-                    completedPixels += static_cast<uint64_t>(rw) * static_cast<uint64_t>(rh);
-                    return true;
-                }
-            }
-
-            // CPU fallback path
-            std::vector<float> iterations;
-            std::vector<SubpixelSamples> subpixels;
-            std::vector<uint32_t> painted;
-            for (int localRow = 0; localRow < rh; localRow += bandRows)
-            {
-                if (cancel.load(std::memory_order_relaxed)) return false;
-                const int rows = std::min(bandRows, rh - localRow);
-                const int globalRow = ry0 + localRow;
-                const int topHalo = (globalRow > 0) ? 1 : 0;
-                const int bottomHalo = (globalRow + rows < fullCamera.height) ? 1 : 0;
-                const int firstGlobalY = globalRow - topHalo;
-                const int bandHeight = rows + topHalo + bottomHalo;
-                const size_t bandCount = static_cast<size_t>(subW) * static_cast<size_t>(bandHeight);
-                painted.resize(bandCount);
-                const BigFloat rowOffset((fullCamera.height - bandHeight) * 0.5 - firstGlobalY);
-
-                auto band = subCam;
-                band.height = bandHeight;
-                band.SetCenter(subCenterX, fullCamera.hpCenterY + step.Mul(rowOffset));
-                engine.Compute(band, iterations, &cancel, &subpixels);
-                if (cancel.load(std::memory_order_relaxed)) return false;
-
-                plan.theme.Recolor(iterations, painted.data(), bandCount, plan.frequency, plan.phase,
-                    plan.invert, plan.interior, band.fractalType, band.width, &subpixels, false);
-
-                const uint32_t* visBase = painted.data() + static_cast<size_t>(topHalo) * static_cast<size_t>(subW);
-                if (fullWidthDirect)
-                {
-                    uint32_t* dstRow = dstPixels + static_cast<size_t>(globalRow) * static_cast<size_t>(fullCamera.width);
-                    std::memcpy(dstRow, visBase, static_cast<size_t>(rw) * static_cast<size_t>(rows) * sizeof(uint32_t));
-                }
-                else
-                {
-                    copySubRows(visBase, localRow, rows);
-                }
-
-                completedPixels += static_cast<uint64_t>(rw) * static_cast<uint64_t>(rows);
-                if (progress && totalWorkPixels > 0)
-                {
-                    progress(static_cast<float>(static_cast<double>(completedPixels) / static_cast<double>(totalWorkPixels)));
-                }
-            }
-            return true;
-        }
-    }
-
-    std::vector<uint32_t> RenderMovieKeyframe(
-        const MoviePlan& plan,
-        const FractalConfig& keyframeCamera,
-        const KeyframeInnerRect* skipRect,
-        const std::atomic<bool>& cancel,
-        const std::function<void(float)>& progress,
-        int bandRows,
-        MandelbrotEngine* sharedEngine)
-    {
-        if (bandRows < 1 || keyframeCamera.width < 1 || keyframeCamera.height < 1)
-            throw std::invalid_argument("Invalid keyframe render dimensions.");
-        if (cancel.load(std::memory_order_relaxed)) return {};
-
-        const ExecutionMode requestedMode = plan.useGpu ? ExecutionMode::Gpu : ExecutionMode::Automatic;
-        std::optional<MandelbrotEngine> localEngine;
-        if (!sharedEngine)
-        {
-            localEngine.emplace(requestedMode);
-        }
-        MandelbrotEngine& engine = sharedEngine ? *sharedEngine : *localEngine;
-        const ExecutionMode previousMode = engine.GetExecutionMode();
-        const ExecutionMode effectiveMode = (previousMode == ExecutionMode::Scalar) ? ExecutionMode::Scalar : requestedMode;
-        struct ModeGuard
-        {
-            MandelbrotEngine& eng;
-            ExecutionMode prev;
-            ~ModeGuard() { eng.SetExecutionMode(prev); }
-        } modeGuard{ engine, previousMode };
-        engine.SetExecutionMode(effectiveMode);
-
-        const int kfW = keyframeCamera.width;
-        const int kfH = keyframeCamera.height;
-        std::vector<uint32_t> output(static_cast<size_t>(kfW) * static_cast<size_t>(kfH), 0);
-
-        engine.PrepareDeepReference(keyframeCamera, &cancel);
-        if (cancel.load(std::memory_order_relaxed)) return {};
-
-        const bool useSkip = (skipRect != nullptr && skipRect->valid &&
-                              skipRect->x0 >= 0 && skipRect->y0 >= 0 &&
-                              skipRect->x1 <= kfW && skipRect->y1 <= kfH &&
-                              skipRect->x0 < skipRect->x1 && skipRect->y0 < skipRect->y1);
-
-        uint64_t totalWorkPixels = static_cast<uint64_t>(kfW) * static_cast<uint64_t>(kfH);
-        if (useSkip)
-        {
-            totalWorkPixels -= static_cast<uint64_t>(skipRect->x1 - skipRect->x0) *
-                               static_cast<uint64_t>(skipRect->y1 - skipRect->y0);
-        }
-        uint64_t completedPixels = 0;
-
-        if (!useSkip)
-        {
-            if (!RenderMovieCameraRect(plan, keyframeCamera, 0, 0, kfW, kfH,
-                output.data(), engine, effectiveMode, cancel, bandRows, completedPixels, totalWorkPixels, progress))
-            {
-                return {};
-            }
-            return output;
-        }
-
-        // Render the 4 outer picture-frame strips around the skipped interior rectangle.
-        // Order Top & Bottom first (both at full keyframe zoom), then Left & Right.
-        const std::array<std::array<int, 4>, 4> strips{{
-            { 0, 0, kfW, skipRect->y0 },
-            { 0, skipRect->y1, kfW, kfH - skipRect->y1 },
-            { 0, skipRect->y0, skipRect->x0, skipRect->y1 - skipRect->y0 },
-            { skipRect->x1, skipRect->y0, kfW - skipRect->x1, skipRect->y1 - skipRect->y0 }
-        }};
-
-        for (const auto& s : strips)
-        {
-            if (s[2] <= 0 || s[3] <= 0) continue;
-            if (!RenderMovieCameraRect(plan, keyframeCamera, s[0], s[1], s[2], s[3],
-                output.data(), engine, effectiveMode, cancel, bandRows, completedPixels, totalWorkPixels, progress))
-            {
-                return {};
-            }
-        }
-        return output;
-    }
-
-    MoviePreview MakeMoviePreview(const std::vector<uint32_t>& pixels, int width, int height, uint32_t frame)
-    {
-        if (width < 1 || height < 1 || width > 7680 || height > 4320 || pixels.size() != static_cast<size_t>(width) * height)
-            throw std::invalid_argument("Invalid movie preview dimensions.");
-        MoviePreview preview;
-        preview.width = std::min(960, width);
-        preview.height = std::max(1, height * preview.width / width);
-        preview.frame = frame;
-        preview.pixels.resize(static_cast<size_t>(preview.width) * preview.height);
-        #pragma omp parallel for schedule(static)
-        for (int y = 0; y < preview.height; ++y)
-            for (int x = 0; x < preview.width; ++x)
-            {
-                uint32_t sums[3]{}; uint32_t count = 0;
-                for (int sy = y * height / preview.height; sy < (y + 1) * height / preview.height; ++sy)
-                    for (int sx = x * width / preview.width; sx < (x + 1) * width / preview.width; ++sx)
-                    {
-                        const auto c = pixels[static_cast<size_t>(sy) * width + sx];
-                        for (int ch = 0; ch < 3; ++ch) sums[ch] += (c >> (8 * ch)) & 255;
-                        ++count;
-                    }
-                uint32_t color = 0xFF000000;
-                for (int ch = 0; ch < 3; ++ch) color |= ((sums[ch] + count / 2) / count) << (8 * ch);
-                preview.pixels[static_cast<size_t>(y) * preview.width + x] = color;
-            }
-        return preview;
     }
 
     MovieExporter::MovieExporter(MoviePlan plan, std::wstring destination)
@@ -735,12 +26,22 @@ namespace Mandelbrot
         , m_total(plan.FrameCount())
         , m_startTime(std::chrono::steady_clock::now())
     {
+        if (destination.empty())
+            throw std::invalid_argument("Movie export destination path is empty.");
         plan.Validate();
         m_planning.store(plan.autoRetarget);
         m_worker = std::thread([this, plan = std::move(plan), destination = std::move(destination)]() mutable
         { Run(std::move(plan), std::move(destination)); });
     }
     MovieExporter::~MovieExporter() { Stop(); }
+    void MovieExporter::Cancel()
+    {
+        {
+            std::lock_guard lock(m_queueMutex);
+            m_cancel.store(true, std::memory_order_release);
+        }
+        m_queueCv.notify_all();
+    }
     void MovieExporter::Stop() { Cancel(); if (m_worker.joinable()) m_worker.join(); }
     MovieProgress MovieExporter::Progress() const
     {
@@ -791,10 +92,9 @@ namespace Mandelbrot
                     }
                 }
                 struct PendingFrame { uint32_t frame{}; std::vector<uint32_t> pixels; };
-                std::mutex queueMutex;
-                std::condition_variable queueCv;
                 std::optional<PendingFrame> pending;
                 bool renderDone = false;
+                bool encoderDone = false;
                 std::exception_ptr writerException;
 
                 std::thread encoderThread([&]()
@@ -806,12 +106,12 @@ namespace Mandelbrot
                         {
                             PendingFrame item;
                             {
-                                std::unique_lock lock(queueMutex);
-                                queueCv.wait(lock, [&]
+                                std::unique_lock lock(m_queueMutex);
+                                m_queueCv.wait(lock, [&]
                                 {
-                                    return pending.has_value() || renderDone || m_cancel.load(std::memory_order_relaxed);
+                                    return pending.has_value() || renderDone || m_cancel.load(std::memory_order_acquire);
                                 });
-                                if (m_cancel.load(std::memory_order_relaxed)) break;
+                                if (m_cancel.load(std::memory_order_acquire)) break;
                                 if (!pending.has_value())
                                 {
                                     if (renderDone) break;
@@ -820,7 +120,7 @@ namespace Mandelbrot
                                 item = std::move(*pending);
                                 pending.reset();
                             }
-                            queueCv.notify_one();
+                            m_queueCv.notify_one();
 
                             ThrowIfCanceled(m_cancel);
                             writer.WriteFrame(item.pixels);
@@ -838,10 +138,15 @@ namespace Mandelbrot
                     }
                     catch (...)
                     {
-                        std::lock_guard lock(queueMutex);
+                        std::lock_guard lock(m_queueMutex);
                         writerException = std::current_exception();
                     }
-                    queueCv.notify_all();
+                    {
+                        std::lock_guard lock(m_queueMutex);
+                        pending.reset();
+                        encoderDone = true;
+                    }
+                    m_queueCv.notify_all();
                 });
 
                 struct EncoderGuard
@@ -856,14 +161,14 @@ namespace Mandelbrot
                         cv.notify_all();
                         if (thread.joinable()) thread.join();
                     }
-                } guard{queueMutex, queueCv, renderDone, encoderThread};
+                } guard{m_queueMutex, m_queueCv, renderDone, encoderThread};
 
                 const int bandBudgetPixels = (plan.useGpu && engine.IsGpuAvailable()) ? (3840 * 1080) : (1920 * 270);
                 const int exportBandRows = std::clamp(bandBudgetPixels / std::max(1, plan.width), 64, plan.height);
 
                 auto checkWriterError = [&]()
                 {
-                    std::lock_guard lock(queueMutex);
+                    std::lock_guard lock(m_queueMutex);
                     if (writerException) std::rethrow_exception(writerException);
                 };
 
@@ -871,17 +176,18 @@ namespace Mandelbrot
                 {
                     ThrowIfCanceled(m_cancel);
                     {
-                        std::unique_lock lock(queueMutex);
-                        queueCv.wait(lock, [&]
+                        std::unique_lock lock(m_queueMutex);
+                        m_queueCv.wait(lock, [&]
                         {
-                            return !pending.has_value() || writerException != nullptr || m_cancel.load(std::memory_order_relaxed);
+                            return !pending.has_value() || encoderDone || writerException != nullptr || m_cancel.load(std::memory_order_acquire);
                         });
                         if (writerException) std::rethrow_exception(writerException);
                         ThrowIfCanceled(m_cancel);
+                        if (encoderDone) throw Canceled{};
                         pending = PendingFrame{ frameIdx, std::move(framePixels) };
                         m_fraction.store(0.0f);
                     }
-                    queueCv.notify_one();
+                    m_queueCv.notify_one();
                 };
 
                 ZoomPyramidPlan pyramid = PlanZoomKeyframes(plan);
@@ -906,7 +212,7 @@ namespace Mandelbrot
 
                             const FractalConfig outCam = plan.CameraAt(static_cast<double>(nextFrameToEmit));
                             GpuMovieShutterParams shutter{};
-                            const bool hasShutter = BuildShutterParams(plan, static_cast<double>(nextFrameToEmit), outCam, shutter);
+                            const bool hasShutter = detail::BuildShutterParams(plan, static_cast<double>(nextFrameToEmit), outCam, shutter);
 
                             const auto& primaryPixels = lookupKfPixels(assign.primaryKeyframe);
                             const auto& primaryKf = pyramid.keyframes[static_cast<size_t>(assign.primaryKeyframe)].camera;
@@ -938,6 +244,9 @@ namespace Mandelbrot
                     {
                         // Zoom-out: keyframes are already ordered deepest -> shallowest, so every
                         // subsequent keyframe directly reuses the previous keyframe's interior.
+                        // Equalize maxIterations within small chunks when autoScaleIterations is on
+                        // so stitched interiors and exteriors never have mismatched iteration limits.
+                        constexpr int kZoomOutEqualizeChunk = 4;
                         std::vector<uint32_t> prevKfPixels;
                         std::vector<uint32_t> currKfPixels;
                         const int numKf = static_cast<int>(pyramid.keyframes.size());
@@ -946,9 +255,16 @@ namespace Mandelbrot
                             ThrowIfCanceled(m_cancel);
                             checkWriterError();
 
+                            const bool chunkBoundary = (k % kZoomOutEqualizeChunk) == 0;
+                            if (plan.autoScaleIterations && !chunkBoundary)
+                            {
+                                pyramid.keyframes[static_cast<size_t>(k)].camera.maxIterations =
+                                    pyramid.keyframes[static_cast<size_t>(k - 1)].camera.maxIterations;
+                            }
+
                             const auto& kfCam = pyramid.keyframes[static_cast<size_t>(k)].camera;
                             KeyframeInnerRect innerRect{};
-                            if (k > 0)
+                            if (k > 0 && (!plan.autoScaleIterations || !chunkBoundary))
                             {
                                 innerRect = ComputeInnerSkipRect(kfCam, pyramid.keyframes[static_cast<size_t>(k - 1)].camera);
                             }
@@ -1083,10 +399,10 @@ namespace Mandelbrot
                 }
 
                 {
-                    std::lock_guard lock(queueMutex);
+                    std::lock_guard lock(m_queueMutex);
                     renderDone = true;
                 }
-                queueCv.notify_all();
+                m_queueCv.notify_all();
                 if (encoderThread.joinable()) encoderThread.join();
                 if (writerException) std::rethrow_exception(writerException);
                 ThrowIfCanceled(m_cancel);
@@ -1101,7 +417,34 @@ namespace Mandelbrot
         catch (const std::exception& error)
         {
             std::lock_guard lock(m_mutex);
-            const std::string message(error.what()); m_error.assign(message.begin(), message.end());
+            const std::string message(error.what());
+#ifdef _WIN32
+            const int needed = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, message.data(), static_cast<int>(message.size()), nullptr, 0);
+            if (needed > 0)
+            {
+                m_error.resize(static_cast<size_t>(needed));
+                MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, message.data(), static_cast<int>(message.size()), m_error.data(), needed);
+            }
+            else
+            {
+                const int acpNeeded = MultiByteToWideChar(CP_ACP, 0, message.data(), static_cast<int>(message.size()), nullptr, 0);
+                if (acpNeeded > 0)
+                {
+                    m_error.resize(static_cast<size_t>(acpNeeded));
+                    MultiByteToWideChar(CP_ACP, 0, message.data(), static_cast<int>(message.size()), m_error.data(), acpNeeded);
+                }
+                else
+                {
+                    m_error.clear();
+                    m_error.reserve(message.size());
+                    for (unsigned char c : message) m_error.push_back(static_cast<wchar_t>(c));
+                }
+            }
+#else
+            m_error.clear();
+            m_error.reserve(message.size());
+            for (unsigned char c : message) m_error.push_back(static_cast<wchar_t>(c));
+#endif
         }
         catch (...) { std::lock_guard lock(m_mutex); m_error = L"Unexpected movie export error."; }
         if (ownsStaging && !staging.empty()) { std::error_code ignored; std::filesystem::remove(staging, ignored); }

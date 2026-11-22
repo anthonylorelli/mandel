@@ -126,7 +126,8 @@ namespace Mandelbrot
                                      BigFloat& ioZx,
                                      BigFloat& ioZy,
                                      std::vector<ComplexOrbitPoint>& outOrbit,
-                                     bool& outEscaped) -> int
+                                     bool& outEscaped,
+                                     int orbitLimbs) -> int
         {
             if (static_cast<int>(outOrbit.size()) <= targetMaxIter)
             {
@@ -167,49 +168,49 @@ namespace Mandelbrot
                     break;
                 }
 
-                const BigFloat Zx2 = ioZx.Sqr(activeLimbs);
-                const BigFloat Zy2 = ioZy.Sqr(activeLimbs);
-                const BigFloat Zxy = ioZx.Mul(ioZy, activeLimbs);
-                const BigFloat twoZxy = Zxy.Add(Zxy, activeLimbs);
+                const BigFloat Zx2 = ioZx.Sqr(orbitLimbs);
+                const BigFloat Zy2 = ioZy.Sqr(orbitLimbs);
+                const BigFloat Zxy = ioZx.Mul(ioZy, orbitLimbs);
+                const BigFloat twoZxy = Zxy.Add(Zxy, orbitLimbs);
 
                 if (type == FractalType::Mandelbrot)
                 {
-                    ioZy = twoZxy.Add(cRefY, activeLimbs);
-                    ioZx = Zx2.Sub(Zy2, activeLimbs).Add(cRefX, activeLimbs);
+                    ioZy = twoZxy.Add(cRefY, orbitLimbs);
+                    ioZx = Zx2.Sub(Zy2, orbitLimbs).Add(cRefX, orbitLimbs);
                 }
                 else if (type == FractalType::BurningShip)
                 {
-                    ioZy = (-twoZxy.Abs()).Add(cRefY, activeLimbs);
-                    ioZx = Zx2.Sub(Zy2, activeLimbs).Add(cRefX, activeLimbs);
+                    ioZy = (-twoZxy.Abs()).Add(cRefY, orbitLimbs);
+                    ioZx = Zx2.Sub(Zy2, orbitLimbs).Add(cRefX, orbitLimbs);
                 }
                 else if (type == FractalType::Tricorn)
                 {
-                    ioZy = (-twoZxy).Add(cRefY, activeLimbs);
-                    ioZx = Zx2.Sub(Zy2, activeLimbs).Add(cRefX, activeLimbs);
+                    ioZy = (-twoZxy).Add(cRefY, orbitLimbs);
+                    ioZx = Zx2.Sub(Zy2, orbitLimbs).Add(cRefX, orbitLimbs);
                 }
                 else if (type == FractalType::Celtic)
                 {
-                    ioZy = twoZxy.Add(cRefY, activeLimbs);
-                    ioZx = Zx2.Sub(Zy2, activeLimbs).Abs().Add(cRefX, activeLimbs);
+                    ioZy = twoZxy.Add(cRefY, orbitLimbs);
+                    ioZx = Zx2.Sub(Zy2, orbitLimbs).Abs().Add(cRefX, orbitLimbs);
                 }
                 else if (type == FractalType::Buffalo)
                 {
-                    ioZy = (-twoZxy.Abs()).Add(cRefY, activeLimbs);
-                    ioZx = Zx2.Sub(Zy2, activeLimbs).Abs().Add(cRefX, activeLimbs);
+                    ioZy = (-twoZxy.Abs()).Add(cRefY, orbitLimbs);
+                    ioZx = Zx2.Sub(Zy2, orbitLimbs).Abs().Add(cRefX, orbitLimbs);
                 }
                 else if (type == FractalType::CubicMultibrot)
                 {
-                    const BigFloat threeZx2 = Zx2.Add(Zx2, activeLimbs).Add(Zx2, activeLimbs);
-                    const BigFloat threeZy2 = Zy2.Add(Zy2, activeLimbs).Add(Zy2, activeLimbs);
-                    const BigFloat nextZx = ioZx.Mul(Zx2.Sub(threeZy2, activeLimbs), activeLimbs).Add(cRefX, activeLimbs);
-                    const BigFloat nextZy = ioZy.Mul(threeZx2.Sub(Zy2, activeLimbs), activeLimbs).Add(cRefY, activeLimbs);
+                    const BigFloat threeZx2 = Zx2.Add(Zx2, orbitLimbs).Add(Zx2, orbitLimbs);
+                    const BigFloat threeZy2 = Zy2.Add(Zy2, orbitLimbs).Add(Zy2, orbitLimbs);
+                    const BigFloat nextZx = ioZx.Mul(Zx2.Sub(threeZy2, orbitLimbs), orbitLimbs).Add(cRefX, orbitLimbs);
+                    const BigFloat nextZy = ioZy.Mul(threeZx2.Sub(Zy2, orbitLimbs), orbitLimbs).Add(cRefY, orbitLimbs);
                     ioZx = nextZx;
                     ioZy = nextZy;
                 }
                 else // FractalType::Phoenix
                 {
-                    const BigFloat nextZx = Zx2.Sub(Zy2, activeLimbs).Add(phoenixC, activeLimbs).Sub(prevZx.Mul(phoenixHalf, activeLimbs), activeLimbs);
-                    const BigFloat nextZy = twoZxy.Sub(prevZy.Mul(phoenixHalf, activeLimbs), activeLimbs);
+                    const BigFloat nextZx = Zx2.Sub(Zy2, orbitLimbs).Add(phoenixC, orbitLimbs).Sub(prevZx.Mul(phoenixHalf, orbitLimbs), orbitLimbs);
+                    const BigFloat nextZy = twoZxy.Sub(prevZy.Mul(phoenixHalf, orbitLimbs), orbitLimbs);
                     prevZx = ioZx;
                     prevZy = ioZy;
                     ioZx = nextZx;
@@ -263,7 +264,8 @@ namespace Mandelbrot
                         m_cachedEndZx,
                         m_cachedEndZy,
                         m_cachedOrbit,
-                        escapedNow);
+                        escapedNow,
+                        m_cachedActiveLimbs);
                     if (cancelToken && cancelToken->load(std::memory_order_relaxed))
                     {
                         m_hasCachedOrbit = false;
@@ -271,6 +273,7 @@ namespace Mandelbrot
                     }
                     m_cachedMaxIter = targetExtendIter;
                     m_cachedEscaped = escapedNow;
+                    if (escapedNow) m_cachedSearchZoom = clampedZoom;
                     ++m_cachedOrbitVersion;
                 }
 
@@ -312,6 +315,7 @@ namespace Mandelbrot
                 ? extendTarget(maxIter)
                 : maxIter;
             int bestComputedMaxIter = initTargetMaxIter;
+            int bestActiveLimbs = activeLimbs;
 
             const double cachedDiffX = m_hasCachedOrbit ? (m_cachedRefX - centerX).ToDouble() : 1e300;
             const double cachedDiffY = m_hasCachedOrbit ? (m_cachedRefY - centerY).ToDouble() : 1e300;
@@ -336,7 +340,8 @@ namespace Mandelbrot
                         m_cachedEndZx,
                         m_cachedEndZy,
                         m_cachedOrbit,
-                        m_cachedEscaped);
+                        m_cachedEscaped,
+                        m_cachedActiveLimbs);
                     if (cancelToken && cancelToken->load(std::memory_order_relaxed))
                     {
                         m_hasCachedOrbit = false;
@@ -356,6 +361,7 @@ namespace Mandelbrot
                 bestEndZy = m_cachedEndZy;
                 bestEscaped = (bestRefLen < maxIter) && m_cachedEscaped;
                 bestComputedMaxIter = m_cachedMaxIter;
+                bestActiveLimbs = m_cachedActiveLimbs;
             }
             else
             {
@@ -374,6 +380,9 @@ namespace Mandelbrot
                     }
                 }
 
+                // Invalidate cached orbit flag before overwriting m_cachedOrbit in place so
+                // any cancellation before commit cannot pair the new orbit with stale metadata.
+                m_hasCachedOrbit = false;
                 bestEndZx.SetZero();
                 bestEndZy.SetZero();
                 bestRefLen = stepBigFloatOrbit(
@@ -384,9 +393,11 @@ namespace Mandelbrot
                     bestEndZx,
                     bestEndZy,
                     m_cachedOrbit,
-                    bestEscaped);
+                    bestEscaped,
+                    activeLimbs);
                 ++m_cachedOrbitVersion;
                 bestComputedMaxIter = initTargetMaxIter;
+                bestActiveLimbs = activeLimbs;
             }
 
             if (cancelToken && cancelToken->load(std::memory_order_relaxed))
@@ -522,6 +533,7 @@ namespace Mandelbrot
 
                     if (cancelToken && cancelToken->load(std::memory_order_relaxed))
                     {
+                        m_hasCachedOrbit = false;
                         return false;
                     }
 
@@ -559,15 +571,18 @@ namespace Mandelbrot
                         candEndZx,
                         candEndZy,
                         candidateOrbit,
-                        candEscaped);
+                        candEscaped,
+                        activeLimbs);
 
                     if (cancelToken && cancelToken->load(std::memory_order_relaxed))
                     {
+                        m_hasCachedOrbit = false;
                         return false;
                     }
 
                     if (candLen > bestRefLen)
                     {
+                        m_hasCachedOrbit = false;
                         m_cachedOrbit.swap(candidateOrbit);
                         ++m_cachedOrbitVersion;
                         bestRefLen = candLen;
@@ -579,6 +594,7 @@ namespace Mandelbrot
                         bestEndZy = candEndZy;
                         bestEscaped = candEscaped;
                         bestComputedMaxIter = initTargetMaxIter;
+                        bestActiveLimbs = activeLimbs;
                     }
                     else
                     {
@@ -593,7 +609,7 @@ namespace Mandelbrot
             m_cachedRefY = bestRefCy;
             m_cachedEndZx = bestEndZx;
             m_cachedEndZy = bestEndZy;
-            m_cachedActiveLimbs = activeLimbs;
+            m_cachedActiveLimbs = bestActiveLimbs;
             m_cachedRefLen = bestRefLen;
             m_cachedMaxIter = bestComputedMaxIter;
             m_cachedSearchZoom = clampedZoom;
@@ -611,6 +627,9 @@ namespace Mandelbrot
                 cMax > m_cachedBlaCMax * (1.0 + 1e-12) ||
                 cMax < m_cachedBlaCMax * 0.25)
             {
+                m_cachedBlaVersion = 0;
+                m_cachedBlaRefLen = 0;
+                m_cachedBlaCMax = 0.0;
                 m_cachedMandelbrotBla.Build(m_cachedOrbit.data(), bestRefLen, cMax, cancelToken);
                 if (cancelToken && cancelToken->load(std::memory_order_relaxed)) return false;
                 m_cachedBlaVersion = m_cachedOrbitVersion;

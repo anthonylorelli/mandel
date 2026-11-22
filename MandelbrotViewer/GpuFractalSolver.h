@@ -23,10 +23,12 @@ namespace Mandelbrot
 
     struct GpuMovieShutterParams
     {
+        static constexpr uint32_t kMaxTaps = 7;
+
         uint32_t tapCount{ 0 };
-        float shiftX[7]{};
-        float shiftY[7]{};
-        float scale[7]{};
+        float shiftX[kMaxTaps]{};
+        float shiftY[kMaxTaps]{};
+        float scale[kMaxTaps]{};
     };
 
     // DirectCompute (D3D11 cs_5_0) fractal solver supporting shallow FP32 evaluation,

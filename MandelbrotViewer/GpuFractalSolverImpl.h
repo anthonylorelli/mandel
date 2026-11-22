@@ -108,6 +108,8 @@ namespace Mandelbrot
         size_t accumPixelsStagingCapBytes{ 0 };
         bool movieFullFrameAccum{ false };
         bool movieShutterBlur{ false };
+        int movieFrameWidth{ 0 };
+        int movieFrameHeight{ 0 };
 
         ComPtr<ID3D11Buffer> shutterPixelsBuf;
         ComPtr<ID3D11UnorderedAccessView> shutterPixelsUav;
@@ -148,11 +150,13 @@ namespace Mandelbrot
         ComPtr<ID3D11ShaderResourceView> blaMetaSrv;
 
         // Cached orbit & BLA state uploaded to GPU
+        const DeepReferenceCache* uploadedCachePtr{ nullptr };
         uint64_t uploadedOrbitVersion{ 0 };
         int uploadedRefLen{ -1 };
         FractalType uploadedType{ FractalType::Mandelbrot };
         bool uploadedHasDeepExpOrbit{ false };
 
+        const DeepReferenceCache* uploadedBlaCachePtr{ nullptr };
         uint64_t uploadedBlaOrbitVersion{ 0 };
         int uploadedBlaRefLen{ -1 };
         double uploadedBlaCMax{ 0.0 };
@@ -174,6 +178,7 @@ namespace Mandelbrot
         explicit Impl(bool allowSoftwareAdapter);
 
         bool CanSupportConfig(const FractalConfig& config) const noexcept;
+        void CheckDeviceLost() noexcept;
 
         bool EnsureBufferImpl(
             size_t neededElems,
@@ -235,6 +240,7 @@ namespace Mandelbrot
 
         bool SyncReferenceAndBla(
             const FractalConfig& config,
+            const DeepReferenceCache* cacheKey,
             const DeepReferenceState& refState,
             double cMax,
             const std::atomic<bool>* cancelToken,
@@ -262,7 +268,8 @@ namespace Mandelbrot
             uint32_t rowOffset,
             uint32_t outRowOffset,
             uint32_t subTotal,
-            uint32_t stageIterLimit = 0u);
+            uint32_t stageIterLimit = 0u,
+            uint32_t heightLimit = 0u);
 
         void BindFractalSrvs(
             detail::GpuShaderMode mode,
@@ -284,5 +291,24 @@ namespace Mandelbrot
             double juliaBailout2,
             const std::atomic<bool>* cancelToken,
             bool& outCanceled);
+
+        // Runs GPU 3x3 boundary detection, indirect-dispatch argument building, and
+        // DispatchIndirect 4x subpixel evaluation for outItersBuf -> subOutBuf.
+        bool DispatchGpuSubpixelPass(
+            detail::GpuShaderMode mode,
+            const FractalConfig& config,
+            const DeepReferenceState& refState,
+            double juliaCx,
+            double juliaCy,
+            double juliaBailout2,
+            const detail::PostProcessCb& postCb);
+
+        // Copies `bytes` from `srcBuf` to `stagingBuf`, maps, copies to `dst`, and unmaps.
+        // Calls CheckDeviceLost() on Map failure.
+        bool ReadbackBuffer(
+            ID3D11Buffer* srcBuf,
+            ID3D11Buffer* stagingBuf,
+            void* dst,
+            size_t bytes) noexcept;
     };
 }

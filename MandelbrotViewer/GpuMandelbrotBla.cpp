@@ -277,15 +277,24 @@ namespace Mandelbrot::detail
 
         if (l2Count >= 512)
         {
-            #pragma omp parallel for schedule(static)
-            for (int64_t ii = 0; ii < static_cast<int64_t>(l2Count); ++ii)
+            #pragma omp parallel
             {
-                if ((ii & 255) == 0 && canceled()) continue;
-                const size_t i = static_cast<size_t>(ii);
-                const int m = static_cast<int>(i * 4) + 1;
-                const BlockExpD b0 = merge(single(orbit[m].x, orbit[m].y), single(orbit[m + 1].x, orbit[m + 1].y));
-                const BlockExpD b1 = merge(single(orbit[m + 2].x, orbit[m + 2].y), single(orbit[m + 3].x, orbit[m + 3].y));
-                levels[2][i] = merge(b0, b1);
+                bool localCanceled = false;
+                #pragma omp for schedule(static)
+                for (int64_t ii = 0; ii < static_cast<int64_t>(l2Count); ++ii)
+                {
+                    if (localCanceled) continue;
+                    if ((ii & 255) == 0 && canceled())
+                    {
+                        localCanceled = true;
+                        continue;
+                    }
+                    const size_t i = static_cast<size_t>(ii);
+                    const int m = static_cast<int>(i * 4) + 1;
+                    const BlockExpD b0 = merge(single(orbit[m].x, orbit[m].y), single(orbit[m + 1].x, orbit[m + 1].y));
+                    const BlockExpD b1 = merge(single(orbit[m + 2].x, orbit[m + 2].y), single(orbit[m + 3].x, orbit[m + 3].y));
+                    levels[2][i] = merge(b0, b1);
+                }
             }
             if (canceled()) return;
             for (size_t i = 0; i < l2Count; ++i)
@@ -322,12 +331,23 @@ namespace Mandelbrot::detail
             std::vector<BlockExpD> next(nextCount);
             if (nextCount >= 512)
             {
-                #pragma omp parallel for schedule(static)
-                for (int64_t ii = 0; ii < static_cast<int64_t>(nextCount); ++ii)
+                #pragma omp parallel
                 {
-                    const size_t i = static_cast<size_t>(ii);
-                    next[i] = merge(prev[2 * i], prev[2 * i + 1]);
+                    bool localCanceled = false;
+                    #pragma omp for schedule(static)
+                    for (int64_t ii = 0; ii < static_cast<int64_t>(nextCount); ++ii)
+                    {
+                        if (localCanceled) continue;
+                        if ((ii & 255) == 0 && canceled())
+                        {
+                            localCanceled = true;
+                            continue;
+                        }
+                        const size_t i = static_cast<size_t>(ii);
+                        next[i] = merge(prev[2 * i], prev[2 * i + 1]);
+                    }
                 }
+                if (canceled()) return;
                 for (size_t i = 0; i < nextCount; ++i)
                 {
                     if (PosGreaterD(next[i].radMant, next[i].radExp, localMaxRadMant, localMaxRadExp))

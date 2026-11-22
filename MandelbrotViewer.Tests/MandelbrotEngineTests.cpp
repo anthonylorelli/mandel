@@ -729,3 +729,63 @@ TEST_CASE(MandelbrotEngine, DeepReferenceCacheInvalidateForcesRecomputation)
     ASSERT_EQ(s0.refLen, s2.refLen);
 }
 
+TEST_CASE(MandelbrotEngine, NewtonCoarseMidpointNeverCrossesRootBasinFloor)
+{
+    MandelbrotEngine engine;
+    FractalConfig cfg;
+    cfg.fractalType = FractalType::Newton;
+    cfg.width = 64;
+    cfg.height = 48;
+    cfg.zoom = 1.2;
+    cfg.maxIterations = 100;
+    cfg.smooth = true;
+    cfg.renderStride = 4;
+    cfg.edgeRefine = false;
+    cfg.SetCenter(0.0, 0.0);
+
+    std::vector<float> iters;
+    engine.Compute(cfg, iters);
+    ASSERT_EQ(static_cast<size_t>(cfg.width * cfg.height), iters.size());
+
+    // Every converged Newton pixel must keep a valid root basin (0, 1, or 2) with a non-negative
+    // intra-basin iteration value strictly below the root stride.
+    for (float v : iters)
+    {
+        if (v < 0.0f) continue;
+        const int basin = static_cast<int>(v / NewtonRootStride);
+        ASSERT_GE(basin, 0);
+        ASSERT_LE(basin, 2);
+        const float intra = v - static_cast<float>(basin) * NewtonRootStride;
+        ASSERT_GE(intra, 0.0f);
+        ASSERT_LT(intra, NewtonRootStride);
+    }
+}
+
+TEST_CASE(MandelbrotEngine, DeepReferenceCacheCancelCannotLeaveMismatchedOrbit)
+{
+    DeepReferenceCache cache;
+    FractalConfig cfg1;
+    cfg1.width = 64;
+    cfg1.height = 48;
+    cfg1.zoom = 1e20;
+    cfg1.maxIterations = 250;
+    cfg1.SetCenter(-0.7436438870371587, 0.1318259042053119);
+
+    DeepReferenceState s1{};
+    ASSERT_TRUE(cache.Ensure(cfg1, cfg1.hpCenterX, cfg1.hpCenterY, ExecutionMode::Automatic, s1));
+
+    // Attempt an Ensure at a completely different point with an already-set cancel token.
+    FractalConfig cfg2 = cfg1;
+    cfg2.SetCenter(-0.1, 0.65);
+    std::atomic<bool> cancel{ true };
+    DeepReferenceState s2{};
+    ASSERT_FALSE(cache.Ensure(cfg2, cfg2.hpCenterX, cfg2.hpCenterY, ExecutionMode::Automatic, s2, &cancel));
+
+    // Re-running cfg1 without cancel must recompute a valid matching orbit rather than reusing corrupted state.
+    DeepReferenceState s3{};
+    ASSERT_TRUE(cache.Ensure(cfg1, cfg1.hpCenterX, cfg1.hpCenterY, ExecutionMode::Automatic, s3));
+    ASSERT_GT(s3.refLen, 0);
+    ASSERT_NEAR(cfg1.centerX, s3.refCxDouble, 1e-12);
+    ASSERT_NEAR(cfg1.centerY, s3.refCyDouble, 1e-12);
+}
+
