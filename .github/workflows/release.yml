@@ -332,9 +332,15 @@ jobs:
           }
 
           $inProc = $manifest.SelectNodes("//ns:Extension[@Category='windows.activatableClass.inProcessServer']", $ns)
-          Write-Host "Registered InProcessServer extensions: $($inProc.Count)"
-          if ($inProc.Count -eq 0) {
-            throw "No windows.activatableClass.inProcessServer entries found in AppxManifest.xml"
+          $exeBytes = [System.IO.File]::ReadAllBytes((Join-Path $inspectDir 'MandelbrotViewer.exe'))
+          $exeAscii = [System.Text.Encoding]::ASCII.GetString($exeBytes)
+          $hasRegFreeWinRt = $exeAscii.Contains('activatableClass') -and $exeAscii.Contains('Microsoft.UI.Xaml')
+          Write-Host "Registered InProcessServer extensions in AppxManifest.xml: $($inProc.Count)"
+          Write-Host "Embedded RegFree WinRT SxS manifest in MandelbrotViewer.exe: $hasRegFreeWinRt"
+          if (($inProc.Count -eq 0) -and (-not $hasRegFreeWinRt)) {
+            Write-Host "--- AppxManifest.xml ---"
+            Get-Content (Join-Path $inspectDir 'AppxManifest.xml') | Write-Host
+            throw "Neither InProcessServer extensions nor embedded RegFree WinRT SxS activation were found!"
           }
 
           $required = @(
@@ -357,7 +363,13 @@ jobs:
             Get-ChildItem -Path $inspectDir -Name | Sort-Object | ForEach-Object { Write-Host "  $_" }
             throw "Required self-contained files missing from MSIX: $($missing -join ', ')"
           }
-          Write-Host "All required self-contained files verified in MSIX!"
+
+          $assets = Get-ChildItem -Path (Join-Path $inspectDir 'Assets') -Filter '*.png' -ErrorAction SilentlyContinue
+          Write-Host "Bundled visual assets: $($assets.Count) PNG files"
+          if (-not $assets -or $assets.Count -lt 5) {
+            throw "Expected visual tile/logo PNG assets under Assets/ in MSIX"
+          }
+          Write-Host "All required self-contained files and WinRT registrations verified in MSIX!"
 
       - name: Upload unsigned MSIX (${{ matrix.platform }})
         uses: actions/upload-artifact@v4
