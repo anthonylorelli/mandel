@@ -297,6 +297,41 @@ namespace Mandelbrot
             return false;
         }
 
+        bool TryParseAsciiColorMode(std::wstring_view text, AsciiColorMode& outMode)
+        {
+            const std::string key = NormalizeToken(text);
+            if (key == "auto") { outMode = AsciiColorMode::Auto; return true; }
+            if (key == "none" || key == "off" || key == "mono" || key == "monochrome") { outMode = AsciiColorMode::None; return true; }
+            if (key == "256" || key == "ansi256" || key == "8bit") { outMode = AsciiColorMode::Ansi256; return true; }
+            if (key == "truecolor" || key == "24bit" || key == "rgb" || key == "full" || key == "on" || key == "always")
+            {
+                outMode = AsciiColorMode::TrueColor;
+                return true;
+            }
+            return false;
+        }
+
+        bool TryParseAsciiCharset(
+            std::wstring_view text,
+            AsciiCharsetPreset& outPreset,
+            std::string& outCustom)
+        {
+            const std::string key = NormalizeToken(text);
+            if (key == "standard" || key == "default") { outPreset = AsciiCharsetPreset::Standard; outCustom.clear(); return true; }
+            if (key == "dense") { outPreset = AsciiCharsetPreset::Dense; outCustom.clear(); return true; }
+            if (key == "detailed" || key == "detail" || key == "high") { outPreset = AsciiCharsetPreset::Detailed; outCustom.clear(); return true; }
+            if (key == "simple" || key == "minimal") { outPreset = AsciiCharsetPreset::Simple; outCustom.clear(); return true; }
+
+            std::string ascii;
+            if (!TryWideToAscii(text, ascii) || !IsValidAsciiCharset(ascii))
+            {
+                return false;
+            }
+            outPreset = AsciiCharsetPreset::Custom;
+            outCustom = std::move(ascii);
+            return true;
+        }
+
         bool TryParseResolution(std::wstring_view text, int& outWidth, int& outHeight)
         {
             const std::string key = NormalizeToken(text);
@@ -696,13 +731,19 @@ namespace Mandelbrot
             bool attached{ false };
             bool stdoutIsConsole{ false };
 
-            ScopedParentConsole() noexcept
+            explicit ScopedParentConsole(bool allowAllocConsole = false) noexcept
             {
                 const bool hadStdout = IsValidStdHandle(GetStdHandle(STD_OUTPUT_HANDLE));
                 const bool hadStderr = IsValidStdHandle(GetStdHandle(STD_ERROR_HANDLE));
-                if (!hadStdout || !hadStderr)
+                const bool hadStdin = IsValidStdHandle(GetStdHandle(STD_INPUT_HANDLE));
+                if (!hadStdout || !hadStderr || (allowAllocConsole && !hadStdin))
                 {
-                    if (AttachConsole(ATTACH_PARENT_PROCESS))
+                    bool acquired = AttachConsole(ATTACH_PARENT_PROCESS) != 0;
+                    if (!acquired && allowAllocConsole && !hadStdout)
+                    {
+                        acquired = AllocConsole() != 0;
+                    }
+                    if (acquired)
                     {
                         attached = true;
                         FILE* stream = nullptr;
@@ -718,6 +759,11 @@ namespace Mandelbrot
                             std::cerr.clear();
                             std::wcerr.clear();
                         }
+                        if (!hadStdin && freopen_s(&stream, "CONIN$", "r", stdin) == 0)
+                        {
+                            std::cin.clear();
+                            std::wcin.clear();
+                        }
                     }
                 }
                 stdoutIsConsole = IsConsoleHandle(GetStdHandle(STD_OUTPUT_HANDLE));
@@ -725,6 +771,7 @@ namespace Mandelbrot
 
             ~ScopedParentConsole() noexcept
             {
+                std::cout.flush();
                 std::wcout.flush();
                 std::wcerr.flush();
                 std::fflush(stdout);
@@ -741,26 +788,41 @@ namespace Mandelbrot
     std::wstring MovieCliUsage()
     {
         return
-            L"MandelbrotViewer - Command-Line Zoom Movie Export\n"
+            L"MandelbrotViewer - Command-Line Movie Export & Console ASCII Mode\n"
             L"\n"
             L"Usage:\n"
             L"  MandelbrotViewer.exe                               Launch interactive GUI\n"
+            L"  MandelbrotViewer.exe --ascii [options]             Render live ASCII fractal in terminal\n"
             L"  MandelbrotViewer.exe --export-movie <out.mp4> [options]\n"
             L"  MandelbrotViewer.exe --help | -h | /?\n"
             L"\n"
-            L"Output Options:\n"
+            L"Console ASCII Options:\n"
+            L"  --ascii, --console           Render the fractal in ASCII characters in the terminal\n"
+            L"  --auto-zoom / --no-auto-zoom Start with live auto-zoom enabled (or paused)\n"
+            L"  --once                       Render a single ASCII frame and exit\n"
+            L"  --frames <count>             Render a fixed number of frames (1..1000000) and exit\n"
+            L"  --cols <n>                   Terminal width in columns (10..512, default: auto)\n"
+            L"  --rows <n>                   Terminal height in rows (5..256, default: auto)\n"
+            L"  --char-aspect <float>        Character height/width aspect ratio (0.5..4.0, default: 2.0)\n"
+            L"  --charset <preset|chars>     ASCII ramp: standard (default), dense, detailed, simple,\n"
+            L"                               or a custom dark-to-bright ASCII string (>= 2 chars)\n"
+            L"  --color <mode>               Color mode: auto (default), truecolor, 256, or none\n"
+            L"  --no-color                   Disable ANSI color escape codes (plain ASCII)\n"
+            L"  --hud / --no-hud             Show (default) or hide live status/telemetry bar\n"
+            L"\n"
+            L"Movie Export Options:\n"
             L"  --export-movie <path>        Export a zoom movie headlessly to <path>\n"
             L"  -o, --output <path>          Output MP4 file path (alternative to positional path)\n"
             L"  --resolution <preset|WxH>    720p, 1080p (default), 1440p, 4k, 8k, or WxH (max 7680x4320)\n"
-            L"  --width <px>                 Override output width (1..7680)\n"
-            L"  --height <px>                Override output height (1..4320)\n"
-            L"  --fps <rate>                 Frame rate: 24, 25, 30 (default), 48, 50, or 60\n"
-            L"  --duration <seconds>         Movie length in whole seconds (1..3600, default: 30)\n"
+            L"  --width <n>                  Override output width (px for movie, cols for --ascii)\n"
+            L"  --height <n>                 Override output height (px for movie, rows for --ascii)\n"
+            L"  --fps <rate>                 Frame rate: 24/25/30/48/50/60 (movie) or 1..60 (--ascii, default: 15)\n"
+            L"  --duration <seconds>         Length in whole seconds (1..3600; movie default: 30, --ascii default: unlimited)\n"
             L"  --codec <h264|hevc>          Video codec: h264/avc (default) or hevc/h265\n"
             L"  --motion-smoothing           Enable analytical motion-blur shutter (default)\n"
             L"  --no-motion-smoothing        Disable motion-blur shutter\n"
             L"\n"
-            L"View & Source Options:\n"
+            L"View & Source Options (shared by --ascii and --export-movie):\n"
             L"  --config <file.json>         Load view & theme JSON from 'Copy Coordinates & Config'\n"
             L"  --fractal <name>             mandelbrot (default), burning-ship, tricorn, celtic,\n"
             L"                               buffalo, cubic-multibrot, phoenix, newton\n"
@@ -794,9 +856,19 @@ namespace Mandelbrot
             L"  --phase <float>              Palette phase offset (default: 0.0)\n"
             L"  --invert / --no-invert       Invert palette gradient direction\n"
             L"  --interior-color <hex>       Interior color (#RRGGBB, #AARRGGBB, or 0xAARRGGBB)\n"
-            L"  -q, --quiet                  Suppress progress output (errors still written to stderr)\n"
+            L"  -q, --quiet                  Suppress progress / HUD output (errors still written to stderr)\n"
+            L"\n"
+            L"Interactive Console Keys (--ascii):\n"
+            L"  Space / P     Start or pause live auto-zoom    E             Toggle auto-pick target\n"
+            L"  V             Flip zoom direction (in / out)   [ / ]         Decrease / increase zoom speed\n"
+            L"  WASD / Arrows Pan viewport                     + / -         Step zoom in / out\n"
+            L"  F / T / C / M Cycle fractal / theme / color / charset\n"
+            L"  H / R         Toggle HUD / reset view          Q / Esc       Quit\n"
             L"\n"
             L"Examples:\n"
+            L"  MandelbrotViewer.exe --ascii --auto-zoom --auto-target\n"
+            L"  MandelbrotViewer.exe --ascii --bookmark \"Seahorse Valley\" --start-zoom 1 --auto-zoom --theme inferno\n"
+            L"  MandelbrotViewer.exe --ascii --once --cols 100 --rows 32 --no-color\n"
             L"  MandelbrotViewer.exe --export-movie zoom.mp4 --bookmark \"Seahorse Valley\" --start-zoom 1 --end-zoom 85000 --duration 15\n"
             L"  MandelbrotViewer.exe --export-movie auto.mp4 --auto-target --resolution 4k --fps 60 --duration 30 --theme inferno\n"
             L"  MandelbrotViewer.exe --export-movie custom.mp4 --config view.json --direction in --zoom-speed 1.5 --duration 20\n";
@@ -1032,6 +1104,7 @@ namespace Mandelbrot
         };
 
         bool exportRequested = false;
+        bool asciiRequested = false;
         std::wstring outputPath;
         std::optional<std::wstring> configPath;
         std::optional<FractalType> fractalType;
@@ -1068,6 +1141,16 @@ namespace Mandelbrot
         std::optional<BigFloat> juliaY;
         bool juliaRequested = false;
         bool quiet = false;
+        std::optional<bool> asciiAutoZoom;
+        bool asciiOnce = false;
+        std::optional<int> asciiFrames;
+        std::optional<int> asciiCols;
+        std::optional<int> asciiRows;
+        std::optional<double> asciiCharAspect;
+        std::optional<AsciiCharsetPreset> asciiCharsetPreset;
+        std::string asciiCustomCharset;
+        std::optional<AsciiColorMode> asciiColorMode;
+        std::optional<bool> asciiHud;
 
         try
         {
@@ -1268,10 +1351,9 @@ namespace Mandelbrot
                 {
                     int v = 0;
                     const auto val = takeValue("--fps");
-                    if (!TryParseInt(val, v) ||
-                        std::find(MovieFrameRates.begin(), MovieFrameRates.end(), v) == MovieFrameRates.end())
+                    if (!TryParseInt(val, v) || v < MinConsoleFps || v > MaxConsoleFps)
                     {
-                        return fail(L"Invalid --fps (expected 24, 25, 30, 48, 50, or 60): " + std::wstring(val));
+                        return fail(L"Invalid --fps (expected 1..60): " + std::wstring(val));
                     }
                     fps = v;
                 }
@@ -1417,6 +1499,91 @@ namespace Mandelbrot
                     juliaY = v;
                     juliaRequested = true;
                 }
+                else if (flagView == L"--ascii" || flagView == L"--console")
+                {
+                    requireNoValue();
+                    asciiRequested = true;
+                }
+                else if (flagView == L"--auto-zoom")
+                {
+                    requireNoValue();
+                    asciiAutoZoom = true;
+                }
+                else if (flagView == L"--no-auto-zoom")
+                {
+                    requireNoValue();
+                    asciiAutoZoom = false;
+                }
+                else if (flagView == L"--once")
+                {
+                    requireNoValue();
+                    asciiOnce = true;
+                }
+                else if (flagView == L"--frames")
+                {
+                    int v = 0;
+                    const auto val = takeValue("--frames");
+                    if (!TryParseInt(val, v) || v < 1 || v > 1000000)
+                        return fail(L"Invalid --frames (expected 1..1000000): " + std::wstring(val));
+                    asciiFrames = v;
+                }
+                else if (flagView == L"--cols")
+                {
+                    int v = 0;
+                    const auto val = takeValue("--cols");
+                    if (!TryParseInt(val, v) || v < MinConsoleCols || v > MaxConsoleCols)
+                        return fail(L"Invalid --cols (expected 10..512): " + std::wstring(val));
+                    asciiCols = v;
+                }
+                else if (flagView == L"--rows")
+                {
+                    int v = 0;
+                    const auto val = takeValue("--rows");
+                    if (!TryParseInt(val, v) || v < MinConsoleRows || v > MaxConsoleRows)
+                        return fail(L"Invalid --rows (expected 5..256): " + std::wstring(val));
+                    asciiRows = v;
+                }
+                else if (flagView == L"--char-aspect")
+                {
+                    double v = 0.0;
+                    const auto val = takeValue("--char-aspect");
+                    if (!TryParseDouble(val, v) || v < MinConsoleCharAspect || v > MaxConsoleCharAspect)
+                        return fail(L"Invalid --char-aspect (expected 0.5..4.0): " + std::wstring(val));
+                    asciiCharAspect = v;
+                }
+                else if (flagView == L"--charset")
+                {
+                    const auto val = takeValue("--charset");
+                    AsciiCharsetPreset preset = AsciiCharsetPreset::Standard;
+                    std::string custom;
+                    if (!TryParseAsciiCharset(val, preset, custom))
+                        return fail(L"Invalid --charset (use standard, dense, detailed, simple, or >= 2 printable ASCII characters): " + std::wstring(val));
+                    asciiCharsetPreset = preset;
+                    asciiCustomCharset = std::move(custom);
+                }
+                else if (flagView == L"--color")
+                {
+                    const auto val = takeValue("--color");
+                    AsciiColorMode mode = AsciiColorMode::Auto;
+                    if (!TryParseAsciiColorMode(val, mode))
+                        return fail(L"Invalid --color (expected auto, truecolor, 256, or none): " + std::wstring(val));
+                    asciiColorMode = mode;
+                }
+                else if (flagView == L"--no-color")
+                {
+                    requireNoValue();
+                    asciiColorMode = AsciiColorMode::None;
+                }
+                else if (flagView == L"--hud")
+                {
+                    requireNoValue();
+                    asciiHud = true;
+                }
+                else if (flagView == L"--no-hud")
+                {
+                    requireNoValue();
+                    asciiHud = false;
+                }
                 else if (flagView == L"-q" || flagView == L"--quiet")
                 {
                     requireNoValue();
@@ -1433,21 +1600,78 @@ namespace Mandelbrot
             return fail(Utf8ToWide(e.what()));
         }
 
-        if (!exportRequested)
+        if (exportRequested && asciiRequested)
         {
-            return fail(L"Movie export options require --export-movie <output.mp4>.");
+            return fail(L"Cannot combine --ascii with --export-movie.");
         }
-        if (outputPath.empty())
+        if (!exportRequested && !asciiRequested)
         {
-            return fail(L"Missing output file path for --export-movie.");
+            return fail(L"CLI options require --export-movie <output.mp4> or --ascii.");
         }
-        if (endZoom.has_value() && (zoomInDirection.has_value() || zoomSpeed.has_value()))
+
+        const bool hasAsciiOnlyFlag =
+            asciiAutoZoom.has_value() || asciiOnce || asciiFrames.has_value() ||
+            asciiCols.has_value() || asciiRows.has_value() || asciiCharAspect.has_value() ||
+            asciiCharsetPreset.has_value() || asciiColorMode.has_value() || asciiHud.has_value();
+
+        if (exportRequested)
         {
-            return fail(L"Cannot combine --end-zoom with --direction or --zoom-speed.");
+            if (hasAsciiOnlyFlag)
+            {
+                return fail(L"Console ASCII options cannot be combined with --export-movie.");
+            }
+            if (outputPath.empty())
+            {
+                return fail(L"Missing output file path for --export-movie.");
+            }
+            if (fps && std::find(MovieFrameRates.begin(), MovieFrameRates.end(), *fps) == MovieFrameRates.end())
+            {
+                return fail(L"Invalid --fps for movie export (expected 24, 25, 30, 48, 50, or 60).");
+            }
+            if (endZoom.has_value() && (zoomInDirection.has_value() || zoomSpeed.has_value()))
+            {
+                return fail(L"Cannot combine --end-zoom with --direction or --zoom-speed.");
+            }
+            if (autoTarget.value_or(false) && (targetX.has_value() || targetY.has_value()))
+            {
+                return fail(L"Cannot combine --auto-target with explicit --target-x or --target-y.");
+            }
         }
-        if (autoTarget.value_or(false) && (targetX.has_value() || targetY.has_value()))
+        else
         {
-            return fail(L"Cannot combine --auto-target with explicit --target-x or --target-y.");
+            if (!outputPath.empty() || resWidth.has_value() || resHeight.has_value() ||
+                codec.has_value() || motionSmoothing.has_value())
+            {
+                return fail(L"Movie-only options (--output, --resolution, --codec, --motion-smoothing) cannot be combined with --ascii.");
+            }
+            if (overrideWidth && (*overrideWidth < MinConsoleCols || *overrideWidth > MaxConsoleCols))
+            {
+                return fail(L"Invalid --width for --ascii (expected 10..512 columns).");
+            }
+            if (overrideHeight && (*overrideHeight < MinConsoleRows || *overrideHeight > MaxConsoleRows))
+            {
+                return fail(L"Invalid --height for --ascii (expected 5..256 rows).");
+            }
+            if (asciiOnce && asciiAutoZoom.value_or(false))
+            {
+                return fail(L"Cannot combine --once with --auto-zoom.");
+            }
+            if (asciiOnce && asciiFrames.has_value() && *asciiFrames > 1)
+            {
+                return fail(L"Cannot combine --once with --frames > 1.");
+            }
+            if (asciiOnce && duration.has_value())
+            {
+                return fail(L"Cannot combine --once with --duration.");
+            }
+            if (autoTarget.value_or(false) && (targetX.has_value() || targetY.has_value()))
+            {
+                return fail(L"Cannot combine --auto-target with explicit --target-x or --target-y.");
+            }
+            if (autoTarget.value_or(false) && zoomInDirection.has_value() && !*zoomInDirection)
+            {
+                return fail(L"--auto-target requires zooming in.");
+            }
         }
 
         MoviePlan plan;
@@ -1474,15 +1698,28 @@ namespace Mandelbrot
             }
 
             // 2. Output dimensions (needed before ResetJuliaView so Julia fits target aspect).
-            if (resWidth && resHeight)
+            const double resolvedCharAspect = asciiCharAspect.value_or(DefaultConsoleCharAspect);
+            const int resolvedAsciiCols = asciiCols.value_or(overrideWidth.value_or(0));
+            const int resolvedAsciiRows = asciiRows.value_or(overrideHeight.value_or(0));
+            if (exportRequested)
             {
-                plan.width = *resWidth;
-                plan.height = *resHeight;
+                if (resWidth && resHeight)
+                {
+                    plan.width = *resWidth;
+                    plan.height = *resHeight;
+                }
+                if (overrideWidth) plan.width = *overrideWidth;
+                if (overrideHeight) plan.height = *overrideHeight;
+                plan.start.width = plan.width;
+                plan.start.height = plan.height;
             }
-            if (overrideWidth) plan.width = *overrideWidth;
-            if (overrideHeight) plan.height = *overrideHeight;
-            plan.start.width = plan.width;
-            plan.start.height = plan.height;
+            else
+            {
+                const int previewCols = (resolvedAsciiCols > 0) ? resolvedAsciiCols : DefaultConsoleCols;
+                const int previewRows = (resolvedAsciiRows > 0) ? resolvedAsciiRows : DefaultConsoleRows;
+                plan.start.width = previewCols;
+                plan.start.height = ComputeAsciiPixelHeight(previewRows, resolvedCharAspect);
+            }
 
             // 3. Fractal formula selection.
             if (fractalType)
@@ -1555,11 +1792,7 @@ namespace Mandelbrot
             if (invert) plan.invert = *invert;
             if (interiorColor) plan.interior = *interiorColor;
 
-            // 8. Movie encoding & rendering overrides.
-            if (fps) plan.fps = *fps;
-            if (duration) plan.seconds = *duration;
-            if (codec) plan.codec = *codec;
-            if (motionSmoothing) plan.motionSmoothing = *motionSmoothing;
+            // 8. Rendering overrides.
             if (useGpu) plan.useGpu = *useGpu;
 
             // 9. Iteration budget & auto-scaling.
@@ -1596,6 +1829,115 @@ namespace Mandelbrot
                 plan.start.maxIterations = RecommendMaxIterations(
                     plan.start.zoom, plan.start.fractalType, plan.baseIterations);
             }
+
+            if (asciiRequested)
+            {
+                ConsoleAsciiOptions consoleOpts;
+                consoleOpts.start = plan.start;
+                consoleOpts.theme = plan.theme;
+                consoleOpts.frequency = plan.frequency;
+                consoleOpts.phase = plan.phase;
+                consoleOpts.invert = plan.invert;
+                consoleOpts.interior = plan.interior;
+
+                consoleOpts.cols = resolvedAsciiCols;
+                consoleOpts.rows = resolvedAsciiRows;
+                consoleOpts.charAspect = resolvedCharAspect;
+                if (asciiCharsetPreset)
+                {
+                    consoleOpts.charsetPreset = *asciiCharsetPreset;
+                    consoleOpts.customCharset = std::move(asciiCustomCharset);
+                }
+                if (asciiColorMode)
+                {
+                    consoleOpts.colorMode = *asciiColorMode;
+                }
+                consoleOpts.showHud = asciiHud.value_or(true) && !quiet;
+                consoleOpts.quiet = quiet;
+
+                consoleOpts.autoScaleIterations = plan.autoScaleIterations;
+                consoleOpts.baseIterations = plan.baseIterations;
+                consoleOpts.useGpu = plan.useGpu;
+                consoleOpts.fps = fps.value_or(DefaultConsoleFps);
+                consoleOpts.maxDurationSeconds = duration.value_or(0);
+                consoleOpts.maxFrames = asciiFrames.value_or(0);
+                consoleOpts.once = asciiOnce;
+                consoleOpts.zoomSpeed = zoomSpeed.value_or(1.0);
+                consoleOpts.endZoom = endZoom;
+
+                if (endZoom.has_value())
+                {
+                    if (zoomInDirection.has_value())
+                    {
+                        if (*zoomInDirection && *endZoom < consoleOpts.start.zoom)
+                        {
+                            return fail(L"--end-zoom must be >= --start-zoom when --direction is 'in'.");
+                        }
+                        if (!*zoomInDirection && *endZoom > consoleOpts.start.zoom)
+                        {
+                            return fail(L"--end-zoom must be <= --start-zoom when --direction is 'out'.");
+                        }
+                        consoleOpts.zoomIn = *zoomInDirection;
+                    }
+                    else
+                    {
+                        consoleOpts.zoomIn = (*endZoom >= consoleOpts.start.zoom);
+                    }
+                }
+                else
+                {
+                    consoleOpts.zoomIn = zoomInDirection.value_or(true);
+                }
+
+                consoleOpts.autoTarget = autoTarget.value_or(false);
+                if (consoleOpts.autoTarget)
+                {
+                    if (consoleOpts.start.juliaSet)
+                    {
+                        return fail(L"--auto-target is not supported in Julia mode.");
+                    }
+                    if (!consoleOpts.zoomIn)
+                    {
+                        return fail(L"--auto-target requires zooming in.");
+                    }
+                    consoleOpts.targetX = consoleOpts.start.hpCenterX;
+                    consoleOpts.targetY = consoleOpts.start.hpCenterY;
+                    consoleOpts.targetSeed = seed.value_or(0);
+                }
+                else
+                {
+                    consoleOpts.targetX = targetX.value_or(consoleOpts.start.hpCenterX);
+                    consoleOpts.targetY = targetY.value_or(consoleOpts.start.hpCenterY);
+                }
+
+                if (asciiAutoZoom.has_value())
+                {
+                    consoleOpts.autoZoom = *asciiAutoZoom;
+                }
+                else if (consoleOpts.once || consoleOpts.maxFrames == 1)
+                {
+                    consoleOpts.autoZoom = false;
+                }
+                else if (consoleOpts.autoTarget || consoleOpts.endZoom.has_value() ||
+                         consoleOpts.maxDurationSeconds > 0 || consoleOpts.maxFrames > 1)
+                {
+                    consoleOpts.autoZoom = true;
+                }
+                else
+                {
+                    consoleOpts.autoZoom = false;
+                }
+
+                result.action = CliAction::ConsoleAscii;
+                result.consoleOptions = std::move(consoleOpts);
+                return result;
+            }
+
+            // Movie-specific encoding overrides.
+            if (fps) plan.fps = *fps;
+            if (duration) plan.seconds = *duration;
+            if (codec) plan.codec = *codec;
+            if (motionSmoothing) plan.motionSmoothing = *motionSmoothing;
 
             // 10. Zoom motion & target.
             if (endZoom)
@@ -1897,7 +2239,7 @@ namespace Mandelbrot
             return std::nullopt;
         }
 
-        ScopedParentConsole console;
+        ScopedParentConsole console(parsed.action == CliAction::ConsoleAscii);
         if (parsed.action == CliAction::ShowHelp)
         {
             std::wcout << MovieCliUsage();
@@ -1920,6 +2262,16 @@ namespace Mandelbrot
                 if (installed) SetConsoleCtrlHandler(ConsoleCtrlHandler, FALSE);
             }
         } handlerGuard{ handlerInstalled };
+
+        if (parsed.action == CliAction::ConsoleAscii)
+        {
+            return RunConsoleAsciiCli(
+                parsed.consoleOptions,
+                std::cout,
+                std::wcerr,
+                &g_consoleCancelRequested,
+                console.stdoutIsConsole);
+        }
 
         return RunMovieExportCli(
             parsed.options,

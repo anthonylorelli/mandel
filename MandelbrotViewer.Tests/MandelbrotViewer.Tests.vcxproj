@@ -133,6 +133,7 @@
     <ClInclude Include="..\MandelbrotViewer\MovieWriter.h" />
     <ClInclude Include="MoviePlayback.h" />
     <ClInclude Include="..\MandelbrotViewer\MovieExport.h" />
+    <ClInclude Include="..\MandelbrotViewer\ConsoleAscii.h" />
     <ClInclude Include="..\MandelbrotViewer\MovieCli.h" />
     <ClInclude Include="..\MandelbrotViewer\MovieZoomPyramid.h" />
   </ItemGroup>
@@ -157,10 +158,12 @@
     <ClCompile Include="JuliaTourTests.cpp" />
     <ClCompile Include="MovieTests.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="MovieCliTests.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="ConsoleAsciiTests.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\MandelbrotViewer\VideoBitstream.cpp" />
     <ClCompile Include="..\MandelbrotViewer\Mp4Muxer.cpp" />
     <ClCompile Include="..\MandelbrotViewer\MovieWriter.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\MandelbrotViewer\MovieExport.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="..\MandelbrotViewer\ConsoleAscii.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\MandelbrotViewer\MovieCli.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\MandelbrotViewer\MovieZoomPyramid.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\MandelbrotViewer\BackgroundRenderer.cpp" />

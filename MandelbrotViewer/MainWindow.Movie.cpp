@@ -132,8 +132,20 @@ namespace winrt::MandelbrotViewer::implementation
             CheckBox motion; motion.Content(box_value(L"Smooth motion between frames")); motion.IsChecked(true); settings.Children().Append(motion);
             TextBlock errorText; errorText.TextWrapping(TextWrapping::Wrap); settings.Children().Append(errorText);
             ScrollViewer scroller; scroller.Content(settings); scroller.MaxHeight(510);
-            ContentDialog dialog; dialog.XamlRoot(WindowRoot().XamlRoot()); dialog.Title(box_value(L"Export Zoom Movie"));
+            ContentDialog dialog;
+            dialog.XamlRoot(WindowRoot().XamlRoot());
+            dialog.RequestedTheme(WindowRoot().ActualTheme());
+            dialog.Title(box_value(L"Export Zoom Movie"));
             dialog.Content(scroller); dialog.PrimaryButtonText(L"Choose File..."); dialog.CloseButtonText(L"Cancel");
+            auto dialogThemeRevoker = WindowRoot().ActualThemeChanged(
+                winrt::auto_revoke,
+                [weakDialog = make_weak(dialog), weakRoot = make_weak(WindowRoot())](auto&&, auto&&)
+                {
+                    if (auto dlg = weakDialog.get())
+                    {
+                        if (auto root = weakRoot.get()) dlg.RequestedTheme(root.ActualTheme());
+                    }
+                });
             const bool autoIterations = m_autoScaleIterations;
             const int baseIterations = m_baseIterations;
             dialog.PrimaryButtonClick([&](auto&&, ContentDialogButtonClickEventArgs const& args)

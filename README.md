@@ -110,6 +110,26 @@ Supported flags include:
 - **Zoom Motion**: `--target-x`, `--target-y`, `--direction <in|out>`, `--zoom-speed <0.2..5.0>`, `--end-zoom`, `--auto-target` / `--no-auto-target`, `--seed <uint64>`.
 - **Rendering & Theme**: `--iterations`, `--auto-iterations` / `--no-auto-iterations`, `--smooth` / `--no-smooth`, `--gpu` / `--no-gpu` (`--cpu`), `--theme <name>`, `--frequency`, `--phase`, `--invert` / `--no-invert`, `--interior-color <#RRGGBB|#AARRGGBB|0xAARRGGBB>`.
 
+### 5. Console ASCII Mode (Live Terminal Renderer & Auto-Zoom)
+`MandelbrotViewer.exe` can also render fractals directly in the terminal using ASCII characters (with automatic 24-bit ANSI TrueColor, 256-color, or pure monochrome ASCII) and live auto-zoom / auto-target exploration matching the GUI:
+
+```powershell
+# Launch live interactive ASCII explorer (fits terminal size automatically)
+.\x64\Release\MandelbrotViewer.exe --ascii
+
+# Live auto-zoom with automatic interesting target picking (just like GUI Auto-Pick Target)
+.\x64\Release\MandelbrotViewer.exe --ascii --auto-zoom --auto-target --theme inferno
+
+# Auto-zoom into a bookmark with custom speed and FPS
+.\x64\Release\MandelbrotViewer.exe --ascii --bookmark "Seahorse Valley" --start-zoom 1 --auto-zoom --zoom-speed 1.5 --fps 20
+
+# Render a single plain-ASCII snapshot (great for piping or scripting)
+.\x64\Release\MandelbrotViewer.exe --ascii --once --cols 100 --rows 32 --no-color
+```
+
+- **Console Flags**: `--ascii` (or `--console`), `--auto-zoom` / `--no-auto-zoom`, `--once`, `--frames <count>`, `--cols <10..512>` (`--width`), `--rows <5..256>` (`--height`), `--char-aspect <0.5..4.0>` (default `2.0`), `--charset <standard|dense|detailed|simple|custom>`, `--color <auto|truecolor|256|none>`, `--no-color`, `--hud` / `--no-hud`, `--fps <1..60>` (default `15`), plus all shared view, config, bookmark, Julia, theme, and zoom-motion flags.
+- **Interactive Controls**: `Space`/`P` start/pause auto-zoom, `E` toggle auto-pick target, `V` flip zoom direction (in/out), `[`/`]` adjust zoom speed, `WASD`/Arrow keys pan, `+`/`-` zoom step, `F` cycle fractal, `T` cycle theme, `C` cycle color mode, `M` cycle ASCII charset, `H` toggle HUD, `R` reset view, `Q`/`Esc`/`Ctrl+C` quit.
+
 ---
 
 ## Build & Run
@@ -171,3 +191,4 @@ Or with options:
 - **Julia Tours**: Seeded continuous routes around Mandelbrot regions, exterior time allocation around both primary regions, rendered detail, bounded frame steps, critical-orbit escape and return checks, and safe handling of unsupported selections and long frame delays.
 - **Movie Export**: Exact and deep camera paths, fixed sampling and render-band agreement, 8K JPEG encoding, MP4 sample tables and timing, rendered playback geometry and colors through 8K, background progress and previews, and cancellation preserving an existing destination.
 - **Command-Line Movie Export**: Argument parsing, resolution/codec/theme/bookmark/Julia options, `SerializeViewState` JSON config loading with CLI overrides, invalid/conflicting flag rejection, Windows command-line quoting, and end-to-end headless movie export and cancellation.
+- **Console ASCII Mode**: CLI flag parsing and conflict validation, aspect-corrected ASCII/TrueColor/256-color rendering, deterministic seeded auto-zoom and auto-target retargeting, interactive key actions, live HUD formatting, snapshot/streaming output, and cancellation.

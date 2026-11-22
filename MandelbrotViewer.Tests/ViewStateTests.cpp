@@ -85,3 +85,37 @@ TEST_CASE(ViewState, JsonUsesInvariantNumbersRegardlessOfUserLocale)
     ASSERT_TRUE(JsonValue(json, L"phaseOffset") == L"0.25");
     ASSERT_TRUE(JsonValue(json, L"width") == L"1024");
 }
+
+TEST_CASE(ViewState, AppThemeDefaultsToSystemAndResolvesLightAndDarkModes)
+{
+    constexpr auto themes = GetAllAppThemes();
+    ASSERT_EQ(static_cast<size_t>(3), themes.size());
+    ASSERT_TRUE(themes[0] == AppTheme::System);
+    ASSERT_TRUE(themes[1] == AppTheme::Light);
+    ASSERT_TRUE(themes[2] == AppTheme::Dark);
+
+    ASSERT_TRUE(std::wstring(GetAppThemeName(AppTheme::System)) == L"System Default");
+    ASSERT_TRUE(std::wstring(GetAppThemeName(AppTheme::Light)) == L"Light");
+    ASSERT_TRUE(std::wstring(GetAppThemeName(AppTheme::Dark)) == L"Dark");
+
+    // System Default adopts the OS dark/light theme dynamically.
+    ASSERT_TRUE(IsDarkAppTheme(AppTheme::System, true));
+    ASSERT_TRUE(!IsDarkAppTheme(AppTheme::System, false));
+
+    // Explicit Light / Dark overrides ignore the OS theme.
+    ASSERT_TRUE(!IsDarkAppTheme(AppTheme::Light, true));
+    ASSERT_TRUE(!IsDarkAppTheme(AppTheme::Light, false));
+    ASSERT_TRUE(IsDarkAppTheme(AppTheme::Dark, true));
+    ASSERT_TRUE(IsDarkAppTheme(AppTheme::Dark, false));
+
+    // Quick-cycle order covers System -> Light -> Dark -> System.
+    ASSERT_TRUE(CycleAppTheme(AppTheme::System) == AppTheme::Light);
+    ASSERT_TRUE(CycleAppTheme(AppTheme::Light) == AppTheme::Dark);
+    ASSERT_TRUE(CycleAppTheme(AppTheme::Dark) == AppTheme::System);
+
+    // UISettings perceptual background luma check.
+    ASSERT_TRUE(IsSystemBackgroundDark(0, 0, 0));
+    ASSERT_TRUE(IsSystemBackgroundDark(32, 32, 32));
+    ASSERT_TRUE(!IsSystemBackgroundDark(255, 255, 255));
+    ASSERT_TRUE(!IsSystemBackgroundDark(243, 243, 243));
+}

@@ -12,11 +12,18 @@
 #include "MainWindow.xaml.g.hpp"
 #endif
 
+#include <dwmapi.h>
 #include <iomanip>
 #include <sstream>
 #include <winrt/Microsoft.UI.Dispatching.h>
 #include <winrt/Microsoft.UI.Xaml.Automation.h>
 #include <winrt/Windows.ApplicationModel.DataTransfer.h>
+
+#pragma comment(lib, "dwmapi.lib")
+
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+#endif
 
 using namespace winrt;
 using namespace Microsoft::UI::Xaml;
@@ -63,16 +70,16 @@ namespace winrt::MandelbrotViewer::implementation
         wchar_t const* startTooltip,
         wchar_t const* stopTooltip,
         wchar_t const* startAutoName,
-        wchar_t const* stopAutoName)
+        wchar_t const* stopAutoName) const
     {
         if (icon)
         {
+            const bool dark = IsEffectiveDarkTheme();
             icon.Glyph(running ? L"\uE71A" : L"\uE768");
-            icon.Foreground(Media::SolidColorBrush(winrt::Windows::UI::Color{
-                255,
-                static_cast<uint8_t>(running ? 255 : 81),
-                static_cast<uint8_t>(running ? 107 : 207),
-                static_cast<uint8_t>(running ? 107 : 102) }));
+            const winrt::Windows::UI::Color color = running
+                ? (dark ? winrt::Windows::UI::Color{ 255, 255, 107, 107 } : winrt::Windows::UI::Color{ 255, 197, 34, 31 })
+                : (dark ? winrt::Windows::UI::Color{ 255, 81, 207, 102 } : winrt::Windows::UI::Color{ 255, 24, 128, 56 });
+            icon.Foreground(Media::SolidColorBrush(color));
         }
         if (button)
         {
@@ -82,6 +89,118 @@ namespace winrt::MandelbrotViewer::implementation
                 Automation::AutomationProperties::SetName(button, running ? stopAutoName : startAutoName);
             }
         }
+    }
+
+    bool MainWindow::QuerySystemDarkTheme() const
+    {
+        if (m_uiSettings)
+        {
+            const auto bg = m_uiSettings.GetColorValue(
+                winrt::Windows::UI::ViewManagement::UIColorType::Background);
+            return Mandelbrot::IsSystemBackgroundDark(bg.R, bg.G, bg.B);
+        }
+        return Application::Current().RequestedTheme() == ApplicationTheme::Dark;
+    }
+
+    bool MainWindow::IsEffectiveDarkTheme() const
+    {
+        return Mandelbrot::IsDarkAppTheme(m_appTheme, QuerySystemDarkTheme());
+    }
+
+    void MainWindow::ApplyAppTheme(Mandelbrot::AppTheme theme)
+    {
+        m_appTheme = theme;
+        if (WindowRoot())
+        {
+            const bool highContrast = m_accessibilitySettings && m_accessibilitySettings.HighContrast();
+            ElementTheme targetTheme = ElementTheme::Default;
+            if (theme == Mandelbrot::AppTheme::Light)
+            {
+                targetTheme = ElementTheme::Light;
+            }
+            else if (theme == Mandelbrot::AppTheme::Dark)
+            {
+                targetTheme = ElementTheme::Dark;
+            }
+            else if (!highContrast)
+            {
+                const bool systemDark = QuerySystemDarkTheme();
+                const bool appStartupDark = Application::Current().RequestedTheme() == ApplicationTheme::Dark;
+                targetTheme = (systemDark == appStartupDark)
+                    ? ElementTheme::Default
+                    : (systemDark ? ElementTheme::Dark : ElementTheme::Light);
+            }
+            if (WindowRoot().RequestedTheme() != targetTheme)
+            {
+                WindowRoot().RequestedTheme(targetTheme);
+            }
+        }
+
+        if (AppThemeComboBox())
+        {
+            const int desiredIndex = static_cast<int>(theme);
+            if (AppThemeComboBox().SelectedIndex() != desiredIndex)
+            {
+                ScopedEventSuppress suppress(m_suppressEventDepth);
+                AppThemeComboBox().SelectedIndex(desiredIndex);
+            }
+        }
+
+        SyncWindowThemeVisuals();
+    }
+
+    void MainWindow::SyncWindowThemeVisuals()
+    {
+        if (m_isClosed) return;
+        const bool dark = IsEffectiveDarkTheme();
+
+        if (auto appWindow = AppWindow())
+        {
+            if (winrt::Microsoft::UI::Windowing::AppWindowTitleBar::IsCustomizationSupported())
+            {
+                appWindow.TitleBar().PreferredTheme(
+                    dark ? winrt::Microsoft::UI::Windowing::TitleBarTheme::Dark
+                         : winrt::Microsoft::UI::Windowing::TitleBarTheme::Light);
+            }
+        }
+
+        if (m_hwnd)
+        {
+            const BOOL useDark = dark ? TRUE : FALSE;
+            DwmSetWindowAttribute(m_hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &useDark, sizeof(useDark));
+        }
+
+        if (ThemeCycleIcon() && ThemeCycleButton())
+        {
+            wchar_t const* glyph = L"\uE770";
+            std::wstring tooltip = L"Appearance: ";
+            tooltip += Mandelbrot::GetAppThemeName(m_appTheme);
+            if (m_appTheme == Mandelbrot::AppTheme::System)
+            {
+                glyph = L"\uE770";
+                tooltip += dark ? L" (Dark)" : L" (Light)";
+            }
+            else if (m_appTheme == Mandelbrot::AppTheme::Light)
+            {
+                glyph = L"\uE706";
+            }
+            else
+            {
+                glyph = L"\uE708";
+            }
+            tooltip += L" \u2014 Click to switch";
+            ThemeCycleIcon().Glyph(glyph);
+            ToolTipService::SetToolTip(ThemeCycleButton(), box_value(tooltip));
+            Automation::AutomationProperties::SetName(ThemeCycleButton(), tooltip);
+        }
+
+        UpdatePlayStopVisual(
+            OverlayPlayZoomIcon(), OverlayPlayZoomButton(), m_isZoomAnimating,
+            L"Start Animated Zoom", L"Stop Animated Zoom");
+        UpdatePlayStopVisual(
+            JuliaTravelIcon(), JuliaTravelOverlayButton(), m_juliaTraveling,
+            L"Start Random Julia Tour", L"Stop Random Julia Tour",
+            L"Start random Julia tour", L"Stop random Julia tour");
     }
 
     std::unique_ptr<Mandelbrot::BackgroundRenderer> MainWindow::CreateBackgroundRenderer(void (MainWindow::*onCompleted)())
@@ -150,6 +269,7 @@ namespace winrt::MandelbrotViewer::implementation
             HWND hwnd = nullptr;
             if (SUCCEEDED(native->get_WindowHandle(&hwnd)) && hwnd)
             {
+                m_hwnd = hwnd;
                 const UINT dpi = GetDpiForWindow(hwnd);
                 const HINSTANCE instance = GetModuleHandleW(nullptr);
                 const int bigW = dpi ? GetSystemMetricsForDpi(SM_CXICON, dpi) : GetSystemMetrics(SM_CXICON);
@@ -169,14 +289,62 @@ namespace winrt::MandelbrotViewer::implementation
             }
         }
 
+        auto weak = get_weak();
+        auto dispatcher = DispatcherQueue();
+        try
+        {
+            m_uiSettings = winrt::Windows::UI::ViewManagement::UISettings();
+            m_accessibilitySettings = winrt::Windows::UI::ViewManagement::AccessibilitySettings();
+            auto refreshSystemTheme = [weak, dispatcher]
+            {
+                dispatcher.TryEnqueue([weak]
+                {
+                    if (auto self = weak.get(); self && !self->m_isClosed)
+                    {
+                        if (self->m_appTheme == Mandelbrot::AppTheme::System)
+                        {
+                            self->ApplyAppTheme(Mandelbrot::AppTheme::System);
+                        }
+                        else
+                        {
+                            self->SyncWindowThemeVisuals();
+                        }
+                    }
+                });
+            };
+            m_colorValuesChangedRevoker = m_uiSettings.ColorValuesChanged(
+                winrt::auto_revoke, [refreshSystemTheme](auto&&, auto&&) { refreshSystemTheme(); });
+            m_highContrastChangedRevoker = m_accessibilitySettings.HighContrastChanged(
+                winrt::auto_revoke, [refreshSystemTheme](auto&&, auto&&) { refreshSystemTheme(); });
+        }
+        catch (const winrt::hresult_error&)
+        {
+        }
+
+        WindowRoot().ActualThemeChanged([weak](auto&&, auto&&)
+        {
+            if (auto self = weak.get(); self && !self->m_isClosed)
+            {
+                self->SyncWindowThemeVisuals();
+            }
+        });
+        WindowRoot().Loaded([weak](auto&&, auto&&)
+        {
+            if (auto self = weak.get(); self && !self->m_isClosed)
+            {
+                self->SyncWindowThemeVisuals();
+            }
+        });
+
         m_renderer = CreateBackgroundRenderer(&MainWindow::OnRenderCompleted);
         InitializeControls();
-        auto weak = get_weak();
         Closed([weak](auto&&, auto&&)
         {
             auto self = weak.get();
             if (!self) return;
             self->m_isClosed = true;
+            self->m_colorValuesChangedRevoker.revoke();
+            self->m_highContrastChangedRevoker.revoke();
             if (self->m_movieProgressTimer) self->m_movieProgressTimer.Stop();
             if (self->m_movieExporter) self->m_movieExporter->Stop();
             self->StopJuliaTravel(false);
@@ -198,6 +366,13 @@ namespace winrt::MandelbrotViewer::implementation
             // Initialize preview bitmap (256 x 1)
             m_previewBitmap = WriteableBitmap(256, 1);
             PalettePreviewImage().Source(m_previewBitmap);
+
+            // Populate App Appearance Themes (System Default selected on launch)
+            for (const auto theme : Mandelbrot::GetAllAppThemes())
+            {
+                AppThemeComboBox().Items().Append(box_value(Mandelbrot::GetAppThemeName(theme)));
+            }
+            AppThemeComboBox().SelectedIndex(static_cast<int>(m_appTheme));
 
             // Populate Fractal Formulas
             for (const auto& type : Mandelbrot::GetAllFractalTypes())
@@ -323,6 +498,7 @@ namespace winrt::MandelbrotViewer::implementation
             SyncTargetInputsFromCenter();
         }
 
+        ApplyAppTheme(m_appTheme);
         UpdateGradientPreview();
     }
 
@@ -1051,6 +1227,22 @@ namespace winrt::MandelbrotViewer::implementation
         }
     }
 
+    void MainWindow::OnAppThemeSelectionChanged(IInspectable const&, SelectionChangedEventArgs const&)
+    {
+        if (IsSuppressingEvents() || !AppThemeComboBox()) return;
+        const int index = AppThemeComboBox().SelectedIndex();
+        const auto themes = Mandelbrot::GetAllAppThemes();
+        if (index >= 0 && index < static_cast<int>(themes.size()))
+        {
+            ApplyAppTheme(themes[index]);
+        }
+    }
+
+    void MainWindow::OnThemeCycleClick(IInspectable const&, RoutedEventArgs const&)
+    {
+        ApplyAppTheme(Mandelbrot::CycleAppTheme(m_appTheme));
+    }
+
     void MainWindow::OnCloseSidebarClick(IInspectable const&, RoutedEventArgs const&)
     {
         SetSidebarVisible(false);
@@ -1089,6 +1281,7 @@ namespace winrt::MandelbrotViewer::implementation
         else
         {
             AppWindow().SetPresenter(winrt::Microsoft::UI::Windowing::AppWindowPresenterKind::Overlapped);
+            SyncWindowThemeVisuals();
             SetSidebarVisible(m_sidebarVisibleBeforeFullScreen);
             ToggleFullScreenIcon().Glyph(L"\uE740");
             winrt::Microsoft::UI::Xaml::Controls::ToolTipService::SetToolTip(ToggleFullScreenButton(), box_value(L"Enter Full Screen (F11)"));
