@@ -298,21 +298,27 @@
   </ImportGroup>
   <Target Name="_RunXamlMarkupCompile" BeforeTargets="ClCompile" DependsOnTargets="MarkupCompilePass1;MarkupCompilePass2" />
   <Target Name="_IncludeVcRedistInMsix"
-          BeforeTargets="AssignTargetPaths;GetPackagingOutputs"
-          Condition="'$(BuildMsix)' == 'true' and '$(VCToolsRedistDir)' != ''">
-    <ItemGroup>
-      <_VcRedistCandidate Include="$(VCToolsRedistDir)$(Platform)\Microsoft.VC*.CRT\vcruntime140.dll" />
-      <_VcRedistCandidate Include="$(VCToolsRedistDir)$(Platform)\Microsoft.VC*.CRT\vcruntime140_1.dll" />
-      <_VcRedistCandidate Include="$(VCToolsRedistDir)$(Platform)\Microsoft.VC*.CRT\msvcp140.dll" />
-      <_VcRedistCandidate Include="$(VCToolsRedistDir)$(Platform)\Microsoft.VC*.CRT\msvcp140_1.dll" />
-      <_VcRedistCandidate Include="$(VCToolsRedistDir)$(Platform)\Microsoft.VC*.CRT\msvcp140_2.dll" />
-      <_VcRedistCandidate Include="$(VCToolsRedistDir)$(Platform)\Microsoft.VC*.CRT\concrt140.dll" />
-      <_VcRedistCandidate Include="$(VCToolsRedistDir)$(Platform)\Microsoft.VC*.OpenMP\vcomp140.dll" />
-      <None Include="@(_VcRedistCandidate)">
-        <DeploymentContent>true</DeploymentContent>
-        <Link>%(Filename)%(Extension)</Link>
-      </None>
+          AfterTargets="GetPackagingOutputs"
+          Condition="'$(BuildMsix)' == 'true'">
+    <PropertyGroup>
+      <_ResolvedVcRedistDir Condition="'$(VcRedistDir)' != ''">$(VcRedistDir)</_ResolvedVcRedistDir>
+      <_ResolvedVcRedistDir Condition="'$(_ResolvedVcRedistDir)' == ''">$(VCToolsRedistDir)</_ResolvedVcRedistDir>
+    </PropertyGroup>
+    <ItemGroup Condition="'$(_ResolvedVcRedistDir)' != ''">
+      <_VcRedistCandidate Include="$(_ResolvedVcRedistDir)\$(Platform)\Microsoft.VC*.CRT\vcruntime140.dll" />
+      <_VcRedistCandidate Include="$(_ResolvedVcRedistDir)\$(Platform)\Microsoft.VC*.CRT\vcruntime140_1.dll" />
+      <_VcRedistCandidate Include="$(_ResolvedVcRedistDir)\$(Platform)\Microsoft.VC*.CRT\msvcp140.dll" />
+      <_VcRedistCandidate Include="$(_ResolvedVcRedistDir)\$(Platform)\Microsoft.VC*.CRT\msvcp140_1.dll" />
+      <_VcRedistCandidate Include="$(_ResolvedVcRedistDir)\$(Platform)\Microsoft.VC*.CRT\msvcp140_2.dll" />
+      <_VcRedistCandidate Include="$(_ResolvedVcRedistDir)\$(Platform)\Microsoft.VC*.CRT\concrt140.dll" />
+      <_VcRedistCandidate Include="$(_ResolvedVcRedistDir)\$(Platform)\Microsoft.VC*.OpenMP\vcomp140.dll" />
+      <PackagingOutputs Include="@(_VcRedistCandidate)">
+        <OutputGroup>ContentFilesProjectOutputGroup</OutputGroup>
+        <ProjectName>$(ProjectName)</ProjectName>
+        <TargetPath>%(Filename)%(Extension)</TargetPath>
+      </PackagingOutputs>
     </ItemGroup>
+    <Message Importance="high" Text="Bundling VC++ redist DLLs from '$(_ResolvedVcRedistDir)\$(Platform)': @(_VcRedistCandidate->'%(Filename)%(Extension)')" />
   </Target>
   <Target Name="_SyncLegacyProjectOutDir" AfterTargets="Build" Condition="'$(BuildMsix)' != 'true' and '$(OutDir)' != '$(ProjectDir)$(Platform)\$(Configuration)\'">
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(ProjectDir)$(Platform)\$(Configuration)\" SkipUnchangedFiles="true" />

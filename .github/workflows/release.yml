@@ -211,6 +211,7 @@ jobs:
           msbuild MandelbrotViewer.Tests\MandelbrotViewer.Tests.vcxproj `
             /p:Configuration=Release `
             /p:Platform=${{ matrix.platform }} `
+            /p:SolutionDir="$PWD\" `
             $toolsetArg `
             /p:WindowsTargetPlatformVersion=$targetSdk `
             /p:MultiProcessorCompilation=true `
@@ -220,7 +221,10 @@ jobs:
 
           $testExe = ".\${{ matrix.platform }}\Release\MandelbrotViewer.Tests.exe"
           if (-not (Test-Path $testExe)) {
-            Write-Error "Test executable not found at $testExe"
+            $testExe = ".\MandelbrotViewer.Tests\${{ matrix.platform }}\Release\MandelbrotViewer.Tests.exe"
+          }
+          if (-not (Test-Path $testExe)) {
+            Write-Error "Test executable not found"
             exit 1
           }
           & $testExe
@@ -246,6 +250,23 @@ jobs:
             if ($latestSdk) { $targetSdk = $latestSdk.Name }
           }
 
+          $redistRoot = Join-Path $vsPath "VC\Redist\MSVC"
+          $vcRedistDir = ""
+          if (Test-Path $redistRoot) {
+            $redistMatch = Get-ChildItem -Path $redistRoot -Directory |
+              Where-Object { Test-Path (Join-Path $_.FullName "${{ matrix.platform }}") } |
+              Sort-Object Name -Descending |
+              Select-Object -First 1
+            if ($redistMatch) {
+              $vcRedistDir = $redistMatch.FullName
+            }
+          }
+          if (-not $vcRedistDir) {
+            Write-Error "Could not locate VC++ redistributables for ${{ matrix.platform }} under $redistRoot"
+            exit 1
+          }
+          Write-Host "Using VcRedistDir=$vcRedistDir"
+
           $appPackagesDir = Join-Path $PWD "AppPackages\${{ matrix.platform }}\"
           New-Item -ItemType Directory -Path $appPackagesDir -Force | Out-Null
 
@@ -258,6 +279,7 @@ jobs:
             /p:WindowsTargetPlatformVersion=$targetSdk `
             /p:TargetPlatformVersion=$targetSdk `
             /p:BuildMsix=true `
+            /p:VcRedistDir="$vcRedistDir" `
             /p:AppxPackageDir="$appPackagesDir" `
             /p:AppVersionMajor=${{ needs.prepare.outputs.ver_major }} `
             /p:AppVersionMinor=${{ needs.prepare.outputs.ver_minor }} `
@@ -286,29 +308,12 @@ jobs:
       - name: Verify MSIX payload and manifest (${{ matrix.platform }})
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           $msixPath = (Get-ChildItem -Path "msix-stage" -Filter "*.msix" | Select-Object -First 1).FullName
           $inspectDir = Join-Path $env:RUNNER_TEMP "msix-inspect-${{ matrix.platform }}"
           if (Test-Path $inspectDir) { Remove-Item $inspectDir -Recurse -Force }
           [System.IO.Compression.ZipFile]::ExtractToDirectory($msixPath, $inspectDir)
-
-          $required = @(
-            'AppxManifest.xml',
-            'MandelbrotViewer.exe',
-            'resources.pri',
-            'Microsoft.UI.Xaml.dll',
-            'vcruntime140.dll',
-            'msvcp140.dll',
-            'vcomp140.dll'
-          )
-          foreach ($rel in $required) {
-            $full = Join-Path $inspectDir $rel
-            if (-not (Test-Path $full)) {
-              Write-Error "Required self-contained file missing from MSIX: $rel"
-              Get-ChildItem -Path $inspectDir -Name | Sort-Object | ForEach-Object { Write-Host "  $_" }
-              exit 1
-            }
-          }
 
           [xml]$manifest = Get-Content (Join-Path $inspectDir 'AppxManifest.xml') -Raw -Encoding UTF8
           $ns = New-Object System.Xml.XmlNamespaceManager($manifest.NameTable)
@@ -322,17 +327,37 @@ jobs:
           foreach ($dep in $pkgDeps) {
             Write-Host "  PackageDependency: Name=$($dep.Name), MinVersion=$($dep.MinVersion)"
             if ($dep.Name -like 'Microsoft.WindowsAppRuntime*') {
-              Write-Error "Unexpected WindowsAppRuntime framework dependency found in self-contained MSIX: $($dep.Name)"
-              exit 1
+              throw "Unexpected WindowsAppRuntime framework dependency found in self-contained MSIX: $($dep.Name)"
             }
           }
 
           $inProc = $manifest.SelectNodes("//ns:Extension[@Category='windows.activatableClass.inProcessServer']", $ns)
           Write-Host "Registered InProcessServer extensions: $($inProc.Count)"
           if ($inProc.Count -eq 0) {
-            Write-Error "No windows.activatableClass.inProcessServer entries found in AppxManifest.xml"
-            exit 1
+            throw "No windows.activatableClass.inProcessServer entries found in AppxManifest.xml"
           }
+
+          $required = @(
+            'AppxManifest.xml',
+            'MandelbrotViewer.exe',
+            'resources.pri',
+            'Microsoft.UI.Xaml.dll',
+            'vcruntime140.dll',
+            'msvcp140.dll',
+            'vcomp140.dll'
+          )
+          $missing = @()
+          foreach ($rel in $required) {
+            if (-not (Test-Path (Join-Path $inspectDir $rel))) {
+              $missing += $rel
+            }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Host "MSIX root files:"
+            Get-ChildItem -Path $inspectDir -Name | Sort-Object | ForEach-Object { Write-Host "  $_" }
+            throw "Required self-contained files missing from MSIX: $($missing -join ', ')"
+          }
+          Write-Host "All required self-contained files verified in MSIX!"
 
       - name: Upload unsigned MSIX (${{ matrix.platform }})
         uses: actions/upload-artifact@v4
