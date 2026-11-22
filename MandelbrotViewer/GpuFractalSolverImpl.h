@@ -291,5 +291,24 @@ namespace Mandelbrot
             double juliaBailout2,
             const std::atomic<bool>* cancelToken,
             bool& outCanceled);
+
+        // Runs GPU 3x3 boundary detection, indirect-dispatch argument building, and
+        // DispatchIndirect 4x subpixel evaluation for outItersBuf -> subOutBuf.
+        bool DispatchGpuSubpixelPass(
+            detail::GpuShaderMode mode,
+            const FractalConfig& config,
+            const DeepReferenceState& refState,
+            double juliaCx,
+            double juliaCy,
+            double juliaBailout2,
+            const detail::PostProcessCb& postCb);
+
+        // Copies `bytes` from `srcBuf` to `stagingBuf`, maps, copies to `dst`, and unmaps.
+        // Calls CheckDeviceLost() on Map failure.
+        bool ReadbackBuffer(
+            ID3D11Buffer* srcBuf,
+            ID3D11Buffer* stagingBuf,
+            void* dst,
+            size_t bytes) noexcept;
     };
 }

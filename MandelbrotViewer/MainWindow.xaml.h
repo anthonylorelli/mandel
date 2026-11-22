@@ -111,6 +111,7 @@ namespace winrt::MandelbrotViewer::implementation
         };
 
         bool IsSuppressingEvents() const noexcept { return m_suppressEventDepth > 0; }
+        static winrt::hstring FormatFloat(double val, int precision = 2);
         static winrt::hstring FormatZoom(double zoom);
         void UpdatePlayStopVisual(
             winrt::Microsoft::UI::Xaml::Controls::FontIcon const& icon,
