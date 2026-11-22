@@ -553,3 +553,177 @@ TEST_CASE(ConsoleAscii, EndToEndRunConsoleAsciiCliSnapshotsLiveZoomAndCancel)
     std::wostringstream cancelErr;
     ASSERT_EQ(130, RunConsoleAsciiCli(zoomParsed.consoleOptions, cancelOut, cancelErr, &cancel, false));
 }
+
+TEST_CASE(ConsoleAscii, StabilizationEliminatesBoundaryChatterAndPreservesMonotonicRamp)
+{
+    const std::string ramp = GetAsciiCharset(AsciiCharsetPreset::Standard); // 10 chars, indices 0..9
+    const int cols = 8;
+    const int rows = 4;
+    FractalConfig cfg;
+    cfg.width = cols;
+    cfg.height = rows;
+    cfg.SetCenter(-0.75, 0.0);
+    cfg.zoom = 2.0;
+
+    auto makeGrayFrame = [&](uint8_t v)
+    {
+        const size_t n = static_cast<size_t>(cols) * static_cast<size_t>(rows);
+        std::vector<float> iters(n, 10.0f); // exterior
+        const uint32_t bgra = 0xFF000000u | (static_cast<uint32_t>(v) << 16) | (static_cast<uint32_t>(v) << 8) | v;
+        std::vector<uint32_t> pixels(n, bgra);
+        return std::make_pair(std::move(iters), std::move(pixels));
+    };
+
+    // Oscillate luminance tightly across the boundary between ramp index 4 ('+') and 5 ('*').
+    // With minExteriorIdx=1 and maxRampIdx=9, rampPos = 1 + (v/255)*8.
+    // v=108 -> rampPos ~ 4.39 (raw rounds to 4), v=116 -> rampPos ~ 4.64 (raw rounds to 5).
+    AsciiTemporalState state;
+    char firstStableChar = '\0';
+    int stableFlips = 0;
+    int rawFlips = 0;
+    char prevRawChar = '\0';
+    char prevStableChar = '\0';
+
+    for (int f = 0; f < 10; ++f)
+    {
+        const uint8_t v = (f % 2 == 0) ? 108u : 116u;
+        const auto [iters, pixels] = makeGrayFrame(v);
+
+        const std::string raw = RenderAsciiFrame(iters, pixels, cols, rows, cols, rows, ramp, AsciiColorMode::None);
+        const std::string stable = RenderAsciiFrameStabilized(iters, pixels, cfg, cols, rows, ramp, AsciiColorMode::None, &state);
+        ASSERT_FALSE(raw.empty());
+        ASSERT_FALSE(stable.empty());
+
+        const char rc = raw[0];
+        const char sc = stable[0];
+        if (f == 0)
+        {
+            firstStableChar = sc;
+        }
+        else
+        {
+            if (rc != prevRawChar) ++rawFlips;
+            if (sc != prevStableChar) ++stableFlips;
+        }
+        prevRawChar = rc;
+        prevStableChar = sc;
+    }
+
+    ASSERT_EQ(9, rawFlips);
+    ASSERT_EQ(0, stableFlips);
+    ASSERT_TRUE(prevStableChar == firstStableChar);
+
+    // Monotonic sweep from dark to bright must traverse the ramp smoothly without getting stuck.
+    AsciiTemporalState sweepState;
+    std::string visited;
+    for (int step = 0; step <= 255; step += 15)
+    {
+        const auto [iters, pixels] = makeGrayFrame(static_cast<uint8_t>(step));
+        const std::string frame = RenderAsciiFrameStabilized(iters, pixels, cfg, cols, rows, ramp, AsciiColorMode::None, &sweepState);
+        const char ch = frame[0];
+        if (visited.empty() || visited.back() != ch)
+        {
+            visited.push_back(ch);
+        }
+    }
+    ASSERT_GE(visited.size(), 6u);
+    ASSERT_EQ(ramp.back(), visited.back());
+}
+
+TEST_CASE(ConsoleAscii, ZoomAnimationStabilityReducesCharacterJitter)
+{
+    const int cols = 64;
+    const int rows = 20;
+    const std::string ramp = GetAsciiCharset(AsciiCharsetPreset::Standard);
+
+    // Zoom into Seahorse Valley (high-detail spiral filaments where naive point-sampling flickers heavily).
+    ConsoleAsciiOptions opts;
+    opts.start.fractalType = FractalType::Mandelbrot;
+    opts.start.SetCenter(-0.7436438870371587, 0.1318259042053119);
+    opts.start.zoom = 12.0;
+    opts.targetX = opts.start.hpCenterX;
+    opts.targetY = opts.start.hpCenterY;
+    opts.autoZoom = true;
+    opts.zoomIn = true;
+    opts.zoomSpeed = 1.0;
+    opts.autoScaleIterations = true;
+    opts.baseIterations = 400;
+    opts.useGpu = false;
+    opts.fps = 15;
+
+    ConsoleAsciiSession stabilizedSession(opts, cols, rows);
+
+    // Compare against naive un-supersampled, un-stabilized rendering along the exact same camera trajectory.
+    MandelbrotEngine rawEngine(ExecutionMode::Automatic);
+    ColorTheme rawTheme(opts.theme.CurrentPreset());
+    const int rawPxH = ComputeAsciiPixelHeight(rows, opts.charAspect);
+
+    std::vector<std::string> stableFrames;
+    std::vector<std::string> rawFrames;
+    constexpr int kFrameCount = 24;
+    stableFrames.reserve(kFrameCount);
+    rawFrames.reserve(kFrameCount);
+
+    for (int f = 0; f < kFrameCount; ++f)
+    {
+        // Render naive baseline at the exact same camera coordinates & zoom.
+        FractalConfig rawCfg = stabilizedSession.Config();
+        rawCfg.width = cols;
+        rawCfg.height = rawPxH;
+        std::vector<float> rawIters;
+        rawEngine.Compute(rawCfg, rawIters, nullptr, nullptr);
+        std::vector<uint32_t> rawPixels(rawIters.size());
+        rawTheme.Recolor(rawIters, rawPixels.data(), rawPixels.size(),
+            opts.frequency, opts.phase, opts.invert, opts.interior, rawCfg.fractalType, rawCfg.width, nullptr, true);
+        rawFrames.push_back(RenderAsciiFrame(rawIters, rawPixels, cols, rawPxH, cols, rows, ramp, AsciiColorMode::None));
+
+        // Render stabilized session frame.
+        stableFrames.push_back(stabilizedSession.RenderFrame(static_cast<double>(f) / 15.0, 15.0, AsciiColorMode::None));
+        stabilizedSession.StepAutoZoom(1.0 / 15.0);
+    }
+
+    auto measureJitter = [](const std::vector<std::string>& frames, int& outFlips, int& outBounceBacks)
+    {
+        outFlips = 0;
+        outBounceBacks = 0;
+        for (size_t f = 1; f < frames.size(); ++f)
+        {
+            const size_t len = std::min(frames[f].size(), frames[f - 1].size());
+            for (size_t i = 0; i < len; ++i)
+            {
+                if (frames[f][i] == '\n') continue;
+                if (frames[f][i] != frames[f - 1][i])
+                {
+                    ++outFlips;
+                    if (f >= 2 && frames[f][i] == frames[f - 2][i])
+                    {
+                        ++outBounceBacks;
+                    }
+                }
+            }
+        }
+    };
+
+    int rawFlips = 0, rawBounces = 0;
+    int stableFlips = 0, stableBounces = 0;
+    measureJitter(rawFrames, rawFlips, rawBounces);
+    measureJitter(stableFrames, stableFlips, stableBounces);
+
+    // Stabilized rendering should dramatically cut both total character churn and A->B->A bounce-back flicker.
+    ASSERT_GT(rawFlips, 0);
+    ASSERT_GT(rawBounces, 0);
+    ASSERT_LT(stableFlips, rawFlips);
+    ASSERT_LT(stableBounces * 2, rawBounces);
+
+    // Confirm stabilized output still preserves rich contrast across multiple ASCII levels.
+    bool sawDark = false;
+    bool sawBright = false;
+    for (char c : stableFrames.back())
+    {
+        if (c == ' ' || c == '.' || c == ':') sawDark = true;
+        if (c == '#' || c == '%' || c == '@') sawBright = true;
+    }
+    ASSERT_TRUE(sawDark);
+    ASSERT_TRUE(sawBright);
+}
+

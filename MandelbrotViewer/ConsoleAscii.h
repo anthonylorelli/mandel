@@ -139,8 +139,41 @@ namespace Mandelbrot
     // Maps an 8-bit RGB color to the closest 8-bit ANSI 256-color palette index.
     uint8_t RgbToAnsi256(uint8_t r, uint8_t g, uint8_t b) noexcept;
 
+    struct AsciiCellHistory
+    {
+        float rampPos{ 0.0f };
+        float linR{ 0.0f };
+        float linG{ 0.0f };
+        float linB{ 0.0f };
+        uint8_t rampIdx{ 0 };
+    };
+
+    struct AsciiTemporalState
+    {
+        bool valid{ false };
+        int cols{ 0 };
+        int rows{ 0 };
+        std::string charset;
+        FractalConfig config{};
+        std::vector<AsciiCellHistory> cells;
+
+        void Reset() noexcept
+        {
+            valid = false;
+            cells.clear();
+        }
+    };
+
     // Computes the vertical fractal pixel resolution for `rows` terminal rows and character aspect ratio.
     int ComputeAsciiPixelHeight(int rows, double charAspect) noexcept;
+
+    // Computes supersampled fractal buffer dimensions for an ASCII canvas of `cols` x `rows`.
+    void ComputeAsciiSupersampleDimensions(
+        int cols,
+        int rows,
+        double charAspect,
+        int& outPixelWidth,
+        int& outPixelHeight) noexcept;
 
     // Converts a rendered iteration buffer and BGRA color buffer into an ASCII frame of `cols` x `rows`.
     // Each row ends with '\n'. Emits ANSI foreground escape sequences according to `resolvedColorMode`.
@@ -153,6 +186,18 @@ namespace Mandelbrot
         int rows,
         std::string_view charset,
         AsciiColorMode resolvedColorMode);
+
+    // Renders an ASCII frame with camera-reprojected temporal filtering and character-index hysteresis
+    // to suppress glyph jitter during zoom and pan animations while preserving sharp detail.
+    std::string RenderAsciiFrameStabilized(
+        const std::vector<float>& iterations,
+        const std::vector<uint32_t>& bgraPixels,
+        const FractalConfig& currentConfig,
+        int cols,
+        int rows,
+        std::string_view charset,
+        AsciiColorMode resolvedColorMode,
+        AsciiTemporalState* temporalState);
 
     // Formats the live telemetry status line (and optional interactive controls hint line) clipped to `cols`.
     std::string FormatConsoleHudPrimaryLine(
@@ -215,7 +260,9 @@ namespace Mandelbrot
         ColorTheme m_theme;
         MandelbrotEngine m_engine;
         std::vector<float> m_iterations;
+        std::vector<SubpixelSamples> m_subpixelSamples;
         std::vector<uint32_t> m_pixels;
+        AsciiTemporalState m_temporalState;
 
         int m_cols{ DefaultConsoleCols };
         int m_rows{ DefaultConsoleRows };
