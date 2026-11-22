@@ -210,6 +210,7 @@
     <ClInclude Include="Mp4Muxer.h" />
     <ClInclude Include="MovieWriter.h" />
     <ClInclude Include="MovieExport.h" />
+    <ClInclude Include="ConsoleAscii.h" />
     <ClInclude Include="MovieCli.h" />
     <ClInclude Include="MovieZoomPyramid.h" />
     <ClInclude Include="resource.h" />
@@ -245,6 +246,7 @@
     <ClCompile Include="Mp4Muxer.cpp" />
     <ClCompile Include="MovieWriter.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="MovieExport.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="ConsoleAscii.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="MovieCli.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="MovieZoomPyramid.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="$(IntermediateOutputPath)XamlTypeInfo.g.cpp">
