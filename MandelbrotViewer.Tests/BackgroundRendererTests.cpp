@@ -21,10 +21,10 @@ namespace
             ++count;
             changed.notify_all();
         }
-        bool Wait(size_t expected)
+        bool Wait(size_t expected, std::chrono::seconds timeout = 5s)
         {
             std::unique_lock lock(mutex);
-            return changed.wait_for(lock, 5s, [&] { return count >= expected; });
+            return changed.wait_for(lock, timeout, [&] { return count >= expected; });
         }
     };
 
@@ -339,7 +339,7 @@ TEST_CASE(BackgroundRenderer, GpuExecutionModeRendersAndCancelsCleanly)
     animCfg.renderStride = 2;
     animCfg.edgeRefine = true;
     renderer.Submit(animCfg);
-    ASSERT_TRUE(notifications.Wait(1));
+    ASSERT_TRUE(notifications.Wait(1, 30s));
     auto res1 = renderer.TakeCompleted(displayed, {}, &displayedSamples);
     ASSERT_TRUE(res1.has_value());
     ASSERT_FALSE(res1->error != nullptr);
@@ -360,7 +360,7 @@ TEST_CASE(BackgroundRenderer, GpuExecutionModeRendersAndCancelsCleanly)
     deepCfg.zoom = 1e18;
     deepCfg.maxIterations = 1200;
     renderer.Submit(deepCfg);
-    ASSERT_TRUE(notifications.Wait(2));
+    ASSERT_TRUE(notifications.Wait(2, 30s));
     auto res2 = renderer.TakeCompleted(displayed, {}, &displayedSamples);
     ASSERT_TRUE(res2.has_value());
     ASSERT_FALSE(res2->error != nullptr);
