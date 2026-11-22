@@ -2,6 +2,7 @@
 #include "MainWindow.xaml.h"
 #include "FramePresentation.h"
 #include "FrameTiming.h"
+#include "JuliaView.h"
 #include "ViewState.h"
 
 using namespace winrt;

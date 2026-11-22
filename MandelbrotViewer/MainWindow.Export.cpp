@@ -42,7 +42,9 @@ namespace winrt::MandelbrotViewer::implementation
 
             // WinUI 3 Desktop requires HWND initialization for FileSavePicker
             HWND hwnd = nullptr;
-            winrt::check_hresult(this->as<IWindowNative>()->get_WindowHandle(&hwnd));
+            auto windowNative = try_as<IWindowNative>();
+            if (!windowNative) throw winrt::hresult_no_interface();
+            winrt::check_hresult(windowNative->get_WindowHandle(&hwnd));
             auto initializeWithWindow = picker.as<IInitializeWithWindow>();
             winrt::check_hresult(initializeWithWindow->Initialize(hwnd));
 

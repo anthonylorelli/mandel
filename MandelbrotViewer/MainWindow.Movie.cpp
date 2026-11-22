@@ -196,7 +196,10 @@ namespace winrt::MandelbrotViewer::implementation
             dialog.PrimaryButtonClick(clickToken);
             if (dialogResult == ContentDialogResult::Primary && !m_isClosed)
             {
-                HWND hwnd{}; check_hresult(as<IWindowNative>()->get_WindowHandle(&hwnd));
+                HWND hwnd{};
+                auto windowNative = try_as<IWindowNative>();
+                if (!windowNative) throw winrt::hresult_no_interface();
+                check_hresult(windowNative->get_WindowHandle(&hwnd));
                 com_ptr<IFileSaveDialog> picker;
                 check_hresult(CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER, __uuidof(IFileSaveDialog), picker.put_void()));
                 const COMDLG_FILTERSPEC filter{L"High-quality MP4 movie", L"*.mp4"};
