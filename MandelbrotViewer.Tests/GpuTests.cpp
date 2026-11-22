@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "TestHarness.h"
 #include "ColorTheme.h"
+#include "FramePresentation.h"
 #include "GpuFractalSolver.h"
 #include "MandelbrotEngine.h"
 #include "MovieExport.h"
@@ -541,3 +542,96 @@ TEST_CASE(Gpu, MultiPassCompactionAndUltraDeepBlaMatchCpu)
         verifyDeepMovie(ultraMulti, 8.0);
     }
 }
+
+TEST_CASE(Gpu, InteractiveStrideAndMultiPassTryComputeMatchCpu)
+{
+    MandelbrotEngine cpu(ExecutionMode::Automatic);
+    MandelbrotEngine gpu(ExecutionMode::Gpu, true);
+    ASSERT_TRUE(gpu.IsGpuAvailable());
+
+    auto verifyAnimMatchesFullCpu = [&](const FractalConfig& base, double maxErr = 4.5)
+    {
+        const FractalConfig animCfg = AnimationRenderConfig(base);
+        ASSERT_EQ(2, animCfg.renderStride);
+
+        // GPU evaluates renderStride > 1 at full precision, so compare against CPU renderStride = 1.
+        FractalConfig fullCpuCfg = animCfg;
+        fullCpuCfg.renderStride = 1;
+
+        std::vector<float> cpuIters, gpuIters;
+        std::vector<SubpixelSamples> cpuSubs, gpuSubs;
+        cpu.Compute(fullCpuCfg, cpuIters, nullptr, &cpuSubs);
+        gpu.Compute(animCfg, gpuIters, nullptr, &gpuSubs);
+
+        const size_t total = static_cast<size_t>(animCfg.width) * static_cast<size_t>(animCfg.height);
+        ASSERT_EQ(total, cpuIters.size());
+        ASSERT_EQ(total, gpuIters.size());
+        AssertValidSubpixels(gpuSubs, total);
+
+        ColorTheme theme;
+        std::vector<uint32_t> cpuPixels(total), gpuPixels(total);
+        theme.Recolor(cpuIters, cpuPixels.data(), total, 1.0f, 0.0f, false, 0xFF000000, animCfg.fractalType, animCfg.width, &cpuSubs, false);
+        theme.Recolor(gpuIters, gpuPixels.data(), total, 1.0f, 0.0f, false, 0xFF000000, animCfg.fractalType, animCfg.width, &gpuSubs, false);
+        ASSERT_LT(FilteredPixelError(cpuPixels, gpuPixels, animCfg.width, animCfg.height), maxErr);
+    };
+
+    // 1. Shallow Mandelbrot, Julia, and mid-zoom interactive live-zoom frames (renderStride = 2)
+    {
+        FractalConfig shallow;
+        shallow.width = 96;
+        shallow.height = 72;
+        shallow.maxIterations = 256;
+        verifyAnimMatchesFullCpu(shallow);
+
+        FractalConfig julia = shallow;
+        julia.juliaSet = true;
+        julia.juliaX = BigFloat(-0.8);
+        julia.juliaY = BigFloat(0.156);
+        julia.SetCenter(0.0, 0.0);
+        julia.zoom = 1.2;
+        verifyAnimMatchesFullCpu(julia);
+
+        FractalConfig mid = shallow;
+        mid.SetCenter(-0.7436438870371587, 0.13182590420531197);
+        mid.zoom = 8.5e4;
+        mid.maxIterations = 1200;
+        verifyAnimMatchesFullCpu(mid);
+    }
+
+    // 2. Interactive single-sync multi-pass TryCompute (maxIterations > 2048) on PerturbLdsBla (1e18)
+    {
+        FractalConfig deepBla;
+        deepBla.width = 81;
+        deepBla.height = 57;
+        deepBla.SetCenter(
+            BigFloat("-0.743643887037158704752191506114774"),
+            BigFloat("0.131825904205311970493132056385139"));
+        deepBla.zoom = 1e18;
+        deepBla.maxIterations = 3500;
+        CompareCpuAndGpuRender(cpu, gpu, deepBla, 4.5);
+        verifyAnimMatchesFullCpu(deepBla, 4.5);
+
+        // Primary-only path (subpixelSamples == nullptr)
+        std::vector<float> gpuPrimaryOnly;
+        gpu.Compute(deepBla, gpuPrimaryOnly, nullptr, nullptr);
+        ASSERT_EQ(static_cast<size_t>(deepBla.width) * static_cast<size_t>(deepBla.height), gpuPrimaryOnly.size());
+        for (float v : gpuPrimaryOnly)
+        {
+            ASSERT_TRUE(std::isfinite(v));
+        }
+    }
+
+    // 3. Interactive single-sync multi-pass TryCompute (maxIterations > 2048) on PerturbDeepExp (1e50)
+    {
+        FractalConfig deepExp;
+        deepExp.width = 65;
+        deepExp.height = 49;
+        deepExp.SetCenter(
+            BigFloat("-1.74975914513036651613063305841522638950626266680180909383610018508190914266589615"),
+            BigFloat("0.00000000368513794929231850000185950626266680180909383610018508190914266589615"));
+        deepExp.zoom = 1e50;
+        deepExp.maxIterations = 3000;
+        CompareCpuAndGpuRender(cpu, gpu, deepExp, 4.5);
+    }
+}
+

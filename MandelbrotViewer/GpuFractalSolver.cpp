@@ -583,6 +583,173 @@ namespace Mandelbrot
         m_impl->SyncReferenceAndBla(config, refState, cMax, cancelToken, unusedRunDeepExp);
     }
 
+    bool GpuFractalSolver::Impl::DispatchPrimaryPass(
+        GpuShaderMode mode,
+        const FractalConfig& config,
+        const DeepReferenceState& refState,
+        double juliaCx,
+        double juliaCy,
+        double juliaBailout2,
+        const std::atomic<bool>* cancelToken,
+        bool& outCanceled)
+    {
+        outCanceled = false;
+        auto canceled = [&] { return cancelToken && cancelToken->load(std::memory_order_relaxed); };
+        const int width = config.width;
+        const int height = config.height;
+        const size_t totalPixels = static_cast<size_t>(width) * static_cast<size_t>(height);
+        const UINT zeros[4]{ 0, 0, 0, 0 };
+        const UINT primGroupX = (mode == GpuShaderMode::PerturbLds || mode == GpuShaderMode::PerturbLdsBla)
+            ? static_cast<UINT>((width + 31) / 32)
+            : static_cast<UINT>((width + 15) / 16);
+
+        const uint32_t maxIterU = static_cast<uint32_t>(config.maxIterations);
+        const bool useMultiPass =
+            (mode == GpuShaderMode::PerturbLdsBla || mode == GpuShaderMode::PerturbDeepExp) &&
+            maxIterU > kMultiPassMinMaxIter &&
+            EnsureStructuredUavBuffer(
+                totalPixels, sizeof(GpuPerturbState),
+                activeStateBuf, activeStateUav, activeStateCapElems) &&
+            EnsureTypedUavSrvBuffer(
+                totalPixels, sizeof(uint32_t), DXGI_FORMAT_R32_UINT,
+                activeIdxBuf[0], activeIdxUav[0], activeIdxSrv[0], activeIdxCapElems[0]) &&
+            EnsureTypedUavSrvBuffer(
+                totalPixels, sizeof(uint32_t), DXGI_FORMAT_R32_UINT,
+                activeIdxBuf[1], activeIdxUav[1], activeIdxSrv[1], activeIdxCapElems[1]);
+
+        if (useMultiPass)
+        {
+            const uint32_t stage0Limit = std::min<uint32_t>(1024u, maxIterU);
+            context->ClearUnorderedAccessViewUint(activeCountUav[0].Get(), zeros);
+
+            BindFractalSrvs(mode, nullptr, nullptr);
+            ID3D11UnorderedAccessView* stage0Uavs[5]{
+                outItersUav.Get(),
+                nullptr,
+                activeStateUav.Get(),
+                activeIdxUav[0].Get(),
+                activeCountUav[0].Get()
+            };
+            context->CSSetUnorderedAccessViews(0, 5, stage0Uavs, nullptr);
+            context->CSSetShader(
+                (mode == GpuShaderMode::PerturbLdsBla) ? csLdsBlaStage0.Get() : csDeepExpStage0.Get(),
+                nullptr, 0);
+
+            if (!UploadFractalCb(
+                mode, config, refState, juliaCx, juliaCy, juliaBailout2,
+                0u, 0u, 0u, stage0Limit))
+            {
+                UnbindComputeResources();
+                return false;
+            }
+            context->Dispatch(primGroupX, static_cast<UINT>((height + 15) / 16), 1);
+
+            const uint32_t resumeGroupThreads = (mode == GpuShaderMode::PerturbLdsBla) ? 512u : 256u;
+            PostProcessCb activeIndCb{};
+            activeIndCb.subGroupThreads = resumeGroupThreads;
+
+            int activeIn = 0;
+            uint32_t prevLimit = stage0Limit;
+            uint32_t stageStep = 3072u;
+            while (prevLimit < maxIterU)
+            {
+                if (canceled())
+                {
+                    UnbindComputeResources();
+                    outCanceled = true;
+                    return true;
+                }
+                const uint32_t nextLimit = std::min<uint32_t>(maxIterU, prevLimit + stageStep);
+                const bool isFinalStage = (nextLimit >= maxIterU);
+                const int activeOut = 1 - activeIn;
+
+                // Build DispatchIndirect args for surviving active pixels
+                UnbindComputeResources();
+                if (!UploadBufferDiscard(constantBuffer.Get(), &activeIndCb, sizeof(activeIndCb)))
+                {
+                    return false;
+                }
+                ID3D11UnorderedAccessView* indUavs[5]{ indirectArgsUav.Get(), nullptr, nullptr, nullptr, nullptr };
+                context->CSSetUnorderedAccessViews(0, 5, indUavs, nullptr);
+                ID3D11ShaderResourceView* indSrvs[8]{};
+                indSrvs[5] = activeCountSrv[activeIn].Get();
+                context->CSSetShaderResources(0, 8, indSrvs);
+                context->CSSetShader(csPostBuildActiveIndirect.Get(), nullptr, 0);
+                context->Dispatch(1, 1, 1);
+
+                // Resume only surviving active pixels in densely packed warps
+                UnbindComputeResources();
+                if (!isFinalStage)
+                {
+                    context->ClearUnorderedAccessViewUint(activeCountUav[activeOut].Get(), zeros);
+                }
+
+                BindFractalSrvs(
+                    mode,
+                    activeIdxSrv[activeIn].Get(),
+                    activeCountSrv[activeIn].Get());
+                ID3D11UnorderedAccessView* resumeUavs[5]{
+                    outItersUav.Get(),
+                    nullptr,
+                    activeStateUav.Get(),
+                    isFinalStage ? nullptr : activeIdxUav[activeOut].Get(),
+                    isFinalStage ? nullptr : activeCountUav[activeOut].Get()
+                };
+                context->CSSetUnorderedAccessViews(0, 5, resumeUavs, nullptr);
+                context->CSSetShader(
+                    (mode == GpuShaderMode::PerturbLdsBla) ? csLdsBlaResume.Get() : csDeepExpResume.Get(),
+                    nullptr, 0);
+
+                if (!UploadFractalCb(
+                    mode, config, refState, juliaCx, juliaCy, juliaBailout2,
+                    0u, 0u, 0u, nextLimit))
+                {
+                    UnbindComputeResources();
+                    return false;
+                }
+                context->DispatchIndirect(indirectArgsBuf.Get(), 0);
+
+                activeIn = activeOut;
+                prevLimit = nextLimit;
+                stageStep = (stageStep < 8192u) ? 8192u : 12288u;
+            }
+            UnbindComputeResources();
+            return true;
+        }
+
+        BindFractalSrvs(mode, nullptr, nullptr);
+        ID3D11UnorderedAccessView* primUavs[3]{ outItersUav.Get(), nullptr, nullptr };
+        context->CSSetUnorderedAccessViews(0, 3, primUavs, nullptr);
+        SetPrimaryShader(mode);
+
+        const size_t maxRowsByTdr = std::max<size_t>(
+            1,
+            static_cast<size_t>(kMaxPrimaryIterBudget /
+                (static_cast<uint64_t>(width) * static_cast<uint64_t>(std::max(1, config.maxIterations)))));
+        const int maxChunkRows = static_cast<int>(std::min<size_t>(static_cast<size_t>(height), maxRowsByTdr));
+
+        for (int rowStart = 0; rowStart < height; rowStart += maxChunkRows)
+        {
+            if (canceled())
+            {
+                UnbindComputeResources();
+                outCanceled = true;
+                return true;
+            }
+            const int chunkRows = std::min(maxChunkRows, height - rowStart);
+            if (!UploadFractalCb(
+                mode, config, refState, juliaCx, juliaCy, juliaBailout2,
+                static_cast<uint32_t>(rowStart), static_cast<uint32_t>(rowStart), 0u))
+            {
+                UnbindComputeResources();
+                return false;
+            }
+            context->Dispatch(primGroupX, static_cast<UINT>((chunkRows + 15) / 16), 1);
+        }
+        UnbindComputeResources();
+        return true;
+    }
+
     bool GpuFractalSolver::TryCompute(
         const FractalConfig& config,
         const BigFloat& centerX,
@@ -643,6 +810,253 @@ namespace Mandelbrot
         if (prep == Impl::PrepResult::Canceled) return true;
         if (prep != Impl::PrepResult::Ok) return false;
 
+        // Fast interactive path (<= 4M pixels): keeps primary evaluation (with multi-pass active-pixel
+        // compaction), GPU 3x3 boundary detection, and DispatchIndirect 4x subpixel evaluation entirely
+        // in VRAM with a single end-of-frame GPU sync point.
+        if (totalPixels <= kMaxSingleSyncInteractivePixels)
+        {
+            if (!m_impl->EnsureStructuredUavSrvBuffer(
+                    totalPixels, sizeof(float),
+                    m_impl->outItersBuf, m_impl->outItersUav, m_impl->outItersSrv, m_impl->outItersCapElems) ||
+                !m_impl->EnsureStagingReadBuffer(
+                    totalPixels * sizeof(float), m_impl->outItersStaging, m_impl->outItersStagingCapBytes))
+            {
+                return false;
+            }
+
+            if (subpixelSamples)
+            {
+                if (!m_impl->EnsureTypedUavSrvBuffer(
+                        totalPixels, sizeof(uint32_t), DXGI_FORMAT_R32_UINT,
+                        m_impl->gpuSubIdxBuf, m_impl->gpuSubIdxUav, m_impl->gpuSubIdxSrv, m_impl->gpuSubIdxCapElems) ||
+                    !m_impl->EnsureStructuredUavSrvBuffer(
+                        totalPixels, sizeof(GpuPixelSubInfo),
+                        m_impl->pixelSubInfoBuf, m_impl->pixelSubInfoUav, m_impl->pixelSubInfoSrv, m_impl->pixelSubInfoCapElems) ||
+                    !m_impl->EnsureStructuredUavSrvBuffer(
+                        totalPixels * 4, sizeof(float),
+                        m_impl->subOutBuf, m_impl->subOutUav, m_impl->subOutSrv, m_impl->subOutCapFloats) ||
+                    !m_impl->EnsureStagingReadBuffer(
+                        sizeof(uint32_t), m_impl->subCounterStaging, m_impl->subCounterStagingCapBytes))
+                {
+                    return false;
+                }
+            }
+
+            ID3D11Buffer* cbs[]{ m_impl->constantBuffer.Get() };
+            m_impl->context->CSSetConstantBuffers(0, 1, cbs);
+            m_impl->UnbindComputeResources();
+
+            // Pass 1: Primary evaluation (multi-pass active-pixel compaction when maxIter > 2048)
+            bool primaryCanceled = false;
+            if (!m_impl->DispatchPrimaryPass(
+                    mode, config, refState, juliaCx, juliaCy, juliaBailout2,
+                    cancelToken, primaryCanceled))
+            {
+                return false;
+            }
+            if (primaryCanceled)
+            {
+                return true;
+            }
+
+            // Pass 2: GPU-driven 3x3 boundary detection + 16x16 spatial compaction + DispatchIndirect 4x subpixels
+            bool ranSubpixelPass = false;
+            if (subpixelSamples && !canceled())
+            {
+                const UINT zeros[4]{ 0, 0, 0, 0 };
+                m_impl->context->ClearUnorderedAccessViewUint(m_impl->subCounterUav.Get(), zeros);
+
+                ID3D11UnorderedAccessView* detectUavs[3]{
+                    m_impl->gpuSubIdxUav.Get(),
+                    m_impl->pixelSubInfoUav.Get(),
+                    m_impl->subCounterUav.Get()
+                };
+                m_impl->context->CSSetUnorderedAccessViews(0, 3, detectUavs, nullptr);
+                ID3D11ShaderResourceView* detectSrvs[8]{ m_impl->outItersSrv.Get() };
+                m_impl->context->CSSetShaderResources(0, 8, detectSrvs);
+
+                PostProcessCb postCb{};
+                postCb.width = static_cast<uint32_t>(width);
+                postCb.bandHeight = static_cast<uint32_t>(height);
+                postCb.visibleRows = static_cast<uint32_t>(height);
+                postCb.topHalo = 0u;
+                postCb.destRowOffset = 0u;
+                postCb.fractalType = static_cast<uint32_t>(config.fractalType);
+                postCb.smoothFlag = config.smooth ? 1u : 0u;
+                postCb.subGroupThreads =
+                    (mode == GpuShaderMode::PerturbLds || mode == GpuShaderMode::PerturbLdsBla) ? 512u : 256u;
+
+                if (!m_impl->UploadBufferDiscard(m_impl->constantBuffer.Get(), &postCb, sizeof(postCb)))
+                {
+                    m_impl->UnbindComputeResources();
+                    return false;
+                }
+                m_impl->context->CSSetShader(m_impl->csPostDetect.Get(), nullptr, 0);
+                m_impl->context->Dispatch(
+                    static_cast<UINT>((width + 15) / 16),
+                    static_cast<UINT>((height + 15) / 16),
+                    1);
+
+                // Build DispatchIndirect args
+                ID3D11ShaderResourceView* nullSrvs8[8]{};
+                m_impl->context->CSSetShaderResources(0, 8, nullSrvs8);
+                ID3D11UnorderedAccessView* buildIndUavs[3]{ m_impl->indirectArgsUav.Get(), nullptr, nullptr };
+                m_impl->context->CSSetUnorderedAccessViews(0, 3, buildIndUavs, nullptr);
+                ID3D11ShaderResourceView* buildIndSrvs[8]{};
+                buildIndSrvs[5] = m_impl->subCounterSrv.Get();
+                m_impl->context->CSSetShaderResources(0, 8, buildIndSrvs);
+                m_impl->context->CSSetShader(m_impl->csPostBuildIndirect.Get(), nullptr, 0);
+                m_impl->context->Dispatch(1, 1, 1);
+
+                // Evaluate 4x subpixels directly on GPU via DispatchIndirect
+                ID3D11UnorderedAccessView* subUavs[3]{ nullptr, m_impl->subOutUav.Get(), nullptr };
+                m_impl->context->CSSetUnorderedAccessViews(0, 3, subUavs, nullptr);
+                m_impl->BindFractalSrvs(mode, m_impl->gpuSubIdxSrv.Get(), m_impl->subCounterSrv.Get());
+
+                if (!m_impl->UploadFractalCb(
+                    mode, config, refState, juliaCx, juliaCy, juliaBailout2,
+                    0u, 0u, kIndirectSubpixelSentinel))
+                {
+                    m_impl->UnbindComputeResources();
+                    return false;
+                }
+                m_impl->SetSubpixelShader(mode);
+                m_impl->context->DispatchIndirect(m_impl->indirectArgsBuf.Get(), 0);
+                m_impl->UnbindComputeResources();
+
+                // Queue counter copy alongside primary iteration copy so there is only one GPU wait
+                D3D11_BOX countBox{ 0, 0, 0, sizeof(uint32_t), 1, 1 };
+                m_impl->context->CopySubresourceRegion(
+                    m_impl->subCounterStaging.Get(), 0, 0, 0, 0, m_impl->subCounterBuf.Get(), 0, &countBox);
+                ranSubpixelPass = true;
+            }
+
+            if (canceled())
+            {
+                if (subpixelSamples) subpixelSamples->clear();
+                return true;
+            }
+
+            // Read back primary iteration buffer (single frame sync point)
+            const size_t itersBytes = totalPixels * sizeof(float);
+            D3D11_BOX itersBox{ 0, 0, 0, static_cast<UINT>(itersBytes), 1, 1 };
+            m_impl->context->CopySubresourceRegion(
+                m_impl->outItersStaging.Get(), 0, 0, 0, 0, m_impl->outItersBuf.Get(), 0, &itersBox);
+
+            D3D11_MAPPED_SUBRESOURCE mappedIters{};
+            if (FAILED(m_impl->context->Map(m_impl->outItersStaging.Get(), 0, D3D11_MAP_READ, 0, &mappedIters)))
+            {
+                return false;
+            }
+            std::memcpy(outIterations.data(), mappedIters.pData, itersBytes);
+            m_impl->context->Unmap(m_impl->outItersStaging.Get(), 0);
+
+            if (ranSubpixelPass && !canceled())
+            {
+                D3D11_MAPPED_SUBRESOURCE mappedCount{};
+                if (FAILED(m_impl->context->Map(m_impl->subCounterStaging.Get(), 0, D3D11_MAP_READ, 0, &mappedCount)))
+                {
+                    subpixelSamples->clear();
+                    return false;
+                }
+                const uint32_t rawSubCount = *static_cast<const uint32_t*>(mappedCount.pData);
+                m_impl->context->Unmap(m_impl->subCounterStaging.Get(), 0);
+
+                const size_t subCount = std::min<size_t>(rawSubCount, totalPixels);
+                if (subCount > 0)
+                {
+                    const size_t infoBytes = totalPixels * sizeof(GpuPixelSubInfo);
+                    const size_t subBytes = subCount * 4 * sizeof(float);
+                    if (!m_impl->EnsureStagingReadBuffer(
+                            infoBytes, m_impl->pixelSubInfoStaging, m_impl->pixelSubInfoStagingCapBytes) ||
+                        !m_impl->EnsureStagingReadBuffer(
+                            subBytes, m_impl->subOutStaging, m_impl->subOutStagingCapBytes))
+                    {
+                        subpixelSamples->clear();
+                        return false;
+                    }
+
+                    D3D11_BOX infoBox{ 0, 0, 0, static_cast<UINT>(infoBytes), 1, 1 };
+                    m_impl->context->CopySubresourceRegion(
+                        m_impl->pixelSubInfoStaging.Get(), 0, 0, 0, 0, m_impl->pixelSubInfoBuf.Get(), 0, &infoBox);
+                    D3D11_BOX subBox{ 0, 0, 0, static_cast<UINT>(subBytes), 1, 1 };
+                    m_impl->context->CopySubresourceRegion(
+                        m_impl->subOutStaging.Get(), 0, 0, 0, 0, m_impl->subOutBuf.Get(), 0, &subBox);
+
+                    D3D11_MAPPED_SUBRESOURCE mappedInfo{};
+                    if (FAILED(m_impl->context->Map(m_impl->pixelSubInfoStaging.Get(), 0, D3D11_MAP_READ, 0, &mappedInfo)))
+                    {
+                        subpixelSamples->clear();
+                        return false;
+                    }
+                    D3D11_MAPPED_SUBRESOURCE mappedSub{};
+                    if (FAILED(m_impl->context->Map(m_impl->subOutStaging.Get(), 0, D3D11_MAP_READ, 0, &mappedSub)))
+                    {
+                        m_impl->context->Unmap(m_impl->pixelSubInfoStaging.Get(), 0);
+                        subpixelSamples->clear();
+                        return false;
+                    }
+
+                    const auto* infoPtr = static_cast<const GpuPixelSubInfo*>(mappedInfo.pData);
+                    const auto* subPtr = static_cast<const float*>(mappedSub.pData);
+
+                    // Emit SubpixelSamples in strictly ascending pixelIndex order for ColorTheme::Recolor.
+                    std::vector<size_t> rowOffsets(static_cast<size_t>(height) + 1, 0);
+                    #pragma omp parallel for schedule(static)
+                    for (int y = 0; y < height; ++y)
+                    {
+                        const GpuPixelSubInfo* row = infoPtr + static_cast<size_t>(y) * static_cast<size_t>(width);
+                        size_t cnt = 0;
+                        for (int x = 0; x < width; ++x)
+                        {
+                            if (row[x].weight > 0.0f && row[x].slot < subCount) ++cnt;
+                        }
+                        rowOffsets[static_cast<size_t>(y) + 1] = cnt;
+                    }
+                    for (int y = 0; y < height; ++y)
+                    {
+                        rowOffsets[static_cast<size_t>(y) + 1] += rowOffsets[static_cast<size_t>(y)];
+                    }
+
+                    subpixelSamples->resize(rowOffsets.back());
+                    #pragma omp parallel for schedule(static)
+                    for (int y = 0; y < height; ++y)
+                    {
+                        size_t dstIdx = rowOffsets[static_cast<size_t>(y)];
+                        if (dstIdx == rowOffsets[static_cast<size_t>(y) + 1]) continue;
+                        const size_t rowBase = static_cast<size_t>(y) * static_cast<size_t>(width);
+                        for (int x = 0; x < width; ++x)
+                        {
+                            const size_t pixIdx = rowBase + static_cast<size_t>(x);
+                            const GpuPixelSubInfo info = infoPtr[pixIdx];
+                            if (info.weight <= 0.0f || info.slot >= subCount) continue;
+                            auto& dst = (*subpixelSamples)[dstIdx++];
+                            dst.pixelIndex = static_cast<uint32_t>(pixIdx);
+                            dst.weight = info.weight;
+                            const float* s4 = subPtr + static_cast<size_t>(info.slot) * 4;
+                            dst.iterations[0] = s4[0];
+                            dst.iterations[1] = s4[1];
+                            dst.iterations[2] = s4[2];
+                            dst.iterations[3] = s4[3];
+                        }
+                    }
+
+                    m_impl->context->Unmap(m_impl->subOutStaging.Get(), 0);
+                    m_impl->context->Unmap(m_impl->pixelSubInfoStaging.Get(), 0);
+                }
+            }
+
+            if (canceled() && subpixelSamples)
+            {
+                subpixelSamples->clear();
+            }
+
+            outElapsedMs = std::chrono::duration<double, std::milli>(
+                std::chrono::high_resolution_clock::now() - startTime).count();
+            return true;
+        }
+
+        // Large-frame (> 4M pixels) chunked/batched fallback path
         const size_t maxRowsByMem = std::max<size_t>(1, kMaxPrimaryChunkPixels / static_cast<size_t>(width));
         const size_t maxRowsByTdr = std::max<size_t>(
             1,
@@ -727,7 +1141,6 @@ namespace Mandelbrot
 
             if (subCount > 0)
             {
-
                 // Group active pixels into 16x16 spatial tiles for wave coherence while preserving sorted output slots
                 const int tilesX = (width + 15) / 16;
                 const int tilesY = (height + 15) / 16;

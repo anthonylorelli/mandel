@@ -62,10 +62,11 @@ namespace Mandelbrot
         size_t subOutCapFloats{ 0 };
         size_t subOutStagingCapBytes{ 0 };
 
-        // Fused GPU movie post-processing & temporal accumulation resources
-        ComPtr<ID3D11Buffer> subCounterBuf;
+        // Fused GPU post-processing & interactive readback resources
+        ComPtr<ID3D11Buffer> subCounterBuf, subCounterStaging;
         ComPtr<ID3D11UnorderedAccessView> subCounterUav;
         ComPtr<ID3D11ShaderResourceView> subCounterSrv;
+        size_t subCounterStagingCapBytes{ 0 };
 
         // Multi-pass active-pixel compaction resources for high-iteration deep zooms
         ComPtr<ID3D11Buffer> activeStateBuf;
@@ -94,10 +95,11 @@ namespace Mandelbrot
         ComPtr<ID3D11ShaderResourceView> gpuSubIdxSrv;
         size_t gpuSubIdxCapElems{ 0 };
 
-        ComPtr<ID3D11Buffer> pixelSubInfoBuf;
+        ComPtr<ID3D11Buffer> pixelSubInfoBuf, pixelSubInfoStaging;
         ComPtr<ID3D11UnorderedAccessView> pixelSubInfoUav;
         ComPtr<ID3D11ShaderResourceView> pixelSubInfoSrv;
         size_t pixelSubInfoCapElems{ 0 };
+        size_t pixelSubInfoStagingCapBytes{ 0 };
 
         ComPtr<ID3D11Buffer> accumPixelsBuf, accumPixelsStaging;
         ComPtr<ID3D11UnorderedAccessView> accumPixelsUav;
@@ -270,5 +272,17 @@ namespace Mandelbrot
         void SetPrimaryShader(detail::GpuShaderMode mode);
         void SetSubpixelShader(detail::GpuShaderMode mode);
         void UnbindComputeResources() noexcept;
+
+        // Dispatches primary center-pixel evaluation into outItersBuf using multi-pass
+        // active-pixel compaction when eligible, or TDR-safe single-pass row chunks otherwise.
+        bool DispatchPrimaryPass(
+            detail::GpuShaderMode mode,
+            const FractalConfig& config,
+            const DeepReferenceState& refState,
+            double juliaCx,
+            double juliaCy,
+            double juliaBailout2,
+            const std::atomic<bool>* cancelToken,
+            bool& outCanceled);
     };
 }
