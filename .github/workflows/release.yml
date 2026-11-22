@@ -145,16 +145,16 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
+        uses: microsoft/setup-msbuild@v3
 
       - name: Setup NuGet
-        uses: NuGet/setup-nuget@v2
+        uses: NuGet/setup-nuget@v4
 
       - name: Cache NuGet packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: packages
           key: ${{ runner.os }}-nuget-${{ hashFiles('**/packages.config') }}
@@ -372,7 +372,7 @@ jobs:
           Write-Host "All required self-contained files and WinRT registrations verified in MSIX!"
 
       - name: Upload unsigned MSIX (${{ matrix.platform }})
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: msix-${{ matrix.platform }}
           path: msix-stage/*.msix
@@ -384,16 +384,16 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Download x64 MSIX
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: msix-x64
           path: bundle-input
 
       - name: Download ARM64 MSIX
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: msix-ARM64
           path: bundle-input
@@ -595,7 +595,7 @@ jobs:
           $lines -join "`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: Upload MSIX release artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: MandelbrotViewer-MSIX-${{ needs.prepare.outputs.msix_version }}
           path: release-assets/*
