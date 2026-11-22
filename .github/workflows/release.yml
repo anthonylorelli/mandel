@@ -1,0 +1,671 @@
+name: Release (MSIX)
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  pull_request:
+    branches: [ main, dev ]
+    paths:
+      - '.github/workflows/release.yml'
+      - 'packaging/**'
+      - 'MandelbrotViewer/Package.appxmanifest'
+      - 'MandelbrotViewer/MandelbrotViewer.vcxproj'
+      - 'MandelbrotViewer/MandelbrotViewer.rc'
+      - 'MandelbrotViewer/Assets/**'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 1.0.0 or 1.0.0.0). Leave empty for a dry-run test version.'
+        required: false
+        default: ''
+        type: string
+      publish_release:
+        description: 'Publish a GitHub Release (leave unchecked to test build, bundle, and signing only)'
+        required: false
+        default: false
+        type: boolean
+      prerelease:
+        description: 'Mark GitHub Release as a pre-release'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Prepare release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      msix_version: ${{ steps.meta.outputs.msix_version }}
+      ver_major: ${{ steps.meta.outputs.ver_major }}
+      ver_minor: ${{ steps.meta.outputs.ver_minor }}
+      ver_patch: ${{ steps.meta.outputs.ver_patch }}
+      ver_build: ${{ steps.meta.outputs.ver_build }}
+      package_name: ${{ steps.meta.outputs.package_name }}
+      publisher: ${{ steps.meta.outputs.publisher }}
+      should_publish: ${{ steps.meta.outputs.should_publish }}
+      is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
+    steps:
+      - name: Compute version and MSIX identity metadata
+        id: meta
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_PUBLISH: ${{ inputs.publish_release }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+          VAR_PACKAGE_NAME: ${{ vars.MSIX_PACKAGE_NAME }}
+          VAR_PUBLISHER: ${{ vars.MSIX_PUBLISHER }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            BUILD_NUM=$(( GITHUB_RUN_NUMBER % 65535 ))
+            TAG="v0.1.0-pr.${BUILD_NUM}"
+            SHOULD_PUBLISH="false"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            SHOULD_PUBLISH="true"
+          elif [[ -n "${INPUT_VERSION}" ]]; then
+            RAW="${INPUT_VERSION#v}"
+            TAG="v${RAW}"
+            SHOULD_PUBLISH="${INPUT_PUBLISH:-false}"
+          else
+            BUILD_NUM=$(( GITHUB_RUN_NUMBER % 65535 ))
+            TAG="v0.1.0-ci.${BUILD_NUM}"
+            SHOULD_PUBLISH="${INPUT_PUBLISH:-false}"
+          fi
+
+          # Strip leading 'v' and any prerelease/build suffix to extract numeric version parts
+          NUMERIC="${TAG#v}"
+          IS_PRERELEASE="false"
+          if [[ "${NUMERIC}" == *-* ]] || [[ "${INPUT_PRERELEASE}" == "true" ]]; then
+            IS_PRERELEASE="true"
+          fi
+          NUMERIC="${NUMERIC%%-*}"
+          NUMERIC="${NUMERIC%%+*}"
+
+          IFS='.' read -r MAJOR MINOR PATCH BUILD REST <<< "${NUMERIC}"
+          MAJOR="${MAJOR:-0}"
+          MINOR="${MINOR:-0}"
+          PATCH="${PATCH:-0}"
+          if [[ -z "${BUILD:-}" ]]; then
+            if [[ "${GITHUB_REF}" != refs/tags/v* && -z "${INPUT_VERSION}" ]]; then
+              BUILD=$(( GITHUB_RUN_NUMBER % 65535 ))
+            else
+              BUILD="0"
+            fi
+          fi
+
+          for PART in "${MAJOR}" "${MINOR}" "${PATCH}" "${BUILD}"; do
+            if ! [[ "${PART}" =~ ^[0-9]+$ ]] || (( PART < 0 || PART > 65535 )); then
+              echo "Invalid MSIX version component '${PART}' derived from '${TAG}'. Components must be integers 0..65535." >&2
+              exit 1
+            fi
+          done
+
+          MSIX_VERSION="${MAJOR}.${MINOR}.${PATCH}.${BUILD}"
+          PACKAGE_NAME="${VAR_PACKAGE_NAME:-AnthonyLorelli.MandelbrotViewer}"
+          PUBLISHER="${VAR_PUBLISHER:-CN=AnthonyLorelli}"
+
+          {
+            echo "tag=${TAG}"
+            echo "msix_version=${MSIX_VERSION}"
+            echo "ver_major=${MAJOR}"
+            echo "ver_minor=${MINOR}"
+            echo "ver_patch=${PATCH}"
+            echo "ver_build=${BUILD}"
+            echo "package_name=${PACKAGE_NAME}"
+            echo "publisher=${PUBLISHER}"
+            echo "should_publish=${SHOULD_PUBLISH}"
+            echo "is_prerelease=${IS_PRERELEASE}"
+          } >> "${GITHUB_OUTPUT}"
+
+          echo "Tag          : ${TAG}"
+          echo "MSIX Version : ${MSIX_VERSION}"
+          echo "Package Name : ${PACKAGE_NAME}"
+          echo "Publisher    : ${PUBLISHER}"
+          echo "Publish      : ${SHOULD_PUBLISH} (prerelease=${IS_PRERELEASE})"
+
+  build-and-package:
+    name: Build, Test & Package MSIX (${{ matrix.platform }})
+    needs: prepare
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: x64
+            run_tests: true
+          - platform: ARM64
+            run_tests: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v3
+
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v4
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v6
+        with:
+          path: packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/packages.config') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Restore NuGet packages
+        run: nuget restore MandelbrotViewer.sln -PackagesDirectory packages
+
+      - name: Ensure C++ ARM64 build tools are installed
+        if: matrix.platform == 'ARM64'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * -Property installationPath
+          $arm64Cl = Get-ChildItem -Path "$vsPath\VC\Tools\MSVC" -Filter "cl.exe" -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "Hostx64\\arm64\\cl\.exe$" }
+          if (-not $arm64Cl) {
+            Write-Host "Installing MSVC ARM64 build tools..."
+            $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+            Start-Process -FilePath $installer -ArgumentList "modify --installPath `"$vsPath`" --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --add Microsoft.VisualStudio.Component.VC.Runtimes.ARM64.Spectre --quiet --norestart" -Wait -NoNewWindow
+          }
+
+      - name: Stamp Package.appxmanifest
+        shell: pwsh
+        run: |
+          .\packaging\Update-AppxManifest.ps1 `
+            -ManifestPath "MandelbrotViewer\Package.appxmanifest" `
+            -Version "${{ needs.prepare.outputs.msix_version }}" `
+            -Publisher "${{ needs.prepare.outputs.publisher }}" `
+            -PackageName "${{ needs.prepare.outputs.package_name }}"
+
+      - name: Build and run unit tests (${{ matrix.platform }})
+        if: matrix.run_tests
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * -Property installationPath
+
+          $v145Props = Join-Path $vsPath "MSBuild\Microsoft\VC\v180\Platforms\${{ matrix.platform }}\PlatformToolsets\v145\Toolset.props"
+          $v170v145Props = Join-Path $vsPath "MSBuild\Microsoft\VC\v170\Platforms\${{ matrix.platform }}\PlatformToolsets\v145\Toolset.props"
+          $toolsetArg = if ((Test-Path $v145Props) -or (Test-Path $v170v145Props)) { "/p:PlatformToolset=v145" } else { "/p:PlatformToolset=v143" }
+
+          $sdkRoot = "${env:ProgramFiles(x86)}\Windows Kits\10\Include"
+          $targetSdk = "10.0.26100.0"
+          if (-not (Test-Path (Join-Path $sdkRoot $targetSdk))) {
+            $latestSdk = Get-ChildItem -Path $sdkRoot -Directory |
+              Where-Object { $_.Name -match '^10\.0\.\d+\.0$' } |
+              Sort-Object { [version]$_.Name } -Descending |
+              Select-Object -First 1
+            if ($latestSdk) { $targetSdk = $latestSdk.Name }
+          }
+
+          msbuild MandelbrotViewer.Tests\MandelbrotViewer.Tests.vcxproj `
+            /p:Configuration=Release `
+            /p:Platform=${{ matrix.platform }} `
+            /p:SolutionDir="$PWD\" `
+            $toolsetArg `
+            /p:WindowsTargetPlatformVersion=$targetSdk `
+            /p:MultiProcessorCompilation=true `
+            /v:minimal
+
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $testExe = ".\${{ matrix.platform }}\Release\MandelbrotViewer.Tests.exe"
+          if (-not (Test-Path $testExe)) {
+            $testExe = ".\MandelbrotViewer.Tests\${{ matrix.platform }}\Release\MandelbrotViewer.Tests.exe"
+          }
+          if (-not (Test-Path $testExe)) {
+            Write-Error "Test executable not found"
+            exit 1
+          }
+          & $testExe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build self-contained MSIX (${{ matrix.platform }})
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * -Property installationPath
+
+          $v145Props = Join-Path $vsPath "MSBuild\Microsoft\VC\v180\Platforms\${{ matrix.platform }}\PlatformToolsets\v145\Toolset.props"
+          $v170v145Props = Join-Path $vsPath "MSBuild\Microsoft\VC\v170\Platforms\${{ matrix.platform }}\PlatformToolsets\v145\Toolset.props"
+          $toolsetArg = if ((Test-Path $v145Props) -or (Test-Path $v170v145Props)) { "/p:PlatformToolset=v145" } else { "/p:PlatformToolset=v143" }
+
+          $sdkRoot = "${env:ProgramFiles(x86)}\Windows Kits\10\Include"
+          $targetSdk = "10.0.26100.0"
+          if (-not (Test-Path (Join-Path $sdkRoot $targetSdk))) {
+            $latestSdk = Get-ChildItem -Path $sdkRoot -Directory |
+              Where-Object { $_.Name -match '^10\.0\.\d+\.0$' } |
+              Sort-Object { [version]$_.Name } -Descending |
+              Select-Object -First 1
+            if ($latestSdk) { $targetSdk = $latestSdk.Name }
+          }
+
+          $redistRoot = Join-Path $vsPath "VC\Redist\MSVC"
+          $vcRedistDir = ""
+          if (Test-Path $redistRoot) {
+            $redistMatch = Get-ChildItem -Path $redistRoot -Directory |
+              Where-Object { Test-Path (Join-Path $_.FullName "${{ matrix.platform }}") } |
+              Sort-Object Name -Descending |
+              Select-Object -First 1
+            if ($redistMatch) {
+              $vcRedistDir = $redistMatch.FullName
+            }
+          }
+          if (-not $vcRedistDir) {
+            Write-Error "Could not locate VC++ redistributables for ${{ matrix.platform }} under $redistRoot"
+            exit 1
+          }
+          Write-Host "Using VcRedistDir=$vcRedistDir"
+
+          $appPackagesDir = Join-Path $PWD "AppPackages\${{ matrix.platform }}\"
+          New-Item -ItemType Directory -Path $appPackagesDir -Force | Out-Null
+
+          Write-Host "Building self-contained MSIX (${{ matrix.platform }}) with $toolsetArg and WindowsTargetPlatformVersion=$targetSdk"
+          msbuild MandelbrotViewer\MandelbrotViewer.vcxproj `
+            /t:Rebuild `
+            /p:Configuration=Release `
+            /p:Platform=${{ matrix.platform }} `
+            $toolsetArg `
+            /p:WindowsTargetPlatformVersion=$targetSdk `
+            /p:TargetPlatformVersion=$targetSdk `
+            /p:BuildMsix=true `
+            /p:VcRedistDir="$vcRedistDir" `
+            /p:AppxPackageDir="$appPackagesDir" `
+            /p:AppVersionMajor=${{ needs.prepare.outputs.ver_major }} `
+            /p:AppVersionMinor=${{ needs.prepare.outputs.ver_minor }} `
+            /p:AppVersionPatch=${{ needs.prepare.outputs.ver_patch }} `
+            /p:AppVersionBuild=${{ needs.prepare.outputs.ver_build }} `
+            /p:MultiProcessorCompilation=true `
+            /v:minimal
+
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $msix = Get-ChildItem -Path $appPackagesDir -Filter "*.msix" -Recurse | Select-Object -First 1
+          if (-not $msix) {
+            $msix = Get-ChildItem -Path "MandelbrotViewer" -Filter "*.msix" -Recurse | Select-Object -First 1
+          }
+          if (-not $msix) {
+            Write-Error "No .msix package was generated for ${{ matrix.platform }}"
+            exit 1
+          }
+
+          New-Item -ItemType Directory -Path "msix-stage" -Force | Out-Null
+          $destName = "MandelbrotViewer_${{ needs.prepare.outputs.msix_version }}_${{ matrix.platform }}.msix"
+          $destPath = Join-Path "msix-stage" $destName
+          Copy-Item -Path $msix.FullName -Destination $destPath -Force
+          Write-Host "Staged MSIX: $destPath ($([math]::Round((Get-Item $destPath).Length / 1MB, 2)) MB)"
+
+      - name: Verify MSIX payload and manifest (${{ matrix.platform }})
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $msixPath = (Get-ChildItem -Path "msix-stage" -Filter "*.msix" | Select-Object -First 1).FullName
+          $inspectDir = Join-Path $env:RUNNER_TEMP "msix-inspect-${{ matrix.platform }}"
+          if (Test-Path $inspectDir) { Remove-Item $inspectDir -Recurse -Force }
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($msixPath, $inspectDir)
+
+          [xml]$manifest = Get-Content (Join-Path $inspectDir 'AppxManifest.xml') -Raw -Encoding UTF8
+          $ns = New-Object System.Xml.XmlNamespaceManager($manifest.NameTable)
+          $ns.AddNamespace('ns', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10')
+
+          $identity = $manifest.SelectSingleNode('/ns:Package/ns:Identity', $ns)
+          Write-Host "Manifest Identity: Name=$($identity.Name), Arch=$($identity.ProcessorArchitecture), Version=$($identity.Version), Publisher=$($identity.Publisher)"
+
+          $pkgDeps = $manifest.SelectNodes('/ns:Package/ns:Dependencies/ns:PackageDependency', $ns)
+          Write-Host "PackageDependencies count: $($pkgDeps.Count)"
+          foreach ($dep in $pkgDeps) {
+            Write-Host "  PackageDependency: Name=$($dep.Name), MinVersion=$($dep.MinVersion)"
+            if ($dep.Name -like 'Microsoft.WindowsAppRuntime*') {
+              throw "Unexpected WindowsAppRuntime framework dependency found in self-contained MSIX: $($dep.Name)"
+            }
+          }
+
+          $inProc = $manifest.SelectNodes("//ns:Extension[@Category='windows.activatableClass.inProcessServer']", $ns)
+          $exeBytes = [System.IO.File]::ReadAllBytes((Join-Path $inspectDir 'MandelbrotViewer.exe'))
+          $exeAscii = [System.Text.Encoding]::ASCII.GetString($exeBytes)
+          $hasRegFreeWinRt = $exeAscii.Contains('activatableClass') -and $exeAscii.Contains('Microsoft.UI.Xaml')
+          Write-Host "Registered InProcessServer extensions in AppxManifest.xml: $($inProc.Count)"
+          Write-Host "Embedded RegFree WinRT SxS manifest in MandelbrotViewer.exe: $hasRegFreeWinRt"
+          if (($inProc.Count -eq 0) -and (-not $hasRegFreeWinRt)) {
+            Write-Host "--- AppxManifest.xml ---"
+            Get-Content (Join-Path $inspectDir 'AppxManifest.xml') | Write-Host
+            throw "Neither InProcessServer extensions nor embedded RegFree WinRT SxS activation were found!"
+          }
+
+          $required = @(
+            'AppxManifest.xml',
+            'MandelbrotViewer.exe',
+            'resources.pri',
+            'Microsoft.UI.Xaml.dll',
+            'vcruntime140.dll',
+            'msvcp140.dll',
+            'vcomp140.dll'
+          )
+          $missing = @()
+          foreach ($rel in $required) {
+            if (-not (Test-Path (Join-Path $inspectDir $rel))) {
+              $missing += $rel
+            }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Host "MSIX root files:"
+            Get-ChildItem -Path $inspectDir -Name | Sort-Object | ForEach-Object { Write-Host "  $_" }
+            throw "Required self-contained files missing from MSIX: $($missing -join ', ')"
+          }
+
+          $assets = Get-ChildItem -Path (Join-Path $inspectDir 'Assets') -Filter '*.png' -ErrorAction SilentlyContinue
+          Write-Host "Bundled visual assets: $($assets.Count) PNG files"
+          if (-not $assets -or $assets.Count -lt 5) {
+            throw "Expected visual tile/logo PNG assets under Assets/ in MSIX"
+          }
+          Write-Host "All required self-contained files and WinRT registrations verified in MSIX!"
+
+      - name: Upload unsigned MSIX (${{ matrix.platform }})
+        uses: actions/upload-artifact@v7
+        with:
+          name: msix-${{ matrix.platform }}
+          path: msix-stage/*.msix
+          if-no-files-found: error
+
+  bundle-sign-release:
+    name: Bundle, Sign & Release MSIX
+    needs: [ prepare, build-and-package ]
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Download x64 MSIX
+        uses: actions/download-artifact@v8
+        with:
+          name: msix-x64
+          path: bundle-input
+
+      - name: Download ARM64 MSIX
+        uses: actions/download-artifact@v8
+        with:
+          name: msix-ARM64
+          path: bundle-input
+
+      - name: Create .msixbundle and sign
+        id: sign
+        shell: pwsh
+        env:
+          MSIX_CERT_BASE64: ${{ secrets.MSIX_CERT_BASE64 }}
+          MSIX_CERT_PASSWORD: ${{ secrets.MSIX_CERT_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $sdkBinRoot = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+          $sdkVerDir = Get-ChildItem -Path $sdkBinRoot -Directory |
+            Where-Object { $_.Name -match '^10\.0\.\d+\.0$' -and (Test-Path (Join-Path $_.FullName "x64\makeappx.exe")) } |
+            Sort-Object { [version]$_.Name } -Descending |
+            Select-Object -First 1
+
+          if (-not $sdkVerDir) {
+            throw "Could not find Windows SDK bin directory containing makeappx.exe under $sdkBinRoot"
+          }
+
+          $makeappx = Join-Path $sdkVerDir.FullName "x64\makeappx.exe"
+          $signtool = Join-Path $sdkVerDir.FullName "x64\signtool.exe"
+          Write-Host "Using Windows SDK tools from $($sdkVerDir.FullName)"
+
+          $version = "${{ needs.prepare.outputs.msix_version }}"
+          $publisher = "${{ needs.prepare.outputs.publisher }}"
+          $bundleName = "MandelbrotViewer_${version}.msixbundle"
+          $releaseDir = Join-Path $PWD "release-assets"
+          New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
+          $bundlePath = Join-Path $releaseDir $bundleName
+
+          Write-Host "Inputs for bundle:"
+          Get-ChildItem -Path "bundle-input" | ForEach-Object { Write-Host "  $($_.Name) ($([math]::Round($_.Length / 1MB, 2)) MB)" }
+
+          & $makeappx bundle /v /d "bundle-input" /bv $version /p $bundlePath /o
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $pfxPath = Join-Path $env:RUNNER_TEMP "msix-signing.pfx"
+          $cerPath = Join-Path $releaseDir "MandelbrotViewer.cer"
+          $certMode = ""
+          $pfxPassword = ""
+
+          try {
+            if (-not [string]::IsNullOrWhiteSpace($env:MSIX_CERT_BASE64)) {
+              Write-Host "Using signing certificate from MSIX_CERT_BASE64 secret."
+              [System.IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:MSIX_CERT_BASE64.Trim()))
+              $pfxPassword = $env:MSIX_CERT_PASSWORD
+
+              $flags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
+              $x509 = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($pfxPath, $pfxPassword, $flags)
+              Write-Host "Certificate Subject   : $($x509.Subject)"
+              Write-Host "Certificate Issuer    : $($x509.Issuer)"
+              Write-Host "Certificate Thumbprint: $($x509.Thumbprint)"
+
+              if ($x509.Subject -ne $publisher) {
+                throw "Certificate Subject '$($x509.Subject)' does not match Package.appxmanifest Publisher '$publisher'. Set repository variable MSIX_PUBLISHER to '$($x509.Subject)'."
+              }
+
+              if ($x509.Subject -eq $x509.Issuer) {
+                $certMode = "self-signed-secret"
+                [System.IO.File]::WriteAllBytes($cerPath, $x509.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+              } else {
+                $certMode = "trusted-ca"
+              }
+            } else {
+              Write-Host "MSIX_CERT_BASE64 secret is not configured; generating ephemeral self-signed certificate for '$publisher'."
+              $certMode = "self-signed-ephemeral"
+              $pfxPassword = [Guid]::NewGuid().ToString('N')
+              .\packaging\New-SelfSignedCert.ps1 `
+                -Publisher $publisher `
+                -PfxPath $pfxPath `
+                -CerPath $cerPath `
+                -Password $pfxPassword
+            }
+
+            $tsaServers = @(
+              'http://timestamp.digicert.com',
+              'http://timestamp.sectigo.com'
+            )
+            $signed = $false
+            foreach ($tsa in $tsaServers) {
+              Write-Host "Signing $bundleName with timestamp server $tsa..."
+              & $signtool sign /fd SHA256 /f $pfxPath /p $pfxPassword /tr $tsa /td SHA256 $bundlePath
+              if ($LASTEXITCODE -eq 0) {
+                $signed = $true
+                break
+              }
+              Write-Warning "Timestamp signing via $tsa failed (exit $LASTEXITCODE); trying next option..."
+            }
+            if (-not $signed) {
+              Write-Warning "Signing without RFC 3161 timestamp as fallback..."
+              & $signtool sign /fd SHA256 /f $pfxPath /p $pfxPassword $bundlePath
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+
+            # Verify signature integrity (temporarily trusting self-signed cert on ephemeral runner)
+            if (Test-Path $cerPath) {
+              Import-Certificate -FilePath $cerPath -CertStoreLocation 'Cert:\LocalMachine\Root' | Out-Null
+              Import-Certificate -FilePath $cerPath -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' | Out-Null
+            }
+
+            $sig = Get-AuthenticodeSignature -FilePath $bundlePath
+            Write-Host "Authenticode verification:"
+            Write-Host "  Status     : $($sig.Status)"
+            Write-Host "  Subject    : $($sig.SignerCertificate.Subject)"
+            Write-Host "  Thumbprint : $($sig.SignerCertificate.Thumbprint)"
+            Write-Host "  Timestamp  : $($sig.TimeStamperCertificate.Subject)"
+
+            if ($sig.Status -ne 'Valid') {
+              throw "MSIX bundle signature verification failed with status: $($sig.Status) ($($sig.StatusMessage))"
+            }
+
+            # Verify both architectures are listed in AppxBundleManifest.xml
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($bundlePath)
+            try {
+              $entry = $zip.GetEntry('AppxMetadata/AppxBundleManifest.xml')
+              if (-not $entry) { throw "AppxMetadata/AppxBundleManifest.xml not found in bundle" }
+              $reader = New-Object System.IO.StreamReader($entry.Open())
+              [xml]$bundleXml = $reader.ReadToEnd()
+              $reader.Close()
+
+              $archs = @($bundleXml.Bundle.Packages.Package | ForEach-Object { $_.Architecture })
+              Write-Host "Bundle architectures: $($archs -join ', ')"
+              if (($archs -notcontains 'x64') -or ($archs -notcontains 'arm64')) {
+                throw "Expected both x64 and arm64 in bundle, found: $($archs -join ', ')"
+              }
+            } finally {
+              $zip.Dispose()
+            }
+
+            "bundle_name=$bundleName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            "cert_mode=$certMode" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            "thumbprint=$($sig.SignerCertificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          } finally {
+            if (Test-Path $pfxPath) {
+              Remove-Item -Path $pfxPath -Force -ErrorAction SilentlyContinue
+            }
+          }
+
+      - name: Generate AppInstaller and SHA256SUMS
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = "${{ github.repository }}"
+          $tag = "${{ needs.prepare.outputs.tag }}"
+          $version = "${{ needs.prepare.outputs.msix_version }}"
+          $bundleName = "${{ steps.sign.outputs.bundle_name }}"
+
+          $appInstallerUri = "https://github.com/$repo/releases/latest/download/MandelbrotViewer.appinstaller"
+          $mainBundleUri = "https://github.com/$repo/releases/download/$tag/$bundleName"
+
+          .\packaging\New-AppInstaller.ps1 `
+            -OutputPath "release-assets\MandelbrotViewer.appinstaller" `
+            -Version $version `
+            -PackageName "${{ needs.prepare.outputs.package_name }}" `
+            -Publisher "${{ needs.prepare.outputs.publisher }}" `
+            -AppInstallerUri $appInstallerUri `
+            -MainBundleUri $mainBundleUri
+
+          $checksumLines = Get-ChildItem -Path "release-assets" -File |
+            Sort-Object Name |
+            ForEach-Object {
+              $hash = (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              "$hash  $($_.Name)"
+            }
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllLines((Join-Path $PWD "release-assets\SHA256SUMS.txt"), $checksumLines, $utf8NoBom)
+
+          Write-Host "Release assets:"
+          Get-ChildItem -Path "release-assets" -File | ForEach-Object {
+            Write-Host "  $($_.Name) ($([math]::Round($_.Length / 1MB, 2)) MB)"
+          }
+
+      - name: Write job summary
+        shell: pwsh
+        run: |
+          $certMode = "${{ steps.sign.outputs.cert_mode }}"
+          $bundleName = "${{ steps.sign.outputs.bundle_name }}"
+          $thumbprint = "${{ steps.sign.outputs.thumbprint }}"
+          $lines = @(
+            "### MSIX Release Build Summary",
+            "",
+            "- **Tag:** ``${{ needs.prepare.outputs.tag }}``",
+            "- **MSIX Version:** ``${{ needs.prepare.outputs.msix_version }}``",
+            "- **Bundle:** ``$bundleName`` (x64 + ARM64, self-contained)",
+            "- **Signing Mode:** ``$certMode`` (Thumbprint: ``$thumbprint``)",
+            "- **Published to GitHub Releases:** ``${{ needs.prepare.outputs.should_publish }}``"
+          )
+          if ($certMode -eq 'self-signed-ephemeral') {
+            $lines += @(
+              "",
+              "> **Tip:** Configure ``MSIX_CERT_BASE64`` and ``MSIX_CERT_PASSWORD`` repository secrets (generated once with ``packaging/New-SelfSignedCert.ps1 -PrintBase64``) so ``MandelbrotViewer.appinstaller`` auto-updates keep working across releases without re-trusting a new certificate."
+            )
+          }
+          $lines -join "`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Upload MSIX release artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: MandelbrotViewer-MSIX-${{ needs.prepare.outputs.msix_version }}
+          path: release-assets/*
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: needs.prepare.outputs.should_publish == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = "${{ needs.prepare.outputs.tag }}"
+          $version = "${{ needs.prepare.outputs.msix_version }}"
+          $bundleName = "${{ steps.sign.outputs.bundle_name }}"
+          $certMode = "${{ steps.sign.outputs.cert_mode }}"
+          $thumbprint = "${{ steps.sign.outputs.thumbprint }}"
+
+          $notesLines = @(
+            "## Installation (Windows 10 / 11 — x64 & ARM64)",
+            "",
+            "This release ships as a **self-contained MSIX bundle** (no separate Windows App SDK or VC++ Runtime install required)."
+          )
+
+          if ($certMode -ne 'trusted-ca') {
+            $notesLines += @(
+              "",
+              "### First-time certificate setup (self-signed build)",
+              "Because this build is signed with a self-signed certificate (thumbprint ``$thumbprint``), trust ``MandelbrotViewer.cer`` once before installing:",
+              "1. Download ``MandelbrotViewer.cer`` from the assets below.",
+              "2. Run PowerShell **as Administrator** and import it into the machine Trusted People store:",
+              "   ``````powershell",
+              "   Import-Certificate -FilePath .\MandelbrotViewer.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople",
+              "   ``````",
+              "   *(Or double-click ``MandelbrotViewer.cer`` -> **Install Certificate** -> **Local Machine** -> **Place all certificates in the following store** -> **Trusted People**.)*"
+            )
+          }
+
+          $notesLines += @(
+            "",
+            "### Install the app",
+            "- **Auto-updating install (recommended):** Download and open ``MandelbrotViewer.appinstaller``.",
+            "- **Direct / offline install:** Download and open ``$bundleName``.",
+            "",
+            "---",
+            ""
+          )
+
+          $notesFile = Join-Path $env:RUNNER_TEMP "release-notes.md"
+          [System.IO.File]::WriteAllText($notesFile, ($notesLines -join "`n"), (New-Object System.Text.UTF8Encoding($false)))
+
+          $assets = @(Get-ChildItem -Path "release-assets" -File | ForEach-Object { $_.FullName })
+
+          # Create release or update if tag release already exists
+          $null = gh release view $tag --json url 2>&1
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @assets --clobber
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else {
+            $ghArgs = @(
+              'release', 'create', $tag,
+              '--target', "${{ github.sha }}",
+              '--title', "Mandelbrot Viewer $tag",
+              '--notes-file', $notesFile,
+              '--generate-notes'
+            )
+            if ("${{ needs.prepare.outputs.is_prerelease }}" -eq "true") {
+              $ghArgs += '--prerelease'
+            }
+            $ghArgs += $assets
+            & gh @ghArgs
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }

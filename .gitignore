@@ -32,3 +32,14 @@ MandelbrotViewer/Release/
 packages/
 tools/
 *.log
+
+# MSIX packaging & local certificates
+AppPackages/
+BundleArtifacts/
+*.msix
+*.msixbundle
+*.appinstaller
+*.pfx
+*.cer
+*.snk
+
