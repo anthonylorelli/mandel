@@ -8,6 +8,65 @@
             <ResourceDictionary.MergedDictionaries>
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
             </ResourceDictionary.MergedDictionaries>
+            <ResourceDictionary.ThemeDictionaries>
+                <ResourceDictionary x:Key="Dark">
+                    <SolidColorBrush x:Key="ViewportCanvasBackgroundBrush" Color="#FF0A0A0F" />
+                    <SolidColorBrush x:Key="ViewportDividerBorderBrush" Color="#44FFFFFF" />
+                    <SolidColorBrush x:Key="ViewportInsetBorderBrush" Color="#80FFFFFF" />
+                    <SolidColorBrush x:Key="HudCardBackgroundBrush" Color="#D812121A" />
+                    <SolidColorBrush x:Key="HudCardBorderBrush" Color="#33FFFFFF" />
+                    <SolidColorBrush x:Key="HudTitleForegroundBrush" Color="#AAFFFFFF" />
+                    <SolidColorBrush x:Key="HudPrimaryForegroundBrush" Color="#F0FFFFFF" />
+                    <SolidColorBrush x:Key="HudZoomForegroundBrush" Color="#FF80D8FF" />
+                    <SolidColorBrush x:Key="HudTimingForegroundBrush" Color="#FF80E8A0" />
+                    <SolidColorBrush x:Key="OverlayButtonBackgroundBrush" Color="#D81E1E2A" />
+                    <SolidColorBrush x:Key="OverlayButtonBorderBrush" Color="#33FFFFFF" />
+                    <SolidColorBrush x:Key="OverlayButtonForegroundBrush" Color="#F0FFFFFF" />
+                    <SolidColorBrush x:Key="PlayActionForegroundBrush" Color="#FF51CF66" />
+                    <SolidColorBrush x:Key="StopActionForegroundBrush" Color="#FFFF6B6B" />
+                    <SolidColorBrush x:Key="ChannelBlueForegroundBrush" Color="#FF4DABF7" />
+                    <SolidColorBrush x:Key="ModalScrimBackgroundBrush" Color="#DD101018" />
+                    <SolidColorBrush x:Key="ModalCardBackgroundBrush" Color="#FF1F1F28" />
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="Light">
+                    <SolidColorBrush x:Key="ViewportCanvasBackgroundBrush" Color="#FFE9ECF2" />
+                    <SolidColorBrush x:Key="ViewportDividerBorderBrush" Color="#29000000" />
+                    <SolidColorBrush x:Key="ViewportInsetBorderBrush" Color="#55000000" />
+                    <SolidColorBrush x:Key="HudCardBackgroundBrush" Color="#ECF9FAFC" />
+                    <SolidColorBrush x:Key="HudCardBorderBrush" Color="#29000000" />
+                    <SolidColorBrush x:Key="HudTitleForegroundBrush" Color="#9E000000" />
+                    <SolidColorBrush x:Key="HudPrimaryForegroundBrush" Color="#E6000000" />
+                    <SolidColorBrush x:Key="HudZoomForegroundBrush" Color="#FF005FB8" />
+                    <SolidColorBrush x:Key="HudTimingForegroundBrush" Color="#FF0F7B3E" />
+                    <SolidColorBrush x:Key="OverlayButtonBackgroundBrush" Color="#ECF9FAFC" />
+                    <SolidColorBrush x:Key="OverlayButtonBorderBrush" Color="#29000000" />
+                    <SolidColorBrush x:Key="OverlayButtonForegroundBrush" Color="#E6000000" />
+                    <SolidColorBrush x:Key="PlayActionForegroundBrush" Color="#FF188038" />
+                    <SolidColorBrush x:Key="StopActionForegroundBrush" Color="#FFC5221F" />
+                    <SolidColorBrush x:Key="ChannelBlueForegroundBrush" Color="#FF1967D2" />
+                    <SolidColorBrush x:Key="ModalScrimBackgroundBrush" Color="#DDE8ECF2" />
+                    <SolidColorBrush x:Key="ModalCardBackgroundBrush" Color="#FFFFFFFF" />
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="HighContrast">
+                    <SolidColorBrush x:Key="ViewportCanvasBackgroundBrush" Color="#FF000000" />
+                    <SolidColorBrush x:Key="ViewportDividerBorderBrush" Color="#FFFFFFFF" />
+                    <SolidColorBrush x:Key="ViewportInsetBorderBrush" Color="#FFFFFFFF" />
+                    <SolidColorBrush x:Key="HudCardBackgroundBrush" Color="#FF000000" />
+                    <SolidColorBrush x:Key="HudCardBorderBrush" Color="#FFFFFFFF" />
+                    <SolidColorBrush x:Key="HudTitleForegroundBrush" Color="#FFFFFFFF" />
+                    <SolidColorBrush x:Key="HudPrimaryForegroundBrush" Color="#FFFFFFFF" />
+                    <SolidColorBrush x:Key="HudZoomForegroundBrush" Color="#FFFFFF00" />
+                    <SolidColorBrush x:Key="HudTimingForegroundBrush" Color="#FF80FF80" />
+                    <SolidColorBrush x:Key="OverlayButtonBackgroundBrush" Color="#FF000000" />
+                    <SolidColorBrush x:Key="OverlayButtonBorderBrush" Color="#FFFFFFFF" />
+                    <SolidColorBrush x:Key="OverlayButtonForegroundBrush" Color="#FFFFFFFF" />
+                    <SolidColorBrush x:Key="PlayActionForegroundBrush" Color="#FF80FF80" />
+                    <SolidColorBrush x:Key="StopActionForegroundBrush" Color="#FFFF8080" />
+                    <SolidColorBrush x:Key="ChannelBlueForegroundBrush" Color="#FF80D8FF" />
+                    <SolidColorBrush x:Key="ModalScrimBackgroundBrush" Color="#EE000000" />
+                    <SolidColorBrush x:Key="ModalCardBackgroundBrush" Color="#FF000000" />
+                </ResourceDictionary>
+            </ResourceDictionary.ThemeDictionaries>
         </ResourceDictionary>
     </Application.Resources>
 </Application>

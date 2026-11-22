@@ -3,10 +3,12 @@
 #include "MainWindow.g.h"
 #include "MandelbrotEngine.h"
 #include "ColorTheme.h"
+#include "ViewState.h"
 #include "BackgroundRenderer.h"
 #include "JuliaTour.h"
 #include "MovieExport.h"
 #include <winrt/Microsoft.UI.Composition.h>
+#include <winrt/Windows.UI.ViewManagement.h>
 #include <chrono>
 #include <memory>
 
@@ -58,7 +60,9 @@ namespace winrt::MandelbrotViewer::implementation
         void OnStartZoomClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
         void OnStopZoomClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
 
-        // Sidebar panel visibility
+        // Sidebar panel visibility & app appearance
+        void OnAppThemeSelectionChanged(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::Controls::SelectionChangedEventArgs const& e);
+        void OnThemeCycleClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
         void OnCloseSidebarClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
         void OnOpenSidebarClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
         void OnToggleSidebarClick(winrt::Windows::Foundation::IInspectable const& sender, winrt::Microsoft::UI::Xaml::RoutedEventArgs const& e);
@@ -108,14 +112,18 @@ namespace winrt::MandelbrotViewer::implementation
 
         bool IsSuppressingEvents() const noexcept { return m_suppressEventDepth > 0; }
         static winrt::hstring FormatZoom(double zoom);
-        static void UpdatePlayStopVisual(
+        void UpdatePlayStopVisual(
             winrt::Microsoft::UI::Xaml::Controls::FontIcon const& icon,
             winrt::Microsoft::UI::Xaml::UIElement const& button,
             bool running,
             wchar_t const* startTooltip,
             wchar_t const* stopTooltip,
             wchar_t const* startAutoName = nullptr,
-            wchar_t const* stopAutoName = nullptr);
+            wchar_t const* stopAutoName = nullptr) const;
+        bool QuerySystemDarkTheme() const;
+        bool IsEffectiveDarkTheme() const;
+        void ApplyAppTheme(Mandelbrot::AppTheme theme);
+        void SyncWindowThemeVisuals();
         std::unique_ptr<Mandelbrot::BackgroundRenderer> CreateBackgroundRenderer(void (MainWindow::*onCompleted)());
         void SyncMaxIterationsUi(int value, int sliderThreshold = 0);
         void ApplyBookmark(const Mandelbrot::BookmarkLocation& bookmark, bool selectComboIndex = false, int comboIndex = 0);
@@ -241,6 +249,12 @@ namespace winrt::MandelbrotViewer::implementation
 
         bool m_isSidebarVisible{ true };
         bool m_sidebarVisibleBeforeFullScreen{ true };
+        HWND m_hwnd{ nullptr };
+        Mandelbrot::AppTheme m_appTheme{ Mandelbrot::AppTheme::System };
+        winrt::Windows::UI::ViewManagement::UISettings m_uiSettings{ nullptr };
+        winrt::Windows::UI::ViewManagement::UISettings::ColorValuesChanged_revoker m_colorValuesChangedRevoker{};
+        winrt::Windows::UI::ViewManagement::AccessibilitySettings m_accessibilitySettings{ nullptr };
+        winrt::Windows::UI::ViewManagement::AccessibilitySettings::HighContrastChanged_revoker m_highContrastChangedRevoker{};
         int m_suppressEventDepth{ 0 };
         bool m_isClosed{ false };
         winrt::hstring m_targetXText;

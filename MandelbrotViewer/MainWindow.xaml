@@ -26,8 +26,9 @@
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition x:Name="JuliaColumn" Width="0"/>
             </Grid.ColumnDefinitions>
-            <Border x:Name="JuliaPane" Grid.Column="1" Visibility="Collapsed" BorderBrush="#44FFFFFF" BorderThickness="1,0,0,0">
-                <Grid x:Name="JuliaViewportGrid" Background="#0A0A0F" SizeChanged="OnJuliaViewportSizeChanged">
+            <Border x:Name="JuliaPane" Grid.Column="1" Visibility="Collapsed"
+                    BorderBrush="{ThemeResource ViewportDividerBorderBrush}" BorderThickness="1,0,0,0">
+                <Grid x:Name="JuliaViewportGrid" Background="{ThemeResource ViewportCanvasBackgroundBrush}" SizeChanged="OnJuliaViewportSizeChanged">
                     <Canvas x:Name="JuliaSurface" Background="Transparent"
                             PointerPressed="OnJuliaPointerPressed" PointerMoved="OnJuliaPointerMoved"
                             PointerReleased="OnJuliaPointerReleased" PointerCanceled="OnJuliaPointerReleased"
@@ -36,51 +37,76 @@
                         <Image x:Name="JuliaImage" Stretch="Fill" IsHitTestVisible="False"/>
                     </Canvas>
                     <Border x:Name="JuliaHud" VerticalAlignment="Top" Margin="12" Padding="12,8" CornerRadius="8"
-                            Background="#D012121A" BorderBrush="#33FFFFFF" BorderThickness="1">
+                            Background="{ThemeResource HudCardBackgroundBrush}"
+                            BorderBrush="{ThemeResource HudCardBorderBrush}" BorderThickness="1">
                         <StackPanel Spacing="4">
                             <Grid>
-                                <TextBlock x:Name="JuliaHudTitleText" Text="JULIA SET" FontSize="11" FontWeight="SemiBold" CharacterSpacing="100" Foreground="#99FFFFFF" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="JuliaHudTitleText" Text="JULIA SET" FontSize="11" FontWeight="SemiBold"
+                                           CharacterSpacing="100" Foreground="{ThemeResource HudTitleForegroundBrush}" VerticalAlignment="Center"/>
                                 <Button HorizontalAlignment="Right" Click="OnJuliaCloseClick" AutomationProperties.Name="Close Julia view"
-                                        ToolTipService.ToolTip="Hide Julia View" Background="Transparent" BorderThickness="0" Padding="4">
+                                        ToolTipService.ToolTip="Hide Julia View" Background="Transparent" BorderThickness="0" Padding="4"
+                                        Foreground="{ThemeResource HudPrimaryForegroundBrush}">
                                     <FontIcon Glyph="&#xE711;" FontSize="11"/>
                                 </Button>
                             </Grid>
-                            <TextBlock x:Name="JuliaParameterText" FontFamily="Consolas" FontSize="11" Foreground="#EEFFFFFF"
+                            <TextBlock x:Name="JuliaParameterText" FontFamily="Consolas" FontSize="11"
+                                       Foreground="{ThemeResource HudPrimaryForegroundBrush}"
                                        TextWrapping="Wrap" Text="c = -0.75 + 0i"/>
-                            <TextBlock x:Name="JuliaZoomText" FontFamily="Consolas" FontSize="12" Foreground="#80D8FF"/>
-                            <TextBlock x:Name="JuliaTimingText" FontFamily="Consolas" FontSize="11" Foreground="#80E8A0" TextWrapping="Wrap"/>
+                            <TextBlock x:Name="JuliaZoomText" FontFamily="Consolas" FontSize="12"
+                                       Foreground="{ThemeResource HudZoomForegroundBrush}"/>
+                            <TextBlock x:Name="JuliaTimingText" FontFamily="Consolas" FontSize="11"
+                                       Foreground="{ThemeResource HudTimingForegroundBrush}" TextWrapping="Wrap"/>
                         </StackPanel>
                     </Border>
                     <StackPanel x:Name="JuliaWindowControls" Visibility="Collapsed" Orientation="Horizontal" Spacing="8"
                                 HorizontalAlignment="Right" VerticalAlignment="Top" Margin="12">
                         <Button Click="OnToggleSidebarClick" AutomationProperties.Name="Toggle controls panel"
-                                ToolTipService.ToolTip="Toggle Controls Panel (Esc)" Background="#CC1E1E28" Padding="10,6" CornerRadius="6">
-                            <FontIcon Glyph="&#xE713;" Foreground="#80D8FF" FontSize="14"/>
+                                ToolTipService.ToolTip="Toggle Controls Panel (Esc)"
+                                Background="{ThemeResource OverlayButtonBackgroundBrush}"
+                                BorderBrush="{ThemeResource OverlayButtonBorderBrush}" BorderThickness="1"
+                                Foreground="{ThemeResource OverlayButtonForegroundBrush}" Padding="10,6" CornerRadius="6">
+                            <FontIcon Glyph="&#xE713;" Foreground="{ThemeResource HudZoomForegroundBrush}" FontSize="14"/>
                         </Button>
                         <Button Click="OnToggleFullScreenClick" AutomationProperties.Name="Toggle full screen"
-                                ToolTipService.ToolTip="Toggle Full Screen (F11)" Background="#CC1E1E28" Padding="10,6" CornerRadius="6">
+                                ToolTipService.ToolTip="Toggle Full Screen (F11)"
+                                Background="{ThemeResource OverlayButtonBackgroundBrush}"
+                                BorderBrush="{ThemeResource OverlayButtonBorderBrush}" BorderThickness="1"
+                                Foreground="{ThemeResource OverlayButtonForegroundBrush}" Padding="10,6" CornerRadius="6">
                             <FontIcon Glyph="&#xE740;" FontSize="14"/>
                         </Button>
                     </StackPanel>
                     <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="12">
                         <Button x:Name="JuliaTravelOverlayButton" Click="OnJuliaTravelClick" AutomationProperties.Name="Start random Julia tour"
-                                ToolTipService.ToolTip="Start Random Julia Tour" Background="#CC1E1E28" Padding="10,6" CornerRadius="6">
-                            <FontIcon x:Name="JuliaTravelIcon" Glyph="&#xE768;" Foreground="#51CF66" FontSize="14"/>
+                                ToolTipService.ToolTip="Start Random Julia Tour"
+                                Background="{ThemeResource OverlayButtonBackgroundBrush}"
+                                BorderBrush="{ThemeResource OverlayButtonBorderBrush}" BorderThickness="1"
+                                Foreground="{ThemeResource OverlayButtonForegroundBrush}" Padding="10,6" CornerRadius="6">
+                            <FontIcon x:Name="JuliaTravelIcon" Glyph="&#xE768;" Foreground="{ThemeResource PlayActionForegroundBrush}" FontSize="14"/>
                         </Button>
                         <Button Click="OnJuliaZoomInClick" AutomationProperties.Name="Zoom Julia in" ToolTipService.ToolTip="Zoom Julia In"
-                                Background="#CC1E1E28" Padding="10,6" CornerRadius="6"><FontIcon Glyph="&#xE710;" FontSize="14"/></Button>
+                                Background="{ThemeResource OverlayButtonBackgroundBrush}"
+                                BorderBrush="{ThemeResource OverlayButtonBorderBrush}" BorderThickness="1"
+                                Foreground="{ThemeResource OverlayButtonForegroundBrush}" Padding="10,6" CornerRadius="6"><FontIcon Glyph="&#xE710;" FontSize="14"/></Button>
                         <Button Click="OnJuliaZoomOutClick" AutomationProperties.Name="Zoom Julia out" ToolTipService.ToolTip="Zoom Julia Out"
-                                Background="#CC1E1E28" Padding="10,6" CornerRadius="6"><FontIcon Glyph="&#xE738;" FontSize="14"/></Button>
+                                Background="{ThemeResource OverlayButtonBackgroundBrush}"
+                                BorderBrush="{ThemeResource OverlayButtonBorderBrush}" BorderThickness="1"
+                                Foreground="{ThemeResource OverlayButtonForegroundBrush}" Padding="10,6" CornerRadius="6"><FontIcon Glyph="&#xE738;" FontSize="14"/></Button>
                         <Button Click="OnJuliaResetClick" AutomationProperties.Name="Reset Julia view" ToolTipService.ToolTip="Reset Julia View"
-                                Background="#CC1E1E28" Padding="10,6" CornerRadius="6"><FontIcon Glyph="&#xE777;" FontSize="14"/></Button>
+                                Background="{ThemeResource OverlayButtonBackgroundBrush}"
+                                BorderBrush="{ThemeResource OverlayButtonBorderBrush}" BorderThickness="1"
+                                Foreground="{ThemeResource OverlayButtonForegroundBrush}" Padding="10,6" CornerRadius="6"><FontIcon Glyph="&#xE777;" FontSize="14"/></Button>
                         <Button Click="OnJuliaExportClick" AutomationProperties.Name="Export Julia image" ToolTipService.ToolTip="Export Julia PNG"
-                                Background="#CC1E1E28" Padding="10,6" CornerRadius="6"><FontIcon Glyph="&#xE74E;" FontSize="14"/></Button>
+                                Background="{ThemeResource OverlayButtonBackgroundBrush}"
+                                BorderBrush="{ThemeResource OverlayButtonBorderBrush}" BorderThickness="1"
+                                Foreground="{ThemeResource OverlayButtonForegroundBrush}" Padding="10,6" CornerRadius="6"><FontIcon Glyph="&#xE74E;" FontSize="14"/></Button>
                     </StackPanel>
                 </Grid>
             </Border>
         <!-- Keep the reference after Julia so the inset receives pointer input. -->
-        <Border x:Name="MandelbrotPane" Grid.Column="0" Background="#0A0A0F" BorderBrush="#80FFFFFF">
-        <Grid x:Name="ViewportGrid" Background="#0A0A0F" SizeChanged="OnViewportSizeChanged">
+        <Border x:Name="MandelbrotPane" Grid.Column="0"
+                Background="{ThemeResource ViewportCanvasBackgroundBrush}"
+                BorderBrush="{ThemeResource ViewportInsetBorderBrush}">
+        <Grid x:Name="ViewportGrid" Background="{ThemeResource ViewportCanvasBackgroundBrush}" SizeChanged="OnViewportSizeChanged">
             <Canvas x:Name="FractalSurface" Background="Transparent"
                    PointerPressed="OnViewportPointerPressed"
                    PointerMoved="OnViewportPointerMoved"
@@ -98,23 +124,29 @@
             <!-- Floating Telemetry HUD -->
             <Border HorizontalAlignment="Left" VerticalAlignment="Top"
                     Margin="16" CornerRadius="8" Padding="14,10"
-                    Background="#D012121A" BorderBrush="#33FFFFFF" BorderThickness="1">
+                    Background="{ThemeResource HudCardBackgroundBrush}"
+                    BorderBrush="{ThemeResource HudCardBorderBrush}" BorderThickness="1">
                 <StackPanel Spacing="4">
-                    <TextBlock x:Name="HudTitleText" Text="MANDELBROT SET" FontWeight="SemiBold" FontSize="11" Foreground="#99FFFFFF" CharacterSpacing="100"/>
-                    <TextBlock x:Name="HudCoordsText" Text="Center: (-0.75000000, +0.00000000)" FontFamily="Consolas" FontSize="12" Foreground="#EEFFFFFF"/>
-                    <TextBlock x:Name="HudZoomText" Text="Zoom: 1.0x" FontFamily="Consolas" FontSize="12" Foreground="#80D8FF"/>
-                    <TextBlock x:Name="HudTimingText" Text="Fractal: 0.0 ms | Color: 0.0 ms" FontFamily="Consolas" FontSize="11" Foreground="#80E8A0"/>
+                    <TextBlock x:Name="HudTitleText" Text="MANDELBROT SET" FontWeight="SemiBold" FontSize="11"
+                               Foreground="{ThemeResource HudTitleForegroundBrush}" CharacterSpacing="100"/>
+                    <TextBlock x:Name="HudCoordsText" Text="Center: (-0.75000000, +0.00000000)" FontFamily="Consolas" FontSize="12"
+                               Foreground="{ThemeResource HudPrimaryForegroundBrush}"/>
+                    <TextBlock x:Name="HudZoomText" Text="Zoom: 1.0x" FontFamily="Consolas" FontSize="12"
+                               Foreground="{ThemeResource HudZoomForegroundBrush}"/>
+                    <TextBlock x:Name="HudTimingText" Text="Fractal: 0.0 ms | Color: 0.0 ms" FontFamily="Consolas" FontSize="11"
+                               Foreground="{ThemeResource HudTimingForegroundBrush}"/>
                 </StackPanel>
             </Border>
 
             <!-- Floating Controls Panel Toggle Button (visible when sidebar is closed) -->
             <Button x:Name="OpenSidebarButton" HorizontalAlignment="Right" VerticalAlignment="Top"
                     Margin="16" Click="OnOpenSidebarClick" ToolTipService.ToolTip="Show Controls Panel (Esc to toggle)"
-                    Background="#D0161622" BorderBrush="#33FFFFFF" BorderThickness="1"
+                    Background="{ThemeResource HudCardBackgroundBrush}"
+                    BorderBrush="{ThemeResource HudCardBorderBrush}" BorderThickness="1"
                     Padding="12,8" CornerRadius="8" Visibility="Collapsed">
                 <StackPanel Orientation="Horizontal" Spacing="8">
-                    <FontIcon Glyph="&#xE713;" FontSize="14" Foreground="#80D8FF"/>
-                    <TextBlock Text="Controls Panel" FontWeight="SemiBold" FontSize="12" Foreground="#EEFFFFFF"/>
+                    <FontIcon Glyph="&#xE713;" FontSize="14" Foreground="{ThemeResource HudZoomForegroundBrush}"/>
+                    <TextBlock Text="Controls Panel" FontWeight="SemiBold" FontSize="12" Foreground="{ThemeResource HudPrimaryForegroundBrush}"/>
                 </StackPanel>
             </Button>
 
@@ -123,35 +155,49 @@
                         HorizontalAlignment="Right" VerticalAlignment="Bottom"
                         Margin="16">
                 <Button x:Name="OverlayPlayZoomButton" Click="OnOverlayZoomToggleClick" ToolTipService.ToolTip="Start Animated Zoom"
-                        Background="#CC1E1E28" Padding="10,6" CornerRadius="6">
-                    <FontIcon x:Name="OverlayPlayZoomIcon" Glyph="&#xE768;" FontSize="14" Foreground="#51CF66" />
+                        Background="{ThemeResource OverlayButtonBackgroundBrush}"
+                        BorderBrush="{ThemeResource OverlayButtonBorderBrush}" BorderThickness="1"
+                        Foreground="{ThemeResource OverlayButtonForegroundBrush}" Padding="10,6" CornerRadius="6">
+                    <FontIcon x:Name="OverlayPlayZoomIcon" Glyph="&#xE768;" FontSize="14" Foreground="{ThemeResource PlayActionForegroundBrush}" />
                 </Button>
                 <Button x:Name="ZoomInButton" Click="OnZoomInClick" ToolTipService.ToolTip="Zoom In (+25%)"
-                        Background="#CC1E1E28" Padding="10,6" CornerRadius="6">
+                        Background="{ThemeResource OverlayButtonBackgroundBrush}"
+                        BorderBrush="{ThemeResource OverlayButtonBorderBrush}" BorderThickness="1"
+                        Foreground="{ThemeResource OverlayButtonForegroundBrush}" Padding="10,6" CornerRadius="6">
                     <FontIcon Glyph="&#xE710;" FontSize="14" />
                 </Button>
                 <Button x:Name="ZoomOutButton" Click="OnZoomOutClick" ToolTipService.ToolTip="Zoom Out (-20%)"
-                        Background="#CC1E1E28" Padding="10,6" CornerRadius="6">
+                        Background="{ThemeResource OverlayButtonBackgroundBrush}"
+                        BorderBrush="{ThemeResource OverlayButtonBorderBrush}" BorderThickness="1"
+                        Foreground="{ThemeResource OverlayButtonForegroundBrush}" Padding="10,6" CornerRadius="6">
                     <FontIcon Glyph="&#xE738;" FontSize="14" />
                 </Button>
                 <Button x:Name="ResetViewButton" Click="OnResetViewClick" ToolTipService.ToolTip="Reset to Default Overview"
-                        Background="#CC1E1E28" Padding="10,6" CornerRadius="6">
+                        Background="{ThemeResource OverlayButtonBackgroundBrush}"
+                        BorderBrush="{ThemeResource OverlayButtonBorderBrush}" BorderThickness="1"
+                        Foreground="{ThemeResource OverlayButtonForegroundBrush}" Padding="10,6" CornerRadius="6">
                     <FontIcon Glyph="&#xE777;" FontSize="14" />
                 </Button>
                 <Button x:Name="ToggleSidebarButton" Click="OnToggleSidebarClick" ToolTipService.ToolTip="Toggle Controls Panel (Full Window View)"
-                        Background="#CC1E1E28" Padding="10,6" CornerRadius="6">
+                        Background="{ThemeResource OverlayButtonBackgroundBrush}"
+                        BorderBrush="{ThemeResource OverlayButtonBorderBrush}" BorderThickness="1"
+                        Foreground="{ThemeResource OverlayButtonForegroundBrush}" Padding="10,6" CornerRadius="6">
                     <FontIcon x:Name="ToggleSidebarIcon" Glyph="&#xE8A0;" FontSize="14" />
                 </Button>
                 <Button x:Name="ToggleFullScreenButton" Click="OnToggleFullScreenClick" ToolTipService.ToolTip="Enter Full Screen (F11)"
-                        Background="#CC1E1E28" Padding="10,6" CornerRadius="6">
+                        Background="{ThemeResource OverlayButtonBackgroundBrush}"
+                        BorderBrush="{ThemeResource OverlayButtonBorderBrush}" BorderThickness="1"
+                        Foreground="{ThemeResource OverlayButtonForegroundBrush}" Padding="10,6" CornerRadius="6">
                     <FontIcon x:Name="ToggleFullScreenIcon" Glyph="&#xE740;" FontSize="14" />
                 </Button>
             </StackPanel>
             </Grid>
             <Border x:Name="MandelbrotReferenceLabel" Visibility="Collapsed" IsHitTestVisible="False"
                     HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8" Padding="8,4" CornerRadius="4"
-                    Background="#D012121A">
-                <TextBlock x:Name="MandelbrotReferenceText" Text="MANDELBROT REFERENCE" FontSize="10" FontWeight="SemiBold" Foreground="#DDFFFFFF"/>
+                    Background="{ThemeResource HudCardBackgroundBrush}"
+                    BorderBrush="{ThemeResource HudCardBorderBrush}" BorderThickness="1">
+                <TextBlock x:Name="MandelbrotReferenceText" Text="MANDELBROT REFERENCE" FontSize="10" FontWeight="SemiBold"
+                           Foreground="{ThemeResource HudPrimaryForegroundBrush}"/>
             </Border>
         </Grid>
         </Border>
@@ -164,21 +210,43 @@
             <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                 <StackPanel Padding="20,16,20,24" Spacing="16">
 
-                    <!-- Title Header with Close Button -->
-                    <Grid>
+                    <!-- Title Header with Theme & Close Buttons -->
+                    <Grid ColumnSpacing="4">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                         <StackPanel Spacing="2">
                             <TextBlock Text="Fractal Studio" FontSize="20" FontWeight="SemiBold"/>
                             <TextBlock Text="WinUI 3 &amp; Native C++ ARM64 Engine" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
                         </StackPanel>
-                        <Button x:Name="CloseSidebarButton" Grid.Column="1" VerticalAlignment="Center"
+                        <Button x:Name="ThemeCycleButton" Grid.Column="1" VerticalAlignment="Center"
+                                Click="OnThemeCycleClick" AutomationProperties.Name="Cycle app theme"
+                                ToolTipService.ToolTip="Appearance: System Default"
+                                Background="Transparent" BorderThickness="0" Padding="8" CornerRadius="6">
+                            <FontIcon x:Name="ThemeCycleIcon" Glyph="&#xE770;" FontSize="14"/>
+                        </Button>
+                        <Button x:Name="CloseSidebarButton" Grid.Column="2" VerticalAlignment="Center"
                                 Click="OnCloseSidebarClick" ToolTipService.ToolTip="Hide Controls (Full Window View)"
                                 Background="Transparent" BorderThickness="0" Padding="8" CornerRadius="6">
                             <FontIcon Glyph="&#xE711;" FontSize="14"/>
                         </Button>
+                    </Grid>
+
+                    <!-- App Appearance -->
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="165"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel VerticalAlignment="Center" Spacing="1">
+                            <TextBlock Text="Appearance" FontWeight="SemiBold" FontSize="13"/>
+                            <TextBlock Text="System, light, or dark UI" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                        </StackPanel>
+                        <ComboBox x:Name="AppThemeComboBox" Grid.Column="1" HorizontalAlignment="Stretch"
+                                  VerticalAlignment="Center" AutomationProperties.Name="Appearance theme"
+                                  SelectionChanged="OnAppThemeSelectionChanged"/>
                     </Grid>
 
                     <MenuFlyoutSeparator />
@@ -298,14 +366,14 @@
                             <Button x:Name="StartZoomButton" Grid.Column="0" HorizontalAlignment="Stretch"
                                     Click="OnStartZoomClick">
                                 <StackPanel Orientation="Horizontal" Spacing="6">
-                                    <FontIcon Glyph="&#xE768;" FontSize="12" Foreground="#51CF66"/>
+                                    <FontIcon Glyph="&#xE768;" FontSize="12" Foreground="{ThemeResource PlayActionForegroundBrush}"/>
                                     <TextBlock Text="Start Zoom" FontWeight="SemiBold"/>
                                 </StackPanel>
                             </Button>
                             <Button x:Name="StopZoomButton" Grid.Column="1" HorizontalAlignment="Stretch"
                                     Click="OnStopZoomClick" IsEnabled="False">
                                 <StackPanel Orientation="Horizontal" Spacing="6">
-                                    <FontIcon Glyph="&#xE71A;" FontSize="12" Foreground="#FF6B6B"/>
+                                    <FontIcon Glyph="&#xE71A;" FontSize="12" Foreground="{ThemeResource StopActionForegroundBrush}"/>
                                     <TextBlock Text="Stop Zoom" FontWeight="SemiBold"/>
                                 </StackPanel>
                             </Button>
@@ -453,7 +521,7 @@
                                             <ColumnDefinition Width="*"/>
                                             <ColumnDefinition Width="32"/>
                                         </Grid.ColumnDefinitions>
-                                        <TextBlock Text="R" VerticalAlignment="Center" Foreground="#FF6B6B" FontWeight="Bold"/>
+                                        <TextBlock Text="R" VerticalAlignment="Center" Foreground="{ThemeResource StopActionForegroundBrush}" FontWeight="Bold"/>
                                         <Slider x:Name="StopRedSlider" Grid.Column="1" Minimum="0" Maximum="255" StepFrequency="1"
                                                 ValueChanged="OnStopColorChanged" Margin="6,0"/>
                                         <TextBlock x:Name="StopRedText" Grid.Column="2" Text="0" FontFamily="Consolas" VerticalAlignment="Center" HorizontalAlignment="Right"/>
@@ -465,7 +533,7 @@
                                             <ColumnDefinition Width="*"/>
                                             <ColumnDefinition Width="32"/>
                                         </Grid.ColumnDefinitions>
-                                        <TextBlock Text="G" VerticalAlignment="Center" Foreground="#51CF66" FontWeight="Bold"/>
+                                        <TextBlock Text="G" VerticalAlignment="Center" Foreground="{ThemeResource PlayActionForegroundBrush}" FontWeight="Bold"/>
                                         <Slider x:Name="StopGreenSlider" Grid.Column="1" Minimum="0" Maximum="255" StepFrequency="1"
                                                 ValueChanged="OnStopColorChanged" Margin="6,0"/>
                                         <TextBlock x:Name="StopGreenText" Grid.Column="2" Text="7" FontFamily="Consolas" VerticalAlignment="Center" HorizontalAlignment="Right"/>
@@ -477,7 +545,7 @@
                                             <ColumnDefinition Width="*"/>
                                             <ColumnDefinition Width="32"/>
                                         </Grid.ColumnDefinitions>
-                                        <TextBlock Text="B" VerticalAlignment="Center" Foreground="#339AF0" FontWeight="Bold"/>
+                                        <TextBlock Text="B" VerticalAlignment="Center" Foreground="{ThemeResource ChannelBlueForegroundBrush}" FontWeight="Bold"/>
                                         <Slider x:Name="StopBlueSlider" Grid.Column="1" Minimum="0" Maximum="255" StepFrequency="1"
                                                 ValueChanged="OnStopColorChanged" Margin="6,0"/>
                                         <TextBlock x:Name="StopBlueText" Grid.Column="2" Text="100" FontFamily="Consolas" VerticalAlignment="Center" HorizontalAlignment="Right"/>
@@ -510,9 +578,10 @@
                 </StackPanel>
             </ScrollViewer>
         </Border>
-        <Grid x:Name="MovieProgressOverlay" Grid.ColumnSpan="2" Background="#DD101018" Visibility="Collapsed">
+        <Grid x:Name="MovieProgressOverlay" Grid.ColumnSpan="2" Background="{ThemeResource ModalScrimBackgroundBrush}" Visibility="Collapsed">
             <Border MaxWidth="640" Margin="24" Padding="24" CornerRadius="12" HorizontalAlignment="Stretch" VerticalAlignment="Center"
-                    Background="{ThemeResource LayerFillColorDefaultBrush}">
+                    Background="{ThemeResource ModalCardBackgroundBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
                 <StackPanel Spacing="12">
                     <TextBlock Text="Exporting Zoom Movie" FontSize="22" FontWeight="SemiBold"/>
                     <Image x:Name="MoviePreviewImage" Height="270" Stretch="Uniform" AutomationProperties.Name="Recent movie frame"/>

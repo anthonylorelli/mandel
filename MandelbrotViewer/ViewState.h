@@ -2,7 +2,9 @@
 #include "MandelbrotEngine.h"
 #include "ColorTheme.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <iomanip>
 #include <limits>
 #include <locale>
@@ -10,6 +12,57 @@
 
 namespace Mandelbrot
 {
+    enum class AppTheme
+    {
+        System = 0,
+        Light = 1,
+        Dark = 2
+    };
+
+    inline constexpr std::array<AppTheme, 3> GetAllAppThemes() noexcept
+    {
+        return { AppTheme::System, AppTheme::Light, AppTheme::Dark };
+    }
+
+    inline constexpr wchar_t const* GetAppThemeName(AppTheme theme) noexcept
+    {
+        switch (theme)
+        {
+        case AppTheme::Light: return L"Light";
+        case AppTheme::Dark: return L"Dark";
+        case AppTheme::System:
+        default: return L"System Default";
+        }
+    }
+
+    inline constexpr AppTheme CycleAppTheme(AppTheme current) noexcept
+    {
+        switch (current)
+        {
+        case AppTheme::System: return AppTheme::Light;
+        case AppTheme::Light: return AppTheme::Dark;
+        case AppTheme::Dark:
+        default: return AppTheme::System;
+        }
+    }
+
+    inline constexpr bool IsSystemBackgroundDark(uint8_t r, uint8_t g, uint8_t b) noexcept
+    {
+        // Perceptual luma check matching Windows App SDK dark-mode guidance (5*G + 2*R + B <= 8*128).
+        return (5 * static_cast<int>(g) + 2 * static_cast<int>(r) + static_cast<int>(b)) <= 1024;
+    }
+
+    inline constexpr bool IsDarkAppTheme(AppTheme theme, bool systemIsDark) noexcept
+    {
+        switch (theme)
+        {
+        case AppTheme::Light: return false;
+        case AppTheme::Dark: return true;
+        case AppTheme::System:
+        default: return systemIsDark;
+        }
+    }
+
     inline size_t CoordinateDecimalPlaces(double zoom)
     {
         // Keep several guard digits beyond the viewport's pixel scale, up to BigFloat precision.
