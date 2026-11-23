@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "TestHarness.h"
+#include "ConsoleLauncher.h"
 #include "MovieCli.h"
 #include "MovieExport.h"
 #include "ViewState.h"
@@ -542,4 +543,28 @@ TEST_CASE(MovieCli, EdgeCaseRegressionsHelpJuliaResetFloatBoundsAndJsonDepth)
     }
     const auto deepParsed = ParseMovieCli({ L"--export-movie", L"out.mp4", L"--config", deepJson.path.wstring() });
     ASSERT_TRUE(deepParsed.action == CliAction::Error);
+}
+
+TEST_CASE(MovieCli, ConsoleLauncherBuildsSiblingExePathAndForwardsRawArguments)
+{
+    using namespace Mandelbrot::CliLauncher;
+
+    ASSERT_TRUE(BuildSiblingExePath(L"C:\\Users\\demo\\MandelbrotViewer.com") == L"C:\\Users\\demo\\MandelbrotViewer.exe");
+    ASSERT_TRUE(BuildSiblingExePath(L"C:/Program Files/Fractal App/MandelbrotViewer.com") == L"C:/Program Files/Fractal App/MandelbrotViewer.exe");
+    ASSERT_TRUE(BuildSiblingExePath(L"MandelbrotViewer.com") == L"MandelbrotViewer.exe");
+
+    ASSERT_TRUE(ExtractCommandLineArguments(L"MandelbrotViewer.com --help") == L"--help");
+    ASSERT_TRUE(ExtractCommandLineArguments(L"\"C:\\Program Files\\MandelbrotViewer.com\"   --bookmark \"Seahorse Valley\" --zoom 10")
+        == L"--bookmark \"Seahorse Valley\" --zoom 10");
+    ASSERT_TRUE(ExtractCommandLineArguments(L"\"C:\\Apps\\MandelbrotViewer.com\"") == L"");
+    ASSERT_TRUE(ExtractCommandLineArguments(L"  MandelbrotViewer.com   \t ") == L"");
+    ASSERT_TRUE(ExtractCommandLineArguments(L"") == L"");
+
+    ASSERT_FALSE(ShouldWaitForChild(L""));
+    ASSERT_TRUE(ShouldWaitForChild(L"--help"));
+
+    ASSERT_TRUE(BuildChildCommandLine(L"C:\\Program Files\\MandelbrotViewer.exe", L"")
+        == L"\"C:\\Program Files\\MandelbrotViewer.exe\"");
+    ASSERT_TRUE(BuildChildCommandLine(L"C:\\Program Files\\MandelbrotViewer.exe", L"--ascii --once")
+        == L"\"C:\\Program Files\\MandelbrotViewer.exe\" --ascii --once");
 }

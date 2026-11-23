@@ -105,6 +105,16 @@ namespace Mandelbrot
             return IsValidStdHandle(handle) && GetConsoleMode(handle, &mode) != 0;
         }
 
+        bool IsRedirectedStdHandle(HANDLE handle, FILE* stream) noexcept
+        {
+            if (!IsValidStdHandle(handle) || !stream || _fileno(stream) < 0)
+            {
+                return false;
+            }
+            const DWORD fileType = GetFileType(handle);
+            return fileType == FILE_TYPE_DISK || fileType == FILE_TYPE_PIPE || !IsConsoleHandle(handle);
+        }
+
         struct ScopedParentConsole
         {
             bool attached{ false };
@@ -112,13 +122,13 @@ namespace Mandelbrot
 
             explicit ScopedParentConsole(bool allowAllocConsole = false) noexcept
             {
-                const bool hadStdout = IsValidStdHandle(GetStdHandle(STD_OUTPUT_HANDLE));
-                const bool hadStderr = IsValidStdHandle(GetStdHandle(STD_ERROR_HANDLE));
-                const bool hadStdin = IsValidStdHandle(GetStdHandle(STD_INPUT_HANDLE));
+                const bool redirectedStdout = IsRedirectedStdHandle(GetStdHandle(STD_OUTPUT_HANDLE), stdout);
+                const bool redirectedStderr = IsRedirectedStdHandle(GetStdHandle(STD_ERROR_HANDLE), stderr);
+                const bool redirectedStdin = IsRedirectedStdHandle(GetStdHandle(STD_INPUT_HANDLE), stdin);
                 if (GetConsoleWindow() == nullptr)
                 {
                     bool acquired = AttachConsole(ATTACH_PARENT_PROCESS) != 0;
-                    if (!acquired && allowAllocConsole && !hadStdout)
+                    if (!acquired && allowAllocConsole && !redirectedStdout)
                     {
                         acquired = AllocConsole() != 0;
                     }
@@ -126,19 +136,19 @@ namespace Mandelbrot
                     {
                         attached = true;
                         FILE* stream = nullptr;
-                        if (!hadStdout && freopen_s(&stream, "CONOUT$", "w", stdout) == 0)
+                        if (!redirectedStdout && freopen_s(&stream, "CONOUT$", "w", stdout) == 0)
                         {
                             std::setvbuf(stdout, nullptr, _IONBF, 0);
                             std::cout.clear();
                             std::wcout.clear();
                         }
-                        if (!hadStderr && freopen_s(&stream, "CONOUT$", "w", stderr) == 0)
+                        if (!redirectedStderr && freopen_s(&stream, "CONOUT$", "w", stderr) == 0)
                         {
                             std::setvbuf(stderr, nullptr, _IONBF, 0);
                             std::cerr.clear();
                             std::wcerr.clear();
                         }
-                        if (!hadStdin && freopen_s(&stream, "CONIN$", "r", stdin) == 0)
+                        if (!redirectedStdin && freopen_s(&stream, "CONIN$", "r", stdin) == 0)
                         {
                             std::cin.clear();
                             std::wcin.clear();
@@ -148,7 +158,19 @@ namespace Mandelbrot
                 // ConsoleAscii writes narrow UTF-8 bytes to std::cout; wide CLI modes write to std::wcout.
                 if (!allowAllocConsole && _fileno(stdout) >= 0) (void)_setmode(_fileno(stdout), _O_U8TEXT);
                 if (_fileno(stderr) >= 0) (void)_setmode(_fileno(stderr), _O_U8TEXT);
-                stdoutIsConsole = IsConsoleHandle(GetStdHandle(STD_OUTPUT_HANDLE));
+                const HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+                stdoutIsConsole = IsConsoleHandle(hOut);
+                if (attached && stdoutIsConsole && !allowAllocConsole)
+                {
+                    // If invoked directly via the GUI .exe, the parent shell may have already printed
+                    // its prompt on the current row; move to a fresh line before writing output.
+                    CONSOLE_SCREEN_BUFFER_INFO info{};
+                    if (GetConsoleScreenBufferInfo(hOut, &info) && info.dwCursorPosition.X > 0)
+                    {
+                        std::wcout << L"\n";
+                        std::wcout.flush();
+                    }
+                }
             }
 
             ~ScopedParentConsole() noexcept
@@ -173,10 +195,10 @@ namespace Mandelbrot
             L"MandelbrotViewer - Command-Line Movie Export & Console ASCII Mode\n"
             L"\n"
             L"Usage:\n"
-            L"  MandelbrotViewer.exe                               Launch interactive GUI\n"
-            L"  MandelbrotViewer.exe --ascii [options]             Render live ASCII fractal in terminal\n"
-            L"  MandelbrotViewer.exe --export-movie <out.mp4> [options]\n"
-            L"  MandelbrotViewer.exe --help | -h | /?\n"
+            L"  MandelbrotViewer                                   Launch interactive GUI\n"
+            L"  MandelbrotViewer --ascii [options]                 Render live ASCII fractal in terminal\n"
+            L"  MandelbrotViewer --export-movie <out.mp4> [options]\n"
+            L"  MandelbrotViewer --help | -h | /?\n"
             L"\n"
             L"Console ASCII Options:\n"
             L"  --ascii, --console           Render the fractal in ASCII characters in the terminal\n"
@@ -231,7 +253,7 @@ namespace Mandelbrot
             L"  --auto-iterations            Scale iteration budget automatically with zoom depth\n"
             L"  --no-auto-iterations         Keep iteration budget fixed across frames\n"
             L"  --smooth / --no-smooth       Smooth continuous coloring (default) or discrete bands\n"
-            L"  --gpu / --no-gpu (--cpu)     Use GPU acceleration (default) or CPU-only rendering\n"
+            L"  --gpu / --no-gpu (--cpu)     Use GPU (movie default) or CPU (--ascii default) rendering\n"
             L"  --theme <name>               electric-blue (default), inferno, psychedelic, cyberpunk,\n"
             L"                               viridis, twilight-ocean, sunset-glow, monochrome\n"
             L"  --frequency <float>          Palette cycle frequency (> 0, default: 1.0)\n"
@@ -248,12 +270,12 @@ namespace Mandelbrot
             L"  H / R         Toggle HUD / reset view          Q / Esc       Quit\n"
             L"\n"
             L"Examples:\n"
-            L"  MandelbrotViewer.exe --ascii --auto-zoom --auto-target\n"
-            L"  MandelbrotViewer.exe --ascii --bookmark \"Seahorse Valley\" --start-zoom 1 --auto-zoom --theme inferno\n"
-            L"  MandelbrotViewer.exe --ascii --once --cols 100 --rows 32 --no-color\n"
-            L"  MandelbrotViewer.exe --export-movie zoom.mp4 --bookmark \"Seahorse Valley\" --start-zoom 1 --end-zoom 85000 --duration 15\n"
-            L"  MandelbrotViewer.exe --export-movie auto.mp4 --auto-target --resolution 4k --fps 60 --duration 30 --theme inferno\n"
-            L"  MandelbrotViewer.exe --export-movie custom.mp4 --config view.json --direction in --zoom-speed 1.5 --duration 20\n";
+            L"  MandelbrotViewer --ascii --auto-zoom --auto-target\n"
+            L"  MandelbrotViewer --ascii --bookmark \"Seahorse Valley\" --start-zoom 1 --auto-zoom --theme inferno\n"
+            L"  MandelbrotViewer --ascii --once --cols 100 --rows 32 --no-color\n"
+            L"  MandelbrotViewer --export-movie zoom.mp4 --bookmark \"Seahorse Valley\" --start-zoom 1 --end-zoom 85000 --duration 15\n"
+            L"  MandelbrotViewer --export-movie auto.mp4 --auto-target --resolution 4k --fps 60 --duration 30 --theme inferno\n"
+            L"  MandelbrotViewer --export-movie custom.mp4 --config view.json --direction in --zoom-speed 1.5 --duration 20\n";
     }
 
     std::wstring FormatMovieCliProgressLine(const MovieProgress& progress, const MoviePlan& plan)

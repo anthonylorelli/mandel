@@ -14,11 +14,36 @@
 #include "GpuMandelbrotBla.h"
 #include "GpuSolverTypes.h"
 
+#include <array>
 #include <mutex>
 #include <vector>
 
 namespace Mandelbrot
 {
+    enum class GpuShaderId : size_t
+    {
+        ShallowPrim = 0,
+        ShallowSub,
+        LdsPrim,
+        LdsSub,
+        LdsBlaPrim,
+        LdsBlaSub,
+        LdsBlaStage0,
+        LdsBlaResume,
+        DeepExpPrim,
+        DeepExpSub,
+        DeepExpStage0,
+        DeepExpResume,
+        PostDetect,
+        PostBuildIndirect,
+        PostBuildActiveIndirect,
+        PostResolve,
+        PostShutter,
+        Count
+    };
+
+    inline constexpr size_t kGpuShaderCount = static_cast<size_t>(GpuShaderId::Count);
+
     struct GpuFractalSolver::Impl
     {
         template <typename T>
@@ -38,11 +63,7 @@ namespace Mandelbrot
         ComPtr<ID3D11Device> device;
         ComPtr<ID3D11DeviceContext> context;
 
-        ComPtr<ID3D11ComputeShader> csShallowPrim, csShallowSub;
-        ComPtr<ID3D11ComputeShader> csLdsPrim, csLdsSub;
-        ComPtr<ID3D11ComputeShader> csLdsBlaPrim, csLdsBlaSub, csLdsBlaStage0, csLdsBlaResume;
-        ComPtr<ID3D11ComputeShader> csDeepExpPrim, csDeepExpSub, csDeepExpStage0, csDeepExpResume;
-        ComPtr<ID3D11ComputeShader> csPostDetect, csPostBuildIndirect, csPostBuildActiveIndirect, csPostResolve, csPostShutter;
+        std::array<ComPtr<ID3D11ComputeShader>, kGpuShaderCount> shaders;
 
         ComPtr<ID3D11Buffer> constantBuffer;
 
@@ -276,8 +297,9 @@ namespace Mandelbrot
             ID3D11ShaderResourceView* activeSubIdxSrv,
             ID3D11ShaderResourceView* activeSubCountSrv);
 
-        void SetPrimaryShader(detail::GpuShaderMode mode);
-        void SetSubpixelShader(detail::GpuShaderMode mode);
+        ID3D11ComputeShader* EnsureShader(GpuShaderId id);
+        bool SetPrimaryShader(detail::GpuShaderMode mode);
+        bool SetSubpixelShader(detail::GpuShaderMode mode);
         void UnbindComputeResources() noexcept;
 
         // Dispatches primary center-pixel evaluation into outItersBuf using multi-pass

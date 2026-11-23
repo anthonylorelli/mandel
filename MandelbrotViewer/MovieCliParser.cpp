@@ -962,7 +962,7 @@ namespace Mandelbrot
 
                 consoleOpts.autoScaleIterations = plan.autoScaleIterations;
                 consoleOpts.baseIterations = plan.baseIterations;
-                consoleOpts.useGpu = plan.useGpu;
+                consoleOpts.useGpu = useGpu.value_or(false);
                 consoleOpts.fps = fps.value_or(DefaultConsoleFps);
                 consoleOpts.maxDurationSeconds = duration.value_or(0);
                 consoleOpts.maxFrames = asciiFrames.value_or(0);

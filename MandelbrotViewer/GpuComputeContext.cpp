@@ -21,74 +21,75 @@ namespace Mandelbrot
         using Microsoft::WRL::ComPtr;
         using namespace detail;
 
-        struct CompiledShaderCache
+        struct LazyShaderBlob
         {
-            ComPtr<ID3DBlob> shallowPrim, shallowSub;
-            ComPtr<ID3DBlob> ldsPrim, ldsSub;
-            ComPtr<ID3DBlob> ldsBlaPrim, ldsBlaSub, ldsBlaStage0, ldsBlaResume;
-            ComPtr<ID3DBlob> deepExpPrim, deepExpSub, deepExpStage0, deepExpResume;
-            ComPtr<ID3DBlob> postDetect, postBuildIndirect, postBuildActiveIndirect, postResolve, postShutter;
-            bool ok{ false };
+            std::once_flag flag;
+            ComPtr<ID3DBlob> blob;
         };
 
-        const CompiledShaderCache& GetCompiledShaderCache()
+        struct ShaderSpec
         {
-            static CompiledShaderCache cache;
-            static std::once_flag flag;
-            std::call_once(flag, []()
+            const char* (*sourceFn)();
+            const char* entryPoint;
+        };
+
+        const ShaderSpec& GetShaderSpec(GpuShaderId id) noexcept
+        {
+            static constexpr std::array<ShaderSpec, kGpuShaderCount> kSpecs{ {
+                { &GetShallowShaderSource,        "CSPrimary" },
+                { &GetShallowShaderSource,        "CSSubpixels" },
+                { &GetPerturbLdsShaderSource,     "CSPrimary" },
+                { &GetPerturbLdsShaderSource,     "CSSubpixels" },
+                { &GetPerturbLdsBlaShaderSource,  "CSPrimary" },
+                { &GetPerturbLdsBlaShaderSource,  "CSSubpixels" },
+                { &GetPerturbLdsBlaShaderSource,  "CSPrimaryStage0" },
+                { &GetPerturbLdsBlaShaderSource,  "CSPrimaryResume" },
+                { &GetPerturbDeepExpShaderSource, "CSPrimary" },
+                { &GetPerturbDeepExpShaderSource, "CSSubpixels" },
+                { &GetPerturbDeepExpShaderSource, "CSPrimaryStage0" },
+                { &GetPerturbDeepExpShaderSource, "CSPrimaryResume" },
+                { &GetMovieDetectShaderSource,    "CSDetectBoundaries" },
+                { &GetMovieDetectShaderSource,    "CSBuildIndirectArgs" },
+                { &GetMovieDetectShaderSource,    "CSBuildActiveIndirectArgs" },
+                { &GetMovieResolveShaderSource,   "CSResolveAndBlend" },
+                { &GetMovieShutterShaderSource,   "CSShutterMotionBlur" }
+            } };
+            return kSpecs[static_cast<size_t>(id)];
+        }
+
+        ID3DBlob* GetCompiledShaderBlob(GpuShaderId id)
+        {
+            static std::array<LazyShaderBlob, kGpuShaderCount> cache;
+            auto& slot = cache[static_cast<size_t>(id)];
+            std::call_once(slot.flag, [id, &slot]()
             {
-                auto compileOne = [](const char* src, const char* entry, ComPtr<ID3DBlob>& outBlob) -> bool
-                {
-                    ComPtr<ID3DBlob> err;
-                    const HRESULT hr = D3DCompile(
-                        src,
-                        std::strlen(src),
-                        entry,
-                        nullptr,
-                        nullptr,
-                        entry,
-                        "cs_5_0",
-                        D3DCOMPILE_OPTIMIZATION_LEVEL3,
-                        0,
-                        &outBlob,
-                        &err);
+                const auto& spec = GetShaderSpec(id);
+                const char* src = spec.sourceFn();
+                ComPtr<ID3DBlob> err;
+                const HRESULT hr = D3DCompile(
+                    src,
+                    std::strlen(src),
+                    spec.entryPoint,
+                    nullptr,
+                    nullptr,
+                    spec.entryPoint,
+                    "cs_5_0",
+                    D3DCOMPILE_OPTIMIZATION_LEVEL3,
+                    0,
+                    &slot.blob,
+                    &err);
 #if defined(_DEBUG) && defined(_WIN32)
-                    if (FAILED(hr) && err && err->GetBufferPointer())
-                    {
-                        OutputDebugStringA(static_cast<const char*>(err->GetBufferPointer()));
-                    }
+                if (FAILED(hr) && err && err->GetBufferPointer())
+                {
+                    OutputDebugStringA(static_cast<const char*>(err->GetBufferPointer()));
+                }
 #endif
-                    return SUCCEEDED(hr) && outBlob != nullptr;
-                };
-
-                const char* shallowSrc = GetShallowShaderSource();
-                const char* ldsSrc = GetPerturbLdsShaderSource();
-                const char* ldsBlaSrc = GetPerturbLdsBlaShaderSource();
-                const char* deepExpSrc = GetPerturbDeepExpShaderSource();
-                const char* detectSrc = GetMovieDetectShaderSource();
-                const char* resolveSrc = GetMovieResolveShaderSource();
-                const char* shutterSrc = GetMovieShutterShaderSource();
-
-                cache.ok =
-                    compileOne(shallowSrc, "CSPrimary", cache.shallowPrim) &&
-                    compileOne(shallowSrc, "CSSubpixels", cache.shallowSub) &&
-                    compileOne(ldsSrc, "CSPrimary", cache.ldsPrim) &&
-                    compileOne(ldsSrc, "CSSubpixels", cache.ldsSub) &&
-                    compileOne(ldsBlaSrc, "CSPrimary", cache.ldsBlaPrim) &&
-                    compileOne(ldsBlaSrc, "CSSubpixels", cache.ldsBlaSub) &&
-                    compileOne(ldsBlaSrc, "CSPrimaryStage0", cache.ldsBlaStage0) &&
-                    compileOne(ldsBlaSrc, "CSPrimaryResume", cache.ldsBlaResume) &&
-                    compileOne(deepExpSrc, "CSPrimary", cache.deepExpPrim) &&
-                    compileOne(deepExpSrc, "CSSubpixels", cache.deepExpSub) &&
-                    compileOne(deepExpSrc, "CSPrimaryStage0", cache.deepExpStage0) &&
-                    compileOne(deepExpSrc, "CSPrimaryResume", cache.deepExpResume) &&
-                    compileOne(detectSrc, "CSDetectBoundaries", cache.postDetect) &&
-                    compileOne(detectSrc, "CSBuildIndirectArgs", cache.postBuildIndirect) &&
-                    compileOne(detectSrc, "CSBuildActiveIndirectArgs", cache.postBuildActiveIndirect) &&
-                    compileOne(resolveSrc, "CSResolveAndBlend", cache.postResolve) &&
-                    compileOne(shutterSrc, "CSShutterMotionBlur", cache.postShutter);
+                if (FAILED(hr))
+                {
+                    slot.blob.Reset();
+                }
             });
-            return cache;
+            return slot.blob.Get();
         }
 
         size_t GrowCapacityBytes(size_t currentBytes, size_t neededBytes) noexcept
@@ -102,9 +103,6 @@ namespace Mandelbrot
 
     GpuFractalSolver::Impl::Impl(bool allowSoftwareAdapter)
     {
-        const auto& shaders = GetCompiledShaderCache();
-        if (!shaders.ok) return;
-
         const D3D_FEATURE_LEVEL featureLevels[]{ D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
         D3D_FEATURE_LEVEL flOut{};
 
@@ -156,33 +154,6 @@ namespace Mandelbrot
         }
 
         if (!device || !context) return;
-
-        auto makeShader = [&](const ComPtr<ID3DBlob>& blob, ComPtr<ID3D11ComputeShader>& outCs) -> bool
-        {
-            return SUCCEEDED(device->CreateComputeShader(
-                blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &outCs)) && outCs != nullptr;
-        };
-
-        if (!makeShader(shaders.shallowPrim, csShallowPrim) ||
-            !makeShader(shaders.shallowSub, csShallowSub) ||
-            !makeShader(shaders.ldsPrim, csLdsPrim) ||
-            !makeShader(shaders.ldsSub, csLdsSub) ||
-            !makeShader(shaders.ldsBlaPrim, csLdsBlaPrim) ||
-            !makeShader(shaders.ldsBlaSub, csLdsBlaSub) ||
-            !makeShader(shaders.ldsBlaStage0, csLdsBlaStage0) ||
-            !makeShader(shaders.ldsBlaResume, csLdsBlaResume) ||
-            !makeShader(shaders.deepExpPrim, csDeepExpPrim) ||
-            !makeShader(shaders.deepExpSub, csDeepExpSub) ||
-            !makeShader(shaders.deepExpStage0, csDeepExpStage0) ||
-            !makeShader(shaders.deepExpResume, csDeepExpResume) ||
-            !makeShader(shaders.postDetect, csPostDetect) ||
-            !makeShader(shaders.postBuildIndirect, csPostBuildIndirect) ||
-            !makeShader(shaders.postBuildActiveIndirect, csPostBuildActiveIndirect) ||
-            !makeShader(shaders.postResolve, csPostResolve) ||
-            !makeShader(shaders.postShutter, csPostShutter))
-        {
-            return;
-        }
 
         D3D11_BUFFER_DESC cbDesc{};
         cbDesc.ByteWidth = 128;
@@ -509,42 +480,62 @@ namespace Mandelbrot
         return true;
     }
 
-    void GpuFractalSolver::Impl::SetPrimaryShader(GpuShaderMode mode)
+    ID3D11ComputeShader* GpuFractalSolver::Impl::EnsureShader(GpuShaderId id)
     {
-        switch (mode)
+        auto& slot = shaders[static_cast<size_t>(id)];
+        if (slot)
         {
-        case GpuShaderMode::Shallow:
-            context->CSSetShader(csShallowPrim.Get(), nullptr, 0);
-            break;
-        case GpuShaderMode::PerturbLds:
-            context->CSSetShader(csLdsPrim.Get(), nullptr, 0);
-            break;
-        case GpuShaderMode::PerturbLdsBla:
-            context->CSSetShader(csLdsBlaPrim.Get(), nullptr, 0);
-            break;
-        case GpuShaderMode::PerturbDeepExp:
-            context->CSSetShader(csDeepExpPrim.Get(), nullptr, 0);
-            break;
+            return slot.Get();
         }
+        if (!device)
+        {
+            return nullptr;
+        }
+        ID3DBlob* blob = GetCompiledShaderBlob(id);
+        if (!blob)
+        {
+            return nullptr;
+        }
+        if (FAILED(device->CreateComputeShader(
+            blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &slot)) || !slot)
+        {
+            CheckDeviceLost();
+            slot.Reset();
+            return nullptr;
+        }
+        return slot.Get();
     }
 
-    void GpuFractalSolver::Impl::SetSubpixelShader(GpuShaderMode mode)
+    bool GpuFractalSolver::Impl::SetPrimaryShader(GpuShaderMode mode)
     {
+        GpuShaderId id = GpuShaderId::ShallowPrim;
         switch (mode)
         {
-        case GpuShaderMode::Shallow:
-            context->CSSetShader(csShallowSub.Get(), nullptr, 0);
-            break;
-        case GpuShaderMode::PerturbLds:
-            context->CSSetShader(csLdsSub.Get(), nullptr, 0);
-            break;
-        case GpuShaderMode::PerturbLdsBla:
-            context->CSSetShader(csLdsBlaSub.Get(), nullptr, 0);
-            break;
-        case GpuShaderMode::PerturbDeepExp:
-            context->CSSetShader(csDeepExpSub.Get(), nullptr, 0);
-            break;
+        case GpuShaderMode::Shallow:       id = GpuShaderId::ShallowPrim; break;
+        case GpuShaderMode::PerturbLds:    id = GpuShaderId::LdsPrim; break;
+        case GpuShaderMode::PerturbLdsBla: id = GpuShaderId::LdsBlaPrim; break;
+        case GpuShaderMode::PerturbDeepExp:id = GpuShaderId::DeepExpPrim; break;
         }
+        ID3D11ComputeShader* cs = EnsureShader(id);
+        if (!cs) return false;
+        context->CSSetShader(cs, nullptr, 0);
+        return true;
+    }
+
+    bool GpuFractalSolver::Impl::SetSubpixelShader(GpuShaderMode mode)
+    {
+        GpuShaderId id = GpuShaderId::ShallowSub;
+        switch (mode)
+        {
+        case GpuShaderMode::Shallow:       id = GpuShaderId::ShallowSub; break;
+        case GpuShaderMode::PerturbLds:    id = GpuShaderId::LdsSub; break;
+        case GpuShaderMode::PerturbLdsBla: id = GpuShaderId::LdsBlaSub; break;
+        case GpuShaderMode::PerturbDeepExp:id = GpuShaderId::DeepExpSub; break;
+        }
+        ID3D11ComputeShader* cs = EnsureShader(id);
+        if (!cs) return false;
+        context->CSSetShader(cs, nullptr, 0);
+        return true;
     }
 
     void GpuFractalSolver::Impl::UnbindComputeResources() noexcept
