@@ -72,6 +72,16 @@ namespace Mandelbrot
 
         if (useMultiPass)
         {
+            ID3D11ComputeShader* csStage0 = EnsureShader(
+                (mode == GpuShaderMode::PerturbLdsBla) ? GpuShaderId::LdsBlaStage0 : GpuShaderId::DeepExpStage0);
+            ID3D11ComputeShader* csActiveInd = EnsureShader(GpuShaderId::PostBuildActiveIndirect);
+            ID3D11ComputeShader* csResume = EnsureShader(
+                (mode == GpuShaderMode::PerturbLdsBla) ? GpuShaderId::LdsBlaResume : GpuShaderId::DeepExpResume);
+            if (!csStage0 || !csActiveInd || !csResume)
+            {
+                return false;
+            }
+
             const uint32_t stage0Limit = std::min<uint32_t>(1024u, maxIterU);
             context->ClearUnorderedAccessViewUint(activeCountUav[0].Get(), zeros);
 
@@ -84,9 +94,7 @@ namespace Mandelbrot
                 activeCountUav[0].Get()
             };
             context->CSSetUnorderedAccessViews(0, 5, stage0Uavs, nullptr);
-            context->CSSetShader(
-                (mode == GpuShaderMode::PerturbLdsBla) ? csLdsBlaStage0.Get() : csDeepExpStage0.Get(),
-                nullptr, 0);
+            context->CSSetShader(csStage0, nullptr, 0);
 
             if (!UploadFractalCb(
                 mode, config, refState, juliaCx, juliaCy, juliaBailout2,
@@ -127,7 +135,7 @@ namespace Mandelbrot
                 ID3D11ShaderResourceView* indSrvs[8]{};
                 indSrvs[5] = activeCountSrv[activeIn].Get();
                 context->CSSetShaderResources(0, 8, indSrvs);
-                context->CSSetShader(csPostBuildActiveIndirect.Get(), nullptr, 0);
+                context->CSSetShader(csActiveInd, nullptr, 0);
                 context->Dispatch(1, 1, 1);
 
                 // Resume only surviving active pixels in densely packed warps
@@ -149,9 +157,7 @@ namespace Mandelbrot
                     isFinalStage ? nullptr : activeCountUav[activeOut].Get()
                 };
                 context->CSSetUnorderedAccessViews(0, 5, resumeUavs, nullptr);
-                context->CSSetShader(
-                    (mode == GpuShaderMode::PerturbLdsBla) ? csLdsBlaResume.Get() : csDeepExpResume.Get(),
-                    nullptr, 0);
+                context->CSSetShader(csResume, nullptr, 0);
 
                 if (!UploadFractalCb(
                     mode, config, refState, juliaCx, juliaCy, juliaBailout2,
@@ -174,7 +180,11 @@ namespace Mandelbrot
         BindFractalSrvs(mode, nullptr, nullptr);
         ID3D11UnorderedAccessView* primUavs[3]{ outItersUav.Get(), nullptr, nullptr };
         context->CSSetUnorderedAccessViews(0, 3, primUavs, nullptr);
-        SetPrimaryShader(mode);
+        if (!SetPrimaryShader(mode))
+        {
+            UnbindComputeResources();
+            return false;
+        }
 
         const size_t maxRowsByTdr = std::max<size_t>(
             1,
@@ -632,7 +642,12 @@ namespace Mandelbrot
                 ID3D11UnorderedAccessView* subUavs[3]{ nullptr, m_impl->subOutUav.Get(), nullptr };
                 m_impl->context->CSSetUnorderedAccessViews(0, 3, subUavs, nullptr);
                 m_impl->BindFractalSrvs(mode, m_impl->subIdxSrv.Get(), nullptr);
-                m_impl->SetSubpixelShader(mode);
+                if (!m_impl->SetSubpixelShader(mode))
+                {
+                    subpixelSamples->clear();
+                    m_impl->UnbindComputeResources();
+                    return false;
+                }
 
                 const uint32_t subGroupThreads =
                     (mode == GpuShaderMode::PerturbLds || mode == GpuShaderMode::PerturbLdsBla) ? 512u : 256u;

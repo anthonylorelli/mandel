@@ -88,6 +88,11 @@ TEST_CASE(ConsoleAscii, ParsesDefaultsAliasesAndUsageText)
     ASSERT_FALSE(a.consoleOptions.autoZoom);
     ASSERT_TRUE(a.consoleOptions.zoomIn);
     ASSERT_FALSE(a.consoleOptions.autoTarget);
+    ASSERT_FALSE(a.consoleOptions.useGpu);
+
+    const auto gpuOpt = ParseMovieCli({ L"--ascii", L"--gpu" });
+    ASSERT_TRUE(gpuOpt.action == CliAction::ConsoleAscii);
+    ASSERT_TRUE(gpuOpt.consoleOptions.useGpu);
     ASSERT_TRUE(a.consoleOptions.autoScaleIterations);
     ASSERT_NEAR(1.0, a.consoleOptions.start.zoom, 1e-12);
 

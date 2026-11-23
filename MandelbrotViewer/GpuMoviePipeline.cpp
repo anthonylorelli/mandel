@@ -195,12 +195,13 @@ namespace Mandelbrot
         };
         m_impl->context->CSSetShaderResources(0, 8, resolveSrvs);
 
-        if (!m_impl->UploadBufferDiscard(m_impl->constantBuffer.Get(), &postCb, sizeof(postCb)))
+        ID3D11ComputeShader* csResolve = m_impl->EnsureShader(GpuShaderId::PostResolve);
+        if (!csResolve || !m_impl->UploadBufferDiscard(m_impl->constantBuffer.Get(), &postCb, sizeof(postCb)))
         {
             m_impl->UnbindComputeResources();
             return false;
         }
-        m_impl->context->CSSetShader(m_impl->csPostResolve.Get(), nullptr, 0);
+        m_impl->context->CSSetShader(csResolve, nullptr, 0);
         m_impl->context->Dispatch(visGroupX, visGroupY, 1);
 
         m_impl->UnbindComputeResources();
@@ -288,11 +289,16 @@ namespace Mandelbrot
             m_impl->context->CSSetConstantBuffers(0, 1, cbs);
             m_impl->UnbindComputeResources();
 
+            ID3D11ComputeShader* csShutter = m_impl->EnsureShader(GpuShaderId::PostShutter);
+            if (!csShutter)
+            {
+                return false;
+            }
             ID3D11UnorderedAccessView* uavs[3]{ m_impl->shutterPixelsUav.Get(), nullptr, nullptr };
             m_impl->context->CSSetUnorderedAccessViews(0, 3, uavs, nullptr);
             ID3D11ShaderResourceView* srvs[8]{ m_impl->accumPixelsSrv.Get() };
             m_impl->context->CSSetShaderResources(0, 8, srvs);
-            m_impl->context->CSSetShader(m_impl->csPostShutter.Get(), nullptr, 0);
+            m_impl->context->CSSetShader(csShutter, nullptr, 0);
             m_impl->context->Dispatch(
                 static_cast<UINT>((width + 15) / 16),
                 static_cast<UINT>((height + 15) / 16),

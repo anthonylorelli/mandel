@@ -100,7 +100,7 @@ namespace Mandelbrot
         // Iteration & compute settings
         bool autoScaleIterations{ true };
         int baseIterations{ 500 };
-        bool useGpu{ true };
+        bool useGpu{ false };
 
         // Live playback settings
         int fps{ DefaultConsoleFps };

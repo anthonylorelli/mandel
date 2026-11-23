@@ -551,6 +551,13 @@ namespace Mandelbrot
         double juliaBailout2,
         const PostProcessCb& postCb)
     {
+        ID3D11ComputeShader* csDetect = EnsureShader(GpuShaderId::PostDetect);
+        ID3D11ComputeShader* csBuildInd = EnsureShader(GpuShaderId::PostBuildIndirect);
+        if (!csDetect || !csBuildInd)
+        {
+            return false;
+        }
+
         const UINT zeros[4]{ 0, 0, 0, 0 };
         context->ClearUnorderedAccessViewUint(subCounterUav.Get(), zeros);
 
@@ -568,7 +575,7 @@ namespace Mandelbrot
             UnbindComputeResources();
             return false;
         }
-        context->CSSetShader(csPostDetect.Get(), nullptr, 0);
+        context->CSSetShader(csDetect, nullptr, 0);
         context->Dispatch(
             static_cast<UINT>((postCb.width + 15u) / 16u),
             static_cast<UINT>((postCb.visibleRows + 15u) / 16u),
@@ -582,7 +589,7 @@ namespace Mandelbrot
         ID3D11ShaderResourceView* buildIndSrvs[8]{};
         buildIndSrvs[5] = subCounterSrv.Get();
         context->CSSetShaderResources(0, 8, buildIndSrvs);
-        context->CSSetShader(csPostBuildIndirect.Get(), nullptr, 0);
+        context->CSSetShader(csBuildInd, nullptr, 0);
         context->Dispatch(1, 1, 1);
 
         // Evaluate 4x subpixels directly on GPU via DispatchIndirect (zero CPU round-trip).
@@ -592,12 +599,12 @@ namespace Mandelbrot
 
         if (!UploadFractalCb(
             mode, config, refState, juliaCx, juliaCy, juliaBailout2,
-            0u, 0u, kIndirectSubpixelSentinel))
+            0u, 0u, kIndirectSubpixelSentinel) ||
+            !SetSubpixelShader(mode))
         {
             UnbindComputeResources();
             return false;
         }
-        SetSubpixelShader(mode);
         context->DispatchIndirect(indirectArgsBuf.Get(), 0);
         return true;
     }

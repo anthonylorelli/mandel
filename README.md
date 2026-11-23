@@ -88,20 +88,20 @@ A high-performance Windows desktop application built with native **C++/WinRT** a
   - **Copy Coordinates & Config**: Copies current fractal view parameters and theme as JSON to the clipboard.
 
 ### 4. Command-Line Zoom Movie Export
-`MandelbrotViewer.exe` can export zoom movies headlessly without opening the GUI window using `--export-movie <output.mp4>`:
+`MandelbrotViewer` can export zoom movies headlessly without opening the GUI window using `--export-movie <output.mp4>`. When invoked from PowerShell or `cmd.exe` without the `.exe` extension, Windows automatically runs the companion console launcher `MandelbrotViewer.com`, which waits synchronously for CLI output and exit codes without disturbing the terminal prompt (while launching `MandelbrotViewer.exe` directly for GUI mode without a console window flash):
 
 ```powershell
 # Show all available command-line options
-.\x64\Release\MandelbrotViewer.exe --help
+.\x64\Release\MandelbrotViewer --help
 
 # Zoom from overview into Seahorse Valley (1080p, 30 fps, 15s)
-.\x64\Release\MandelbrotViewer.exe --export-movie seahorse.mp4 --bookmark "Seahorse Valley" --start-zoom 1 --end-zoom 85000 --duration 15
+.\x64\Release\MandelbrotViewer --export-movie seahorse.mp4 --bookmark "Seahorse Valley" --start-zoom 1 --end-zoom 85000 --duration 15
 
 # Auto-pick detailed targets in 4K @ 60 fps with Inferno theme and HEVC
-.\x64\Release\MandelbrotViewer.exe --export-movie auto_4k.mp4 --auto-target --resolution 4k --fps 60 --duration 30 --codec hevc --theme inferno
+.\x64\Release\MandelbrotViewer --export-movie auto_4k.mp4 --auto-target --resolution 4k --fps 60 --duration 30 --codec hevc --theme inferno
 
 # Load coordinates & custom palette JSON saved from "Copy Coordinates & Config"
-.\x64\Release\MandelbrotViewer.exe --export-movie custom.mp4 --config view.json --direction in --zoom-speed 1.5 --duration 20
+.\x64\Release\MandelbrotViewer --export-movie custom.mp4 --config view.json --direction in --zoom-speed 1.5 --duration 20
 ```
 
 Supported flags include:
@@ -111,20 +111,20 @@ Supported flags include:
 - **Rendering & Theme**: `--iterations`, `--auto-iterations` / `--no-auto-iterations`, `--smooth` / `--no-smooth`, `--gpu` / `--no-gpu` (`--cpu`), `--theme <name>`, `--frequency`, `--phase`, `--invert` / `--no-invert`, `--interior-color <#RRGGBB|#AARRGGBB|0xAARRGGBB>`.
 
 ### 5. Console ASCII Mode (Live Terminal Renderer & Auto-Zoom)
-`MandelbrotViewer.exe` can also render fractals directly in the terminal using ASCII characters (with automatic 24-bit ANSI TrueColor, 256-color, or pure monochrome ASCII) and live auto-zoom / auto-target exploration matching the GUI:
+`MandelbrotViewer` can also render fractals directly in the terminal using ASCII characters (with automatic 24-bit ANSI TrueColor, 256-color, or pure monochrome ASCII) and live auto-zoom / auto-target exploration matching the GUI:
 
 ```powershell
 # Launch live interactive ASCII explorer (fits terminal size automatically)
-.\x64\Release\MandelbrotViewer.exe --ascii
+.\x64\Release\MandelbrotViewer --ascii
 
 # Live auto-zoom with automatic interesting target picking (just like GUI Auto-Pick Target)
-.\x64\Release\MandelbrotViewer.exe --ascii --auto-zoom --auto-target --theme inferno
+.\x64\Release\MandelbrotViewer --ascii --auto-zoom --auto-target --theme inferno
 
 # Auto-zoom into a bookmark with custom speed and FPS
-.\x64\Release\MandelbrotViewer.exe --ascii --bookmark "Seahorse Valley" --start-zoom 1 --auto-zoom --zoom-speed 1.5 --fps 20
+.\x64\Release\MandelbrotViewer --ascii --bookmark "Seahorse Valley" --start-zoom 1 --auto-zoom --zoom-speed 1.5 --fps 20
 
 # Render a single plain-ASCII snapshot (great for piping or scripting)
-.\x64\Release\MandelbrotViewer.exe --ascii --once --cols 100 --rows 32 --no-color
+.\x64\Release\MandelbrotViewer --ascii --once --cols 100 --rows 32 --no-color
 ```
 
 - **Console Flags**: `--ascii` (or `--console`), `--auto-zoom` / `--no-auto-zoom`, `--once`, `--frames <count>`, `--cols <10..512>` (`--width`), `--rows <5..256>` (`--height`), `--char-aspect <0.5..4.0>` (default `2.0`), `--charset <standard|dense|detailed|simple|custom>`, `--color <auto|truecolor|256|none>`, `--no-color`, `--hud` / `--no-hud`, `--fps <1..60>` (default `15`), plus all shared view, config, bookmark, Julia, theme, and zoom-motion flags.
