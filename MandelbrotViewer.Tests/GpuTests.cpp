@@ -716,15 +716,15 @@ TEST_CASE(Gpu, MultiPassSubpixelsMatchSinglePassAndCpu)
         ASSERT_LT(FilteredPixelError(cpuMovie, multiMovie, cfg.width, cfg.height), maxCpuErr);
     };
 
-    // PerturbLdsBla (zoom = 1e18, maxIterations = 5000 > 2048)
+    // PerturbLdsBla (framed period-16 minibrot at zoom = 1.5e17, maxIterations = 5000 > 2048)
     {
         FractalConfig cfg;
         cfg.width = 81;
         cfg.height = 57;
         cfg.SetCenter(
-            BigFloat("-0.743643887037158704752191506114774"),
-            BigFloat("0.131825904205311970493132056385139"));
-        cfg.zoom = 1e18;
+            BigFloat("-1.99999999655308045362110874015473483139206276235932946992201526"),
+            BigFloat(0.0));
+        cfg.zoom = 1.5e17;
         cfg.maxIterations = 5000;
         verifyScene(cfg, 4.5);
     }
