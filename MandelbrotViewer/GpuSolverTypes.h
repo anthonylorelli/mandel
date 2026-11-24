@@ -78,6 +78,8 @@ namespace Mandelbrot::detail
     };
     static_assert(sizeof(GpuCoordExp) == 8);
 
+    inline constexpr uint32_t kGpuConstantBufferBytes = 128;
+
     struct alignas(16) ShallowCb
     {
         uint32_t width, height, maxIter, smoothFlag;
@@ -86,7 +88,7 @@ namespace Mandelbrot::detail
         uint32_t outRowOffset, pad2, pad3, pad4;
         uint32_t skipX0, skipY0, skipX1, skipY1;
     };
-    static_assert(sizeof(ShallowCb) == 80);
+    static_assert(sizeof(ShallowCb) == 80 && sizeof(ShallowCb) <= kGpuConstantBufferBytes);
 
     struct alignas(16) PerturbLdsCb
     {
@@ -97,7 +99,7 @@ namespace Mandelbrot::detail
         uint32_t outRowOffset, pad1, pad2, pad3;
         uint32_t skipX0, skipY0, skipX1, skipY1;
     };
-    static_assert(sizeof(PerturbLdsCb) == 80);
+    static_assert(sizeof(PerturbLdsCb) == 80 && sizeof(PerturbLdsCb) <= kGpuConstantBufferBytes);
 
     struct alignas(16) PerturbLdsBlaCb
     {
@@ -107,7 +109,7 @@ namespace Mandelbrot::detail
         uint32_t checkCardioid, outRowOffset, stageIterLimit, subRayOffset;
         uint32_t skipX0, skipY0, skipX1, skipY1;
     };
-    static_assert(sizeof(PerturbLdsBlaCb) == 80);
+    static_assert(sizeof(PerturbLdsBlaCb) == 80 && sizeof(PerturbLdsBlaCb) <= kGpuConstantBufferBytes);
 
     struct alignas(16) PerturbDeepExpCb
     {
@@ -123,7 +125,7 @@ namespace Mandelbrot::detail
         uint32_t subRayOffset;
         uint32_t skipX0, skipY0, skipX1, skipY1;
     };
-    static_assert(sizeof(PerturbDeepExpCb) == 80);
+    static_assert(sizeof(PerturbDeepExpCb) == 80 && sizeof(PerturbDeepExpCb) <= kGpuConstantBufferBytes);
 
     struct alignas(16) PostProcessCb
     {
@@ -134,7 +136,7 @@ namespace Mandelbrot::detail
         uint32_t subGroupThreads, subRayOffset, subRayLimit, keyframeOversampled;
         uint32_t skipX0, skipY0, skipX1, skipY1;
     };
-    static_assert(sizeof(PostProcessCb) == 80);
+    static_assert(sizeof(PostProcessCb) == 80 && sizeof(PostProcessCb) <= kGpuConstantBufferBytes);
 
     struct GpuShutterTap
     {
@@ -147,7 +149,7 @@ namespace Mandelbrot::detail
         uint32_t width, height, tapCount, pad0;
         GpuShutterTap taps[kMovieShutterTapCount];
     };
-    static_assert(sizeof(ShutterCb) == 128);
+    static_assert(sizeof(ShutterCb) == 128 && sizeof(ShutterCb) <= kGpuConstantBufferBytes);
 
     inline void SplitFrexpSigned(double v, int extraExp, float& mOut, int32_t& expOut) noexcept
     {

@@ -1033,6 +1033,99 @@ TEST_CASE(Gpu, SinglePassSkipRectMatchesFullKeyframeAndMultiBand)
         1.5e46,
         4500);
 
+    // 6. Border-touching skipRect (x0 == 0, y0 == 0) and defensive RenderGpuMovieBand primary clamping
+    {
+        MoviePlan p;
+        p.width = 64;
+        p.height = 48;
+        p.fps = 24;
+        p.seconds = 1;
+        p.motionSmoothing = false;
+        p.useGpu = true;
+        p.start.width = p.width;
+        p.start.height = p.height;
+        p.start.SetCenter(BigFloat(-0.7436438870371587), BigFloat(0.1318259042053119));
+        p.start.zoom = 2.0;
+        p.start.maxIterations = 250;
+        p.targetX = p.start.hpCenterX;
+        p.targetY = p.start.hpCenterY;
+        p.endZoom = 2.0;
+
+        gpu.SetGpuKeyframeSubpixelBudgetEnabled(false);
+        gpu.SetGpuSinglePassSkipRectEnabled(true);
+        const auto fullKf = RenderMovieKeyframe(p, p.start, nullptr, cancel, {}, p.height, &gpu);
+
+        KeyframeInnerRect borderRect{};
+        borderRect.valid = true;
+        borderRect.x0 = 0;
+        borderRect.y0 = 0;
+        borderRect.x1 = p.width / 2;
+        borderRect.y1 = p.height / 2;
+        const auto borderKf = RenderMovieKeyframe(p, p.start, &borderRect, cancel, {}, 16, &gpu);
+        ASSERT_EQ(fullKf.size(), borderKf.size());
+        double borderMaxDiff = 0.0;
+        for (int y = 0; y < p.height; ++y)
+        {
+            for (int x = 0; x < p.width; ++x)
+            {
+                const size_t i = static_cast<size_t>(y) * static_cast<size_t>(p.width) + static_cast<size_t>(x);
+                if (x < borderRect.x1 && y < borderRect.y1)
+                {
+                    ASSERT_EQ(0u, borderKf[i]);
+                }
+                else
+                {
+                    for (int shift : { 0, 8, 16 })
+                    {
+                        borderMaxDiff = std::max(borderMaxDiff,
+                            std::abs(static_cast<double>((fullKf[i] >> shift) & 255) -
+                                     static_cast<double>((borderKf[i] >> shift) & 255)));
+                    }
+                }
+            }
+        }
+        ASSERT_LE(borderMaxDiff, 1.0);
+
+        // Direct RenderGpuMovieBand: un-inset primary (primary == visible) must be clamped inward by 1 px,
+        // and empty visible with valid primary must skip nothing.
+        auto renderDirectBand = [&](const GpuBandSkipRect* skip) -> std::vector<uint32_t>
+        {
+            std::vector<uint32_t> out(static_cast<size_t>(p.width) * static_cast<size_t>(p.height), 0xDEADBEEFu);
+            ASSERT_TRUE(gpu.BeginGpuMovieFrame(p.width, p.height, false));
+            ASSERT_TRUE(gpu.RenderGpuMovieBand(
+                p.start, 0, p.height, 0,
+                p.theme, p.frequency, p.phase, p.invert, p.interior,
+                out.data(), &cancel, false, skip));
+            ASSERT_TRUE(gpu.FinishGpuMovieFrame(p.width, p.height, out.data(), nullptr));
+            return out;
+        };
+
+        GpuBandSkipRect unInset{};
+        unInset.visible = { 16, 12, 48, 36 };
+        unInset.primary = unInset.visible; // Intentionally missing 1-px inset
+        const auto clampedOut = renderDirectBand(&unInset);
+        for (int y = 0; y < p.height; ++y)
+        {
+            for (int x = 0; x < p.width; ++x)
+            {
+                const size_t i = static_cast<size_t>(y) * static_cast<size_t>(p.width) + static_cast<size_t>(x);
+                if (x >= 16 && x < 48 && y >= 12 && y < 36)
+                {
+                    ASSERT_EQ(0u, clampedOut[i]);
+                }
+                else
+                {
+                    ASSERT_EQ(fullKf[i], clampedOut[i]);
+                }
+            }
+        }
+
+        GpuBandSkipRect emptyVis{};
+        emptyVis.primary = { 16, 12, 48, 36 }; // Must be ignored because visible is empty
+        const auto fullFromEmptyVis = renderDirectBand(&emptyVis);
+        ASSERT_TRUE(fullKf == fullFromEmptyVis);
+    }
+
     gpu.SetGpuKeyframeSubpixelBudgetEnabled(true);
 }
 
@@ -1073,10 +1166,12 @@ TEST_CASE(Gpu, KeyframeSubpixelBudgetPreservesResampledQuality)
         const auto kfSmart = RenderMovieKeyframe(p, kf, nullptr, cancel, {}, kf.height, &gpu);
         ASSERT_EQ(kfFull.size(), kfSmart.size());
 
-        // Compare resampled 1x frames (both at anchor frame and mid-range zoom inside the keyframe).
-        const uint32_t sampleFrames[2]{
+        // Compare resampled 1x frames across the keyframe's full rho range: anchor (1.5x),
+        // mid-range (~1.22x), and lastFrame (~1.0x, matching the deepest keyframe's center).
+        const uint32_t sampleFrames[3]{
             pyramid.keyframes[0].firstFrame,
-            (pyramid.keyframes[0].firstFrame + pyramid.keyframes[0].lastFrame) / 2
+            (pyramid.keyframes[0].firstFrame + pyramid.keyframes[0].lastFrame) / 2,
+            pyramid.keyframes[0].lastFrame
         };
         for (uint32_t frameIdx : sampleFrames)
         {

@@ -160,7 +160,7 @@ namespace Mandelbrot
         if (!device || !context) return;
 
         D3D11_BUFFER_DESC cbDesc{};
-        cbDesc.ByteWidth = 128;
+        cbDesc.ByteWidth = kGpuConstantBufferBytes;
         cbDesc.Usage = D3D11_USAGE_DYNAMIC;
         cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;

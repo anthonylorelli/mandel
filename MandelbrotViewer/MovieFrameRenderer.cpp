@@ -741,9 +741,12 @@ namespace Mandelbrot
                 return output;
             }
             if (cancel.load(std::memory_order_relaxed)) return {};
-            // Single-pass GPU path failed (not canceled); fall back directly to CPU instead of
-            // retrying the GPU per strip.
+            // Single-pass GPU path failed (not canceled); switch to CPU and prepare the full
+            // keyframe CPU deep reference once before rendering fallback strips.
             rectMode = ExecutionMode::Automatic;
+            engine.SetExecutionMode(ExecutionMode::Automatic);
+            engine.PrepareDeepReference(keyframeCamera, &cancel);
+            if (cancel.load(std::memory_order_relaxed)) return {};
         }
 
         uint64_t completedPixels = 0;

@@ -144,8 +144,42 @@ namespace Mandelbrot
         m_impl->context->CSSetConstantBuffers(0, 1, cbs);
         m_impl->UnbindComputeResources();
 
+        // Clamp visible skip rect first, then enforce the 1-px primary halo inset invariant against
+        // every non-border edge of `visible` so CSDetectBoundaries never reads skipped OutIters.
+        GpuSkipRect visSkip{};
+        GpuSkipRect primSkip{};
+        if (bandSkip && bandSkip->visible.IsValid())
+        {
+            const int vx0 = std::clamp(bandSkip->visible.x0, 0, width);
+            const int vx1 = std::clamp(bandSkip->visible.x1, 0, width);
+            const int vy0 = std::clamp(bandSkip->visible.y0, 0, visibleRows);
+            const int vy1 = std::clamp(bandSkip->visible.y1, 0, visibleRows);
+            if (vx0 < vx1 && vy0 < vy1)
+            {
+                visSkip = { vx0, vy0, vx1, vy1 };
+                if (bandSkip->primary.IsValid())
+                {
+                    const int minPrimX = (vx0 > 0) ? (vx0 + 1) : 0;
+                    const int maxPrimX = (vx1 < width) ? (vx1 - 1) : width;
+                    const int minPrimY = (vy0 > 0) ? (topHalo + vy0 + 1) : 0;
+                    const int maxPrimY = (vy1 < visibleRows) ? (topHalo + vy1 - 1) : bandHeight;
+                    if (minPrimX < maxPrimX && minPrimY < maxPrimY)
+                    {
+                        const int px0 = std::clamp(bandSkip->primary.x0, minPrimX, maxPrimX);
+                        const int px1 = std::clamp(bandSkip->primary.x1, minPrimX, maxPrimX);
+                        const int py0 = std::clamp(bandSkip->primary.y0, minPrimY, maxPrimY);
+                        const int py1 = std::clamp(bandSkip->primary.y1, minPrimY, maxPrimY);
+                        if (px0 < px1 && py0 < py1)
+                        {
+                            primSkip = { px0, py0, px1, py1 };
+                        }
+                    }
+                }
+            }
+        }
+
         // Step A: Evaluate primary center pixels across the band (including halo rows) into OutIters in VRAM
-        const GpuSkipRect* primSkipPtr = (bandSkip && bandSkip->primary.IsValid()) ? &bandSkip->primary : nullptr;
+        const GpuSkipRect* primSkipPtr = primSkip.IsValid() ? &primSkip : nullptr;
         bool primaryCanceled = false;
         if (!m_impl->DispatchPrimaryPass(
                 mode, bandConfig, refState, juliaCx, juliaCy, juliaBailout2,
@@ -171,19 +205,12 @@ namespace Mandelbrot
         postCb.subGroupThreads =
             (mode == GpuShaderMode::PerturbLds || mode == GpuShaderMode::PerturbLdsBla) ? 512u : 256u;
         postCb.keyframeOversampled = colorParams.keyframeOversampled ? 1u : 0u;
-        if (bandSkip && bandSkip->visible.IsValid())
+        if (visSkip.IsValid())
         {
-            const int vx0 = std::clamp(bandSkip->visible.x0, 0, width);
-            const int vx1 = std::clamp(bandSkip->visible.x1, 0, width);
-            const int vy0 = std::clamp(bandSkip->visible.y0, 0, visibleRows);
-            const int vy1 = std::clamp(bandSkip->visible.y1, 0, visibleRows);
-            if (vx0 < vx1 && vy0 < vy1)
-            {
-                postCb.skipX0 = static_cast<uint32_t>(vx0);
-                postCb.skipY0 = static_cast<uint32_t>(vy0);
-                postCb.skipX1 = static_cast<uint32_t>(vx1);
-                postCb.skipY1 = static_cast<uint32_t>(vy1);
-            }
+            postCb.skipX0 = static_cast<uint32_t>(visSkip.x0);
+            postCb.skipY0 = static_cast<uint32_t>(visSkip.y0);
+            postCb.skipX1 = static_cast<uint32_t>(visSkip.x1);
+            postCb.skipY1 = static_cast<uint32_t>(visSkip.y1);
         }
 
         bool subCanceled = false;
