@@ -44,10 +44,14 @@ namespace Mandelbrot
                 { &GetPerturbLdsBlaShaderSource,  "CSSubpixels" },
                 { &GetPerturbLdsBlaShaderSource,  "CSPrimaryStage0" },
                 { &GetPerturbLdsBlaShaderSource,  "CSPrimaryResume" },
+                { &GetPerturbLdsBlaShaderSource,  "CSSubpixelsStage0" },
+                { &GetPerturbLdsBlaShaderSource,  "CSSubpixelsResume" },
                 { &GetPerturbDeepExpShaderSource, "CSPrimary" },
                 { &GetPerturbDeepExpShaderSource, "CSSubpixels" },
                 { &GetPerturbDeepExpShaderSource, "CSPrimaryStage0" },
                 { &GetPerturbDeepExpShaderSource, "CSPrimaryResume" },
+                { &GetPerturbDeepExpShaderSource, "CSSubpixelsStage0" },
+                { &GetPerturbDeepExpShaderSource, "CSSubpixelsResume" },
                 { &GetMovieDetectShaderSource,    "CSDetectBoundaries" },
                 { &GetMovieDetectShaderSource,    "CSBuildIndirectArgs" },
                 { &GetMovieDetectShaderSource,    "CSBuildActiveIndirectArgs" },
@@ -542,7 +546,7 @@ namespace Mandelbrot
     {
         ID3D11UnorderedAccessView* nullUavs[5]{};
         context->CSSetUnorderedAccessViews(0, 5, nullUavs, nullptr);
-        ID3D11ShaderResourceView* nullSrvs[8]{};
-        context->CSSetShaderResources(0, 8, nullSrvs);
+        ID3D11ShaderResourceView* nullSrvs[9]{};
+        context->CSSetShaderResources(0, 9, nullSrvs);
     }
 }

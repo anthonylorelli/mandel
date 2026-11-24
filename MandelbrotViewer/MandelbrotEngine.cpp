@@ -358,6 +358,16 @@ namespace Mandelbrot
             EnsureGpuSolver().EndMovieFrame(width, height, outPixels, shutterParams);
     }
 
+    void MandelbrotEngine::SetGpuMultiPassSubpixelsEnabled(bool enabled)
+    {
+        EnsureGpuSolver().SetMultiPassSubpixelsEnabled(enabled);
+    }
+
+    void MandelbrotEngine::SetGpuMultiPassSubpixelBatchLimit(size_t maxRays)
+    {
+        EnsureGpuSolver().SetMultiPassSubpixelBatchLimit(maxRays);
+    }
+
     void MandelbrotEngine::ZoomViewport(
         FractalConfig& config,
         double factor,

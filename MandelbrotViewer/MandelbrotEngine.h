@@ -93,6 +93,8 @@ namespace Mandelbrot
             int height,
             uint32_t* outPixels,
             const GpuMovieShutterParams* shutterParams = nullptr);
+        void SetGpuMultiPassSubpixelsEnabled(bool enabled);
+        void SetGpuMultiPassSubpixelBatchLimit(size_t maxRays);
 
         static void ZoomViewport(
             FractalConfig& config,

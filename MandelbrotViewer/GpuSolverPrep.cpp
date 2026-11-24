@@ -414,7 +414,8 @@ namespace Mandelbrot
         uint32_t outRowOffset,
         uint32_t subTotal,
         uint32_t stageIterLimit,
-        uint32_t heightLimit)
+        uint32_t heightLimit,
+        uint32_t subRayOffset)
     {
         const uint32_t effectiveHeight = (heightLimit > 0u)
             ? std::min<uint32_t>(heightLimit, static_cast<uint32_t>(config.height))
@@ -474,6 +475,7 @@ namespace Mandelbrot
             cb.checkCardioid = (config.zoom < 1e6) ? 1u : 0u;
             cb.outRowOffset = outRowOffset;
             cb.stageIterLimit = (stageIterLimit > 0u) ? stageIterLimit : cb.maxIter;
+            cb.subRayOffset = subRayOffset;
             return UploadBufferDiscard(constantBuffer.Get(), &cb, sizeof(cb));
         }
         case GpuShaderMode::PerturbDeepExp:
@@ -496,6 +498,7 @@ namespace Mandelbrot
             cb.refCy = static_cast<float>(refState.refCyDouble);
             cb.outRowOffset = outRowOffset;
             cb.stageIterLimit = (stageIterLimit > 0u) ? stageIterLimit : cb.maxIter;
+            cb.subRayOffset = subRayOffset;
             return UploadBufferDiscard(constantBuffer.Get(), &cb, sizeof(cb));
         }
         }
@@ -504,9 +507,10 @@ namespace Mandelbrot
     void GpuFractalSolver::Impl::BindFractalSrvs(
         GpuShaderMode mode,
         ID3D11ShaderResourceView* activeSubIdxSrv,
-        ID3D11ShaderResourceView* activeSubCountSrv)
+        ID3D11ShaderResourceView* activeSubCountSrv,
+        ID3D11ShaderResourceView* subpixelPixelsSrv)
     {
-        ID3D11ShaderResourceView* srvs[8]{};
+        ID3D11ShaderResourceView* srvs[9]{};
         switch (mode)
         {
         case GpuShaderMode::Shallow:
@@ -539,7 +543,8 @@ namespace Mandelbrot
             break;
         }
         srvs[7] = activeSubCountSrv;
-        context->CSSetShaderResources(0, 8, srvs);
+        srvs[8] = subpixelPixelsSrv;
+        context->CSSetShaderResources(0, 9, srvs);
     }
 
     bool GpuFractalSolver::Impl::DispatchGpuSubpixelPass(
@@ -549,8 +554,13 @@ namespace Mandelbrot
         double juliaCx,
         double juliaCy,
         double juliaBailout2,
-        const PostProcessCb& postCb)
+        const PostProcessCb& postCb,
+        const std::atomic<bool>* cancelToken,
+        bool& outCanceled)
     {
+        outCanceled = false;
+        auto canceled = [&] { return cancelToken && cancelToken->load(std::memory_order_relaxed); };
+
         ID3D11ComputeShader* csDetect = EnsureShader(GpuShaderId::PostDetect);
         ID3D11ComputeShader* csBuildInd = EnsureShader(GpuShaderId::PostBuildIndirect);
         if (!csDetect || !csBuildInd)
@@ -567,8 +577,8 @@ namespace Mandelbrot
             subCounterUav.Get()
         };
         context->CSSetUnorderedAccessViews(0, 3, detectUavs, nullptr);
-        ID3D11ShaderResourceView* detectSrvs[8]{ outItersSrv.Get() };
-        context->CSSetShaderResources(0, 8, detectSrvs);
+        ID3D11ShaderResourceView* detectSrvs[9]{ outItersSrv.Get() };
+        context->CSSetShaderResources(0, 9, detectSrvs);
 
         if (!UploadBufferDiscard(constantBuffer.Get(), &postCb, sizeof(postCb)))
         {
@@ -581,21 +591,190 @@ namespace Mandelbrot
             static_cast<UINT>((postCb.visibleRows + 15u) / 16u),
             1);
 
-        // Build DispatchIndirect thread-group count from compacted boundary counter.
-        ID3D11ShaderResourceView* nullSrvs8[8]{};
-        context->CSSetShaderResources(0, 8, nullSrvs8);
+        const uint32_t maxIterU = static_cast<uint32_t>(config.maxIterations);
+        const size_t visiblePixels = static_cast<size_t>(postCb.width) * static_cast<size_t>(postCb.visibleRows);
+        const size_t maxSubRays = visiblePixels * 4;
+        const size_t batchCap = std::clamp<size_t>(multiPassSubpixelBatchLimit, 1, kMaxMultiPassSubRays);
+        const size_t allocRays = std::min(maxSubRays, batchCap);
+
+        const bool useMultiPassSub =
+            multiPassSubpixelsEnabled &&
+            (mode == GpuShaderMode::PerturbLdsBla || mode == GpuShaderMode::PerturbDeepExp) &&
+            maxIterU > kMultiPassMinMaxIter &&
+            allocRays > 0 &&
+            EnsureStructuredUavBuffer(
+                allocRays, sizeof(GpuPerturbState),
+                activeStateBuf, activeStateUav, activeStateCapElems) &&
+            EnsureTypedUavSrvBuffer(
+                allocRays, sizeof(uint32_t), DXGI_FORMAT_R32_UINT,
+                activeIdxBuf[0], activeIdxUav[0], activeIdxSrv[0], activeIdxCapElems[0]) &&
+            EnsureTypedUavSrvBuffer(
+                allocRays, sizeof(uint32_t), DXGI_FORMAT_R32_UINT,
+                activeIdxBuf[1], activeIdxUav[1], activeIdxSrv[1], activeIdxCapElems[1]);
+
+        if (useMultiPassSub)
+        {
+            ID3D11ComputeShader* csSubStage0 = EnsureShader(
+                (mode == GpuShaderMode::PerturbLdsBla) ? GpuShaderId::LdsBlaSubStage0 : GpuShaderId::DeepExpSubStage0);
+            ID3D11ComputeShader* csActiveInd = EnsureShader(GpuShaderId::PostBuildActiveIndirect);
+            ID3D11ComputeShader* csSubResume = EnsureShader(
+                (mode == GpuShaderMode::PerturbLdsBla) ? GpuShaderId::LdsBlaSubResume : GpuShaderId::DeepExpSubResume);
+            if (!csSubStage0 || !csActiveInd || !csSubResume)
+            {
+                UnbindComputeResources();
+                return false;
+            }
+
+            const uint32_t stage0Limit = std::min<uint32_t>(1024u, maxIterU);
+            const uint32_t resumeGroupThreads = (mode == GpuShaderMode::PerturbLdsBla) ? 512u : 256u;
+            PostProcessCb activeIndCb{};
+            activeIndCb.subGroupThreads = resumeGroupThreads;
+
+            for (size_t batchOffset = 0; batchOffset < maxSubRays; batchOffset += batchCap)
+            {
+                if (canceled())
+                {
+                    UnbindComputeResources();
+                    outCanceled = true;
+                    return true;
+                }
+
+                const uint32_t batchLimit = static_cast<uint32_t>(std::min(batchCap, maxSubRays - batchOffset));
+                const uint32_t batchOffsetU = static_cast<uint32_t>(batchOffset);
+
+                PostProcessCb batchPostCb = postCb;
+                batchPostCb.subRayOffset = batchOffsetU;
+                batchPostCb.subRayLimit = batchLimit;
+
+                // Build Stage-0 DispatchIndirect thread-group count for this ray batch.
+                UnbindComputeResources();
+                if (!UploadBufferDiscard(constantBuffer.Get(), &batchPostCb, sizeof(batchPostCb)))
+                {
+                    return false;
+                }
+                ID3D11UnorderedAccessView* buildIndUavs[5]{ indirectArgsUav.Get(), nullptr, nullptr, nullptr, nullptr };
+                context->CSSetUnorderedAccessViews(0, 5, buildIndUavs, nullptr);
+                ID3D11ShaderResourceView* buildIndSrvs[9]{};
+                buildIndSrvs[5] = subCounterSrv.Get();
+                context->CSSetShaderResources(0, 9, buildIndSrvs);
+                context->CSSetShader(csBuildInd, nullptr, 0);
+                context->Dispatch(1, 1, 1);
+
+                // Stage 0: evaluate 0..stage0Limit and compact surviving boundary rays into activeIdxBuf[0].
+                UnbindComputeResources();
+                context->ClearUnorderedAccessViewUint(activeCountUav[0].Get(), zeros);
+
+                BindFractalSrvs(mode, gpuSubIdxSrv.Get(), subCounterSrv.Get(), nullptr);
+                ID3D11UnorderedAccessView* stage0Uavs[5]{
+                    nullptr,
+                    subOutUav.Get(),
+                    activeStateUav.Get(),
+                    activeIdxUav[0].Get(),
+                    activeCountUav[0].Get()
+                };
+                context->CSSetUnorderedAccessViews(0, 5, stage0Uavs, nullptr);
+                context->CSSetShader(csSubStage0, nullptr, 0);
+
+                if (!UploadFractalCb(
+                    mode, config, refState, juliaCx, juliaCy, juliaBailout2,
+                    0u, 0u, batchLimit, stage0Limit, 0u, batchOffsetU))
+                {
+                    UnbindComputeResources();
+                    return false;
+                }
+                context->DispatchIndirect(indirectArgsBuf.Get(), 0);
+                context->Flush();
+
+                int activeIn = 0;
+                uint32_t prevLimit = stage0Limit;
+                uint32_t stageStep = 3072u;
+                while (prevLimit < maxIterU)
+                {
+                    if (canceled())
+                    {
+                        UnbindComputeResources();
+                        outCanceled = true;
+                        return true;
+                    }
+                    const uint32_t nextLimit = std::min<uint32_t>(maxIterU, prevLimit + stageStep);
+                    const bool isFinalStage = (nextLimit >= maxIterU);
+                    const int activeOut = 1 - activeIn;
+
+                    // Build DispatchIndirect args for surviving active subpixel rays.
+                    UnbindComputeResources();
+                    if (!UploadBufferDiscard(constantBuffer.Get(), &activeIndCb, sizeof(activeIndCb)))
+                    {
+                        return false;
+                    }
+                    ID3D11UnorderedAccessView* indUavs[5]{ indirectArgsUav.Get(), nullptr, nullptr, nullptr, nullptr };
+                    context->CSSetUnorderedAccessViews(0, 5, indUavs, nullptr);
+                    ID3D11ShaderResourceView* indSrvs[9]{};
+                    indSrvs[5] = activeCountSrv[activeIn].Get();
+                    context->CSSetShaderResources(0, 9, indSrvs);
+                    context->CSSetShader(csActiveInd, nullptr, 0);
+                    context->Dispatch(1, 1, 1);
+
+                    // Resume only surviving boundary rays in densely packed warps.
+                    UnbindComputeResources();
+                    if (!isFinalStage)
+                    {
+                        context->ClearUnorderedAccessViewUint(activeCountUav[activeOut].Get(), zeros);
+                    }
+
+                    BindFractalSrvs(
+                        mode,
+                        activeIdxSrv[activeIn].Get(),
+                        activeCountSrv[activeIn].Get(),
+                        gpuSubIdxSrv.Get());
+                    ID3D11UnorderedAccessView* resumeUavs[5]{
+                        nullptr,
+                        subOutUav.Get(),
+                        activeStateUav.Get(),
+                        isFinalStage ? nullptr : activeIdxUav[activeOut].Get(),
+                        isFinalStage ? nullptr : activeCountUav[activeOut].Get()
+                    };
+                    context->CSSetUnorderedAccessViews(0, 5, resumeUavs, nullptr);
+                    context->CSSetShader(csSubResume, nullptr, 0);
+
+                    if (!UploadFractalCb(
+                        mode, config, refState, juliaCx, juliaCy, juliaBailout2,
+                        0u, 0u, 0u, nextLimit, 0u, batchOffsetU))
+                    {
+                        UnbindComputeResources();
+                        return false;
+                    }
+                    context->DispatchIndirect(indirectArgsBuf.Get(), 0);
+                    context->Flush();
+
+                    activeIn = activeOut;
+                    prevLimit = nextLimit;
+                    stageStep = (stageStep < 8192u) ? 8192u : 12288u;
+                }
+            }
+
+            UnbindComputeResources();
+            return true;
+        }
+
+        // Single-pass fallback: build DispatchIndirect thread-group count from compacted boundary counter.
+        UnbindComputeResources();
+        if (!UploadBufferDiscard(constantBuffer.Get(), &postCb, sizeof(postCb)))
+        {
+            return false;
+        }
         ID3D11UnorderedAccessView* buildIndUavs[3]{ indirectArgsUav.Get(), nullptr, nullptr };
         context->CSSetUnorderedAccessViews(0, 3, buildIndUavs, nullptr);
-        ID3D11ShaderResourceView* buildIndSrvs[8]{};
+        ID3D11ShaderResourceView* buildIndSrvs[9]{};
         buildIndSrvs[5] = subCounterSrv.Get();
-        context->CSSetShaderResources(0, 8, buildIndSrvs);
+        context->CSSetShaderResources(0, 9, buildIndSrvs);
         context->CSSetShader(csBuildInd, nullptr, 0);
         context->Dispatch(1, 1, 1);
 
         // Evaluate 4x subpixels directly on GPU via DispatchIndirect (zero CPU round-trip).
+        UnbindComputeResources();
         ID3D11UnorderedAccessView* subUavs[3]{ nullptr, subOutUav.Get(), nullptr };
         context->CSSetUnorderedAccessViews(0, 3, subUavs, nullptr);
-        BindFractalSrvs(mode, gpuSubIdxSrv.Get(), subCounterSrv.Get());
+        BindFractalSrvs(mode, gpuSubIdxSrv.Get(), subCounterSrv.Get(), nullptr);
 
         if (!UploadFractalCb(
             mode, config, refState, juliaCx, juliaCy, juliaBailout2,
@@ -606,6 +785,7 @@ namespace Mandelbrot
             return false;
         }
         context->DispatchIndirect(indirectArgsBuf.Get(), 0);
+        UnbindComputeResources();
         return true;
     }
 

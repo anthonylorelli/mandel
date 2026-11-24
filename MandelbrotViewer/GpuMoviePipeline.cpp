@@ -169,8 +169,9 @@ namespace Mandelbrot
         postCb.subGroupThreads =
             (mode == GpuShaderMode::PerturbLds || mode == GpuShaderMode::PerturbLdsBla) ? 512u : 256u;
 
+        bool subCanceled = false;
         if (!m_impl->DispatchGpuSubpixelPass(
-            mode, bandConfig, refState, juliaCx, juliaCy, juliaBailout2, postCb))
+            mode, bandConfig, refState, juliaCx, juliaCy, juliaBailout2, postCb, cancelToken, subCanceled) || subCanceled)
         {
             return false;
         }
@@ -178,8 +179,6 @@ namespace Mandelbrot
         // Step E: Fused 4x supersampled palette coloring into the full-frame (or strip) BGRA buffer
         const UINT visGroupX = static_cast<UINT>((width + 15) / 16);
         const UINT visGroupY = static_cast<UINT>((visibleRows + 15) / 16);
-        ID3D11ShaderResourceView* nullSrvs8[8]{};
-        m_impl->context->CSSetShaderResources(0, 8, nullSrvs8);
         ID3D11UnorderedAccessView* resolveUavs[3]{ m_impl->accumPixelsUav.Get(), nullptr, nullptr };
         m_impl->context->CSSetUnorderedAccessViews(0, 3, resolveUavs, nullptr);
 

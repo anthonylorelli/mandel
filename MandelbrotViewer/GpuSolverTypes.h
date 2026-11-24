@@ -12,6 +12,7 @@ namespace Mandelbrot::detail
     inline constexpr size_t kMaxSingleSyncInteractivePixels = 4ULL * 1024 * 1024;
     inline constexpr uint64_t kMaxPrimaryIterBudget = 6'000'000'000ULL;
     inline constexpr size_t kMaxSubpixelBatchPixels = 2ULL * 1024 * 1024;
+    inline constexpr size_t kMaxMultiPassSubRays = 4ULL * 1024 * 1024;
     inline constexpr size_t kMaxFullFrameAccumPixels = 16ULL * 1024 * 1024;
     inline constexpr size_t kD3D11SafeMaxBufferBytes = 128ULL * 1024 * 1024;
     inline constexpr uint32_t kIndirectSubpixelSentinel = 0xFFFFFFFFu;
@@ -101,7 +102,7 @@ namespace Mandelbrot::detail
         uint32_t width, height, maxIter, refLen;
         uint32_t smoothFlag, blaNumLevels, rowOffset, subpixelTotal;
         float blaMaxRadius, refCx, refCy, pad0;
-        uint32_t checkCardioid, outRowOffset, stageIterLimit, pad4;
+        uint32_t checkCardioid, outRowOffset, stageIterLimit, subRayOffset;
     };
     static_assert(sizeof(PerturbLdsBlaCb) == 64);
 
@@ -116,7 +117,7 @@ namespace Mandelbrot::detail
         float refCy;
         uint32_t outRowOffset;
         uint32_t stageIterLimit;
-        float pad2;
+        uint32_t subRayOffset;
     };
     static_assert(sizeof(PerturbDeepExpCb) == 64);
 
@@ -126,7 +127,7 @@ namespace Mandelbrot::detail
         uint32_t destRowOffset, fractalType, smoothFlag, invertFlag;
         float frequency, phaseOffset;
         uint32_t interiorColor, avgRgb;
-        uint32_t subGroupThreads, pad0, pad1, pad2;
+        uint32_t subGroupThreads, subRayOffset, subRayLimit, pad2;
     };
     static_assert(sizeof(PostProcessCb) == 64);
 

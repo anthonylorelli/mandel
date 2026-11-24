@@ -30,10 +30,14 @@ namespace Mandelbrot
         LdsBlaSub,
         LdsBlaStage0,
         LdsBlaResume,
+        LdsBlaSubStage0,
+        LdsBlaSubResume,
         DeepExpPrim,
         DeepExpSub,
         DeepExpStage0,
         DeepExpResume,
+        DeepExpSubStage0,
+        DeepExpSubResume,
         PostDetect,
         PostBuildIndirect,
         PostBuildActiveIndirect,
@@ -59,6 +63,8 @@ namespace Mandelbrot
         std::mutex mutex;
         bool available{ false };
         bool usingSoftwareAdapter{ false };
+        bool multiPassSubpixelsEnabled{ true };
+        size_t multiPassSubpixelBatchLimit{ detail::kMaxMultiPassSubRays };
 
         ComPtr<ID3D11Device> device;
         ComPtr<ID3D11DeviceContext> context;
@@ -290,12 +296,14 @@ namespace Mandelbrot
             uint32_t outRowOffset,
             uint32_t subTotal,
             uint32_t stageIterLimit = 0u,
-            uint32_t heightLimit = 0u);
+            uint32_t heightLimit = 0u,
+            uint32_t subRayOffset = 0u);
 
         void BindFractalSrvs(
             detail::GpuShaderMode mode,
             ID3D11ShaderResourceView* activeSubIdxSrv,
-            ID3D11ShaderResourceView* activeSubCountSrv);
+            ID3D11ShaderResourceView* activeSubCountSrv,
+            ID3D11ShaderResourceView* subpixelPixelsSrv = nullptr);
 
         ID3D11ComputeShader* EnsureShader(GpuShaderId id);
         bool SetPrimaryShader(detail::GpuShaderMode mode);
@@ -315,7 +323,8 @@ namespace Mandelbrot
             bool& outCanceled);
 
         // Runs GPU 3x3 boundary detection, indirect-dispatch argument building, and
-        // DispatchIndirect 4x subpixel evaluation for outItersBuf -> subOutBuf.
+        // DispatchIndirect 4x subpixel evaluation (with multi-pass active-ray compaction
+        // when eligible) for outItersBuf -> subOutBuf.
         bool DispatchGpuSubpixelPass(
             detail::GpuShaderMode mode,
             const FractalConfig& config,
@@ -323,7 +332,9 @@ namespace Mandelbrot
             double juliaCx,
             double juliaCy,
             double juliaBailout2,
-            const detail::PostProcessCb& postCb);
+            const detail::PostProcessCb& postCb,
+            const std::atomic<bool>* cancelToken,
+            bool& outCanceled);
 
         // Copies `bytes` from `srcBuf` to `stagingBuf`, maps, copies to `dst`, and unmaps.
         // Calls CheckDeviceLost() on Map failure.

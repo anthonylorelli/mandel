@@ -36,6 +36,22 @@ namespace Mandelbrot
         return m_impl && m_impl->CanSupportConfig(config);
     }
 
+    void GpuFractalSolver::SetMultiPassSubpixelsEnabled(bool enabled) noexcept
+    {
+        if (!m_impl) return;
+        std::lock_guard lock(m_impl->mutex);
+        m_impl->multiPassSubpixelsEnabled = enabled;
+    }
+
+    void GpuFractalSolver::SetMultiPassSubpixelBatchLimit(size_t maxRays) noexcept
+    {
+        if (!m_impl) return;
+        std::lock_guard lock(m_impl->mutex);
+        m_impl->multiPassSubpixelBatchLimit = (maxRays == 0)
+            ? kMaxMultiPassSubRays
+            : std::clamp<size_t>(maxRays, 1, kMaxMultiPassSubRays);
+    }
+
     bool GpuFractalSolver::Impl::DispatchPrimaryPass(
         GpuShaderMode mode,
         const FractalConfig& config,
@@ -344,12 +360,17 @@ namespace Mandelbrot
                 postCb.subGroupThreads =
                     (mode == GpuShaderMode::PerturbLds || mode == GpuShaderMode::PerturbLdsBla) ? 512u : 256u;
 
+                bool subCanceled = false;
                 if (!m_impl->DispatchGpuSubpixelPass(
-                    mode, config, refState, juliaCx, juliaCy, juliaBailout2, postCb))
+                    mode, config, refState, juliaCx, juliaCy, juliaBailout2, postCb, cancelToken, subCanceled))
                 {
                     return false;
                 }
-                m_impl->UnbindComputeResources();
+                if (subCanceled)
+                {
+                    subpixelSamples->clear();
+                    return true;
+                }
 
                 // Queue counter copy alongside primary iteration copy so there is only one GPU wait
                 D3D11_BOX countBox{ 0, 0, 0, sizeof(uint32_t), 1, 1 };

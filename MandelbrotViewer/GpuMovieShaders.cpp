@@ -22,7 +22,7 @@ cbuffer PostParams : register(b0)
     uint interiorColor;
     uint avgRgb;
     uint subGroupThreads;
-    uint pad0, pad1, pad2;
+    uint subRayOffset, subRayLimit, pad2;
 };
 
 struct GpuPixelSubInfo
@@ -141,7 +141,9 @@ void CSDetectBoundaries(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex
 [numthreads(1, 1, 1)]
 void CSBuildIndirectArgs(uint3 tid : SV_DispatchThreadID)
 {
-    uint subTotal = InSubCounter[0] * 4u;
+    uint totalRays = InSubCounter[0] * 4u;
+    uint rem = (totalRays > subRayOffset) ? (totalRays - subRayOffset) : 0u;
+    uint subTotal = (subRayLimit > 0u) ? min(rem, subRayLimit) : rem;
     uint groups = (subTotal > 0u) ? ((subTotal + subGroupThreads - 1u) / subGroupThreads) : 0u;
     OutSubpixelIndices[0] = (groups > 32768u) ? 32768u : groups;
     OutSubpixelIndices[1] = (groups > 32768u) ? ((groups + 32767u) / 32768u) : 1u;
@@ -189,7 +191,7 @@ cbuffer PostParams : register(b0)
     uint interiorColor;
     uint avgRgb;
     uint subGroupThreads;
-    uint pad0, pad1, pad2;
+    uint subRayOffset, subRayLimit, pad2;
 };
 
 struct GpuPixelSubInfo
