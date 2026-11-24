@@ -52,6 +52,8 @@ namespace Mandelbrot
         if (!m_gpuSolver)
         {
             m_gpuSolver = std::make_unique<GpuFractalSolver>(m_allowSoftwareGpu);
+            m_gpuSolver->SetMultiPassSubpixelsEnabled(m_gpuMultiPassSubpixelsEnabled);
+            m_gpuSolver->SetMultiPassSubpixelBatchLimit(m_gpuMultiPassSubpixelBatchLimit);
         }
         return *m_gpuSolver;
     }
@@ -360,12 +362,20 @@ namespace Mandelbrot
 
     void MandelbrotEngine::SetGpuMultiPassSubpixelsEnabled(bool enabled)
     {
-        EnsureGpuSolver().SetMultiPassSubpixelsEnabled(enabled);
+        m_gpuMultiPassSubpixelsEnabled = enabled;
+        if (m_gpuSolver)
+        {
+            m_gpuSolver->SetMultiPassSubpixelsEnabled(enabled);
+        }
     }
 
     void MandelbrotEngine::SetGpuMultiPassSubpixelBatchLimit(size_t maxRays)
     {
-        EnsureGpuSolver().SetMultiPassSubpixelBatchLimit(maxRays);
+        m_gpuMultiPassSubpixelBatchLimit = maxRays;
+        if (m_gpuSolver)
+        {
+            m_gpuSolver->SetMultiPassSubpixelBatchLimit(maxRays);
+        }
     }
 
     void MandelbrotEngine::ZoomViewport(

@@ -6,6 +6,7 @@
 #include "MandelbrotEngine.h"
 #include "MovieExport.h"
 #include "MoviePlan.h"
+#include <cstdlib>
 
 using namespace Mandelbrot;
 
@@ -749,6 +750,18 @@ TEST_CASE(Gpu, BenchmarkMultiPassSubpixelsDeepZoom)
     MandelbrotEngine gpu(ExecutionMode::Gpu, true);
     ASSERT_TRUE(gpu.IsGpuAvailable());
 
+    bool fullBench = false;
+#if defined(_WIN32)
+    char* envVal = nullptr;
+    size_t envLen = 0;
+    if (_dupenv_s(&envVal, &envLen, "MANDEL_RUN_GPU_BENCH") == 0 && envVal)
+    {
+        fullBench = (envVal[0] == '1');
+        std::free(envVal);
+    }
+#endif
+    const int trials = fullBench ? 3 : 1;
+
     auto medianOf = [](std::vector<double> vals) -> double
     {
         std::sort(vals.begin(), vals.end());
@@ -792,11 +805,10 @@ TEST_CASE(Gpu, BenchmarkMultiPassSubpixelsDeepZoom)
         }
 
         // Alternating A/B trials to minimize background scheduling drift.
-        constexpr int kTrials = 3;
         std::vector<double> singleMovieTimes, multiMovieTimes;
         std::vector<double> primaryOnlyTimes, singleComputeTimes, multiComputeTimes;
 
-        for (int t = 0; t < kTrials; ++t)
+        for (int t = 0; t < trials; ++t)
         {
             const bool multiFirst = (t & 1) != 0;
             auto measureMovie = [&](bool multi) -> double
@@ -855,8 +867,8 @@ TEST_CASE(Gpu, BenchmarkMultiPassSubpixelsDeepZoom)
     // 1. PerturbLdsBla framed period-16 minibrot (zoom = 1.5e17, maxIter = 16000) — sharp interior/exterior boundary
     {
         FractalConfig cfg;
-        cfg.width = 128;
-        cfg.height = 96;
+        cfg.width = fullBench ? 192 : 96;
+        cfg.height = fullBench ? 144 : 72;
         cfg.SetCenter(
             BigFloat("-1.99999999655308045362110874015473483139206276235932946992201526"),
             BigFloat(0.0));
@@ -868,8 +880,8 @@ TEST_CASE(Gpu, BenchmarkMultiPassSubpixelsDeepZoom)
     // 2. Seahorse Valley deep minibrot edge (zoom = 5e23, maxIter = 18000) — high-period interior + 14k filaments
     {
         FractalConfig cfg;
-        cfg.width = 112;
-        cfg.height = 84;
+        cfg.width = fullBench ? 160 : 80;
+        cfg.height = fullBench ? 120 : 60;
         cfg.SetCenter(
             BigFloat("-0.743643887037158704752191506114774"),
             BigFloat("0.131825904205311970493132056385139"));
@@ -881,8 +893,8 @@ TEST_CASE(Gpu, BenchmarkMultiPassSubpixelsDeepZoom)
     // 3. PerturbLdsBla escaping filament spread (zoom = 2.5e15, maxIter = 16000)
     {
         FractalConfig cfg;
-        cfg.width = 128;
-        cfg.height = 96;
+        cfg.width = fullBench ? 192 : 96;
+        cfg.height = fullBench ? 144 : 72;
         cfg.SetCenter(
             BigFloat("-1.7497591451303665161306330584152263895062626668"),
             BigFloat("0.0000000036851379492923185000018595062626668"));
@@ -894,8 +906,8 @@ TEST_CASE(Gpu, BenchmarkMultiPassSubpixelsDeepZoom)
     // 4. PerturbDeepExp ultra-deep period-40 minibrot (zoom = 1.5e46, maxIter = 12000) — FloatExp interior/exterior boundary
     {
         FractalConfig cfg;
-        cfg.width = 112;
-        cfg.height = 84;
+        cfg.width = fullBench ? 160 : 80;
+        cfg.height = fullBench ? 120 : 60;
         cfg.SetCenter(
             BigFloat("-1.99999999999999999999998775408187877626974572395292894510228233"),
             BigFloat(0.0));

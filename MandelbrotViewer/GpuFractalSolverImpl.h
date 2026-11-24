@@ -310,6 +310,24 @@ namespace Mandelbrot
         bool SetSubpixelShader(detail::GpuShaderMode mode);
         void UnbindComputeResources() noexcept;
 
+        // Runs the ping-pong active-compaction resume stages after Stage 0 for either primary
+        // pixels (isSubpixelPass = false) or boundary subpixel rays (isSubpixelPass = true).
+        bool DispatchMultiPassResumeLoop(
+            detail::GpuShaderMode mode,
+            const FractalConfig& config,
+            const DeepReferenceState& refState,
+            double juliaCx,
+            double juliaCy,
+            double juliaBailout2,
+            ID3D11ComputeShader* csActiveInd,
+            ID3D11ComputeShader* csResume,
+            uint32_t stage0Limit,
+            bool isSubpixelPass,
+            uint32_t subRayOffset,
+            bool flushEveryStage,
+            const std::atomic<bool>* cancelToken,
+            bool& outCanceled);
+
         // Dispatches primary center-pixel evaluation into outItersBuf using multi-pass
         // active-pixel compaction when eligible, or TDR-safe single-pass row chunks otherwise.
         bool DispatchPrimaryPass(
