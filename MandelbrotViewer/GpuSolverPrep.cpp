@@ -625,7 +625,7 @@ namespace Mandelbrot
                 return false;
             }
 
-            const uint32_t stage0Limit = std::min<uint32_t>(2048u, std::max<uint32_t>(1024u, maxIterU / 2u));
+            const uint32_t stage0Limit = std::min<uint32_t>(1024u, maxIterU);
             const uint32_t resumeGroupThreads = (mode == GpuShaderMode::PerturbLdsBla) ? 512u : 256u;
             PostProcessCb activeIndCb{};
             activeIndCb.subGroupThreads = resumeGroupThreads;
@@ -686,7 +686,7 @@ namespace Mandelbrot
 
                 int activeIn = 0;
                 uint32_t prevLimit = stage0Limit;
-                uint32_t stageStep = 4096u;
+                uint32_t stageStep = 3072u;
                 while (prevLimit < maxIterU)
                 {
                     if (canceled())
