@@ -27,7 +27,7 @@ cbuffer Params : register(b0)
     float refCy;
     uint outRowOffset;
     uint stageIterLimit;
-    float pad2;
+    uint subRayOffset;
 };
 
 struct GpuOrbitPointExp
@@ -67,6 +67,7 @@ StructuredBuffer<GpuBlaBlockExp> BlaBlocks : register(t4);
 StructuredBuffer<uint2> BlaMeta : register(t5);
 Buffer<uint> SubpixelIndices : register(t6);
 Buffer<uint> SubpixelCountSrv : register(t7);
+Buffer<uint> SubpixelPixels : register(t8);
 RWStructuredBuffer<float> OutIters : register(u0);
 RWStructuredBuffer<float> OutSubpixelsFlat : register(u1);
 RWStructuredBuffer<GpuPerturbState> ActiveState : register(u2);
@@ -552,6 +553,131 @@ void CSSubpixels(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
     uint kx = (corner & 1u) ? 2u : 0u;
     uint ky = (corner & 2u) ? 2u : 0u;
     OutSubpixelsFlat[sIdx] = EvalDeepExp(ColCoordsExp[px * 3u + kx], RowCoordsExp[py * 3u + ky], fastLim, expLim);
+}
+
+[numthreads(256, 1, 1)]
+void CSSubpixelsStage0(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
+{
+    if (gi == 0u) s_groupCount = 0u;
+    uint fastLim, expLim;
+    LoadDeepLds(gi, fastLim, expLim);
+    GroupMemoryBarrierWithGroupSync();
+
+    uint totalRays = SubpixelCountSrv[0] * 4u;
+    uint rem = (totalRays > subRayOffset) ? (totalRays - subRayOffset) : 0u;
+    uint batchRays = (subpixelTotal == 0xFFFFFFFFu) ? rem : min(rem, subpixelTotal);
+    uint localIdx = (gid.y * 32768u + gid.x) * 256u + gi;
+    bool valid = (localIdx < batchRays);
+    bool keepAlive = false;
+    uint sIdx = subRayOffset + localIdx;
+
+    if (valid)
+    {
+        uint pix = SubpixelIndices[sIdx >> 2];
+        uint corner = sIdx & 3u;
+        uint py = pix / width;
+        uint px = pix - py * width;
+        uint kx = (corner & 1u) ? 2u : 0u;
+        uint ky = (corner & 2u) ? 2u : 0u;
+        float dmx = 0.0f, dmy = 0.0f;
+        int dExp = -1073741824;
+        uint m = 0u, iter = 0u;
+        float res = -1.0f;
+        bool done = StepDeepExp(ColCoordsExp[px * 3u + kx], RowCoordsExp[py * 3u + ky], fastLim, expLim, stageIterLimit, dmx, dmy, dExp, m, iter, res);
+        if (done)
+        {
+            OutSubpixelsFlat[sIdx] = res;
+        }
+        else
+        {
+            GpuPerturbState st;
+            st.x = dmx; st.y = dmy; st.exp = dExp; st.m = m; st.iter = iter;
+            ActiveState[localIdx] = st;
+            keepAlive = true;
+        }
+    }
+
+    uint localOffset = 0u;
+    if (keepAlive)
+    {
+        InterlockedAdd(s_groupCount, 1u, localOffset);
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    if (gi == 0u && s_groupCount > 0u)
+    {
+        InterlockedAdd(OutActiveCount[0], s_groupCount, s_groupBase);
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    if (keepAlive)
+    {
+        OutActiveIndices[s_groupBase + localOffset] = sIdx;
+    }
+}
+
+[numthreads(256, 1, 1)]
+void CSSubpixelsResume(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
+{
+    if (gi == 0u) s_groupCount = 0u;
+    uint fastLim, expLim;
+    LoadDeepLds(gi, fastLim, expLim);
+    GroupMemoryBarrierWithGroupSync();
+
+    uint activeTotal = SubpixelCountSrv[0];
+    uint activeIdx = (gid.y * 32768u + gid.x) * 256u + gi;
+    bool valid = (activeIdx < activeTotal);
+    bool keepAlive = false;
+    uint sIdx = 0u;
+
+    if (valid)
+    {
+        sIdx = SubpixelIndices[activeIdx];
+        uint localIdx = sIdx - subRayOffset;
+        uint pix = SubpixelPixels[sIdx >> 2];
+        uint corner = sIdx & 3u;
+        uint py = pix / width;
+        uint px = pix - py * width;
+        uint kx = (corner & 1u) ? 2u : 0u;
+        uint ky = (corner & 2u) ? 2u : 0u;
+        GpuPerturbState st = ActiveState[localIdx];
+        float dmx = st.x, dmy = st.y;
+        int dExp = st.exp;
+        uint m = st.m, iter = st.iter;
+        float res = -1.0f;
+        bool done = StepDeepExp(ColCoordsExp[px * 3u + kx], RowCoordsExp[py * 3u + ky], fastLim, expLim, stageIterLimit, dmx, dmy, dExp, m, iter, res);
+        if (done)
+        {
+            OutSubpixelsFlat[sIdx] = res;
+        }
+        else
+        {
+            st.x = dmx; st.y = dmy; st.exp = dExp; st.m = m; st.iter = iter;
+            ActiveState[localIdx] = st;
+            keepAlive = true;
+        }
+    }
+
+    if (stageIterLimit < maxIter)
+    {
+        uint localOffset = 0u;
+        if (keepAlive)
+        {
+            InterlockedAdd(s_groupCount, 1u, localOffset);
+        }
+        GroupMemoryBarrierWithGroupSync();
+
+        if (gi == 0u && s_groupCount > 0u)
+        {
+            InterlockedAdd(OutActiveCount[0], s_groupCount, s_groupBase);
+        }
+        GroupMemoryBarrierWithGroupSync();
+
+        if (keepAlive)
+        {
+            OutActiveIndices[s_groupBase + localOffset] = sIdx;
+        }
+    }
 }
 )";
     }

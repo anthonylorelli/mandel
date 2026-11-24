@@ -93,6 +93,8 @@ namespace Mandelbrot
             int height,
             uint32_t* outPixels,
             const GpuMovieShutterParams* shutterParams = nullptr);
+        void SetGpuMultiPassSubpixelsEnabled(bool enabled);
+        void SetGpuMultiPassSubpixelBatchLimit(size_t maxRays);
 
         static void ZoomViewport(
             FractalConfig& config,
@@ -149,6 +151,8 @@ namespace Mandelbrot
 
         ExecutionMode m_executionMode{ ExecutionMode::Automatic };
         bool m_allowSoftwareGpu{ false };
+        bool m_gpuMultiPassSubpixelsEnabled{ true };
+        size_t m_gpuMultiPassSubpixelBatchLimit{ 0 };
         std::vector<float> m_sampleWeights;
         DeepReferenceCache m_deepCache;
         std::unique_ptr<GpuFractalSolver> m_gpuSolver;

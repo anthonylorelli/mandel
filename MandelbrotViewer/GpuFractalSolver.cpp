@@ -36,6 +36,22 @@ namespace Mandelbrot
         return m_impl && m_impl->CanSupportConfig(config);
     }
 
+    void GpuFractalSolver::SetMultiPassSubpixelsEnabled(bool enabled) noexcept
+    {
+        if (!m_impl) return;
+        std::lock_guard lock(m_impl->mutex);
+        m_impl->multiPassSubpixelsEnabled = enabled;
+    }
+
+    void GpuFractalSolver::SetMultiPassSubpixelBatchLimit(size_t maxRays) noexcept
+    {
+        if (!m_impl) return;
+        std::lock_guard lock(m_impl->mutex);
+        m_impl->multiPassSubpixelBatchLimit = (maxRays == 0)
+            ? kMaxMultiPassSubRays
+            : std::clamp<size_t>(maxRays, 1, kMaxMultiPassSubRays);
+    }
+
     bool GpuFractalSolver::Impl::DispatchPrimaryPass(
         GpuShaderMode mode,
         const FractalConfig& config,
@@ -57,6 +73,9 @@ namespace Mandelbrot
             : static_cast<UINT>((width + 15) / 16);
 
         const uint32_t maxIterU = static_cast<uint32_t>(config.maxIterations);
+        ID3D11ComputeShader* csStage0 = nullptr;
+        ID3D11ComputeShader* csActiveInd = nullptr;
+        ID3D11ComputeShader* csResume = nullptr;
         const bool useMultiPass =
             (mode == GpuShaderMode::PerturbLdsBla || mode == GpuShaderMode::PerturbDeepExp) &&
             maxIterU > kMultiPassMinMaxIter &&
@@ -68,20 +87,15 @@ namespace Mandelbrot
                 activeIdxBuf[0], activeIdxUav[0], activeIdxSrv[0], activeIdxCapElems[0]) &&
             EnsureTypedUavSrvBuffer(
                 totalPixels, sizeof(uint32_t), DXGI_FORMAT_R32_UINT,
-                activeIdxBuf[1], activeIdxUav[1], activeIdxSrv[1], activeIdxCapElems[1]);
+                activeIdxBuf[1], activeIdxUav[1], activeIdxSrv[1], activeIdxCapElems[1]) &&
+            (csStage0 = EnsureShader(
+                (mode == GpuShaderMode::PerturbLdsBla) ? GpuShaderId::LdsBlaStage0 : GpuShaderId::DeepExpStage0)) != nullptr &&
+            (csActiveInd = EnsureShader(GpuShaderId::PostBuildActiveIndirect)) != nullptr &&
+            (csResume = EnsureShader(
+                (mode == GpuShaderMode::PerturbLdsBla) ? GpuShaderId::LdsBlaResume : GpuShaderId::DeepExpResume)) != nullptr;
 
         if (useMultiPass)
         {
-            ID3D11ComputeShader* csStage0 = EnsureShader(
-                (mode == GpuShaderMode::PerturbLdsBla) ? GpuShaderId::LdsBlaStage0 : GpuShaderId::DeepExpStage0);
-            ID3D11ComputeShader* csActiveInd = EnsureShader(GpuShaderId::PostBuildActiveIndirect);
-            ID3D11ComputeShader* csResume = EnsureShader(
-                (mode == GpuShaderMode::PerturbLdsBla) ? GpuShaderId::LdsBlaResume : GpuShaderId::DeepExpResume);
-            if (!csStage0 || !csActiveInd || !csResume)
-            {
-                return false;
-            }
-
             const uint32_t stage0Limit = std::min<uint32_t>(1024u, maxIterU);
             context->ClearUnorderedAccessViewUint(activeCountUav[0].Get(), zeros);
 
@@ -105,73 +119,11 @@ namespace Mandelbrot
             }
             context->Dispatch(primGroupX, static_cast<UINT>((height + 15) / 16), 1);
 
-            const uint32_t resumeGroupThreads = (mode == GpuShaderMode::PerturbLdsBla) ? 512u : 256u;
-            PostProcessCb activeIndCb{};
-            activeIndCb.subGroupThreads = resumeGroupThreads;
-
-            int activeIn = 0;
-            uint32_t prevLimit = stage0Limit;
-            uint32_t stageStep = 3072u;
-            while (prevLimit < maxIterU)
+            if (!DispatchMultiPassResumeLoop(
+                mode, config, refState, juliaCx, juliaCy, juliaBailout2,
+                csActiveInd, csResume, stage0Limit, false, 0u, true, cancelToken, outCanceled))
             {
-                if (canceled())
-                {
-                    UnbindComputeResources();
-                    outCanceled = true;
-                    return true;
-                }
-                const uint32_t nextLimit = std::min<uint32_t>(maxIterU, prevLimit + stageStep);
-                const bool isFinalStage = (nextLimit >= maxIterU);
-                const int activeOut = 1 - activeIn;
-
-                // Build DispatchIndirect args for surviving active pixels
-                UnbindComputeResources();
-                if (!UploadBufferDiscard(constantBuffer.Get(), &activeIndCb, sizeof(activeIndCb)))
-                {
-                    return false;
-                }
-                ID3D11UnorderedAccessView* indUavs[5]{ indirectArgsUav.Get(), nullptr, nullptr, nullptr, nullptr };
-                context->CSSetUnorderedAccessViews(0, 5, indUavs, nullptr);
-                ID3D11ShaderResourceView* indSrvs[8]{};
-                indSrvs[5] = activeCountSrv[activeIn].Get();
-                context->CSSetShaderResources(0, 8, indSrvs);
-                context->CSSetShader(csActiveInd, nullptr, 0);
-                context->Dispatch(1, 1, 1);
-
-                // Resume only surviving active pixels in densely packed warps
-                UnbindComputeResources();
-                if (!isFinalStage)
-                {
-                    context->ClearUnorderedAccessViewUint(activeCountUav[activeOut].Get(), zeros);
-                }
-
-                BindFractalSrvs(
-                    mode,
-                    activeIdxSrv[activeIn].Get(),
-                    activeCountSrv[activeIn].Get());
-                ID3D11UnorderedAccessView* resumeUavs[5]{
-                    outItersUav.Get(),
-                    nullptr,
-                    activeStateUav.Get(),
-                    isFinalStage ? nullptr : activeIdxUav[activeOut].Get(),
-                    isFinalStage ? nullptr : activeCountUav[activeOut].Get()
-                };
-                context->CSSetUnorderedAccessViews(0, 5, resumeUavs, nullptr);
-                context->CSSetShader(csResume, nullptr, 0);
-
-                if (!UploadFractalCb(
-                    mode, config, refState, juliaCx, juliaCy, juliaBailout2,
-                    0u, 0u, 0u, nextLimit))
-                {
-                    UnbindComputeResources();
-                    return false;
-                }
-                context->DispatchIndirect(indirectArgsBuf.Get(), 0);
-                context->Flush();
-
-                activeIn = activeOut;
-                prevLimit = nextLimit;
-                stageStep = (stageStep < 8192u) ? 8192u : 12288u;
+                return false;
             }
             UnbindComputeResources();
             return true;
@@ -344,12 +296,17 @@ namespace Mandelbrot
                 postCb.subGroupThreads =
                     (mode == GpuShaderMode::PerturbLds || mode == GpuShaderMode::PerturbLdsBla) ? 512u : 256u;
 
+                bool subCanceled = false;
                 if (!m_impl->DispatchGpuSubpixelPass(
-                    mode, config, refState, juliaCx, juliaCy, juliaBailout2, postCb))
+                    mode, config, refState, juliaCx, juliaCy, juliaBailout2, postCb, cancelToken, subCanceled))
                 {
                     return false;
                 }
-                m_impl->UnbindComputeResources();
+                if (subCanceled)
+                {
+                    subpixelSamples->clear();
+                    return true;
+                }
 
                 // Queue counter copy alongside primary iteration copy so there is only one GPU wait
                 D3D11_BOX countBox{ 0, 0, 0, sizeof(uint32_t), 1, 1 };

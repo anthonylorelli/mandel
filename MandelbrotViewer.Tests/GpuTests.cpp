@@ -6,6 +6,7 @@
 #include "MandelbrotEngine.h"
 #include "MovieExport.h"
 #include "MoviePlan.h"
+#include <cstdlib>
 
 using namespace Mandelbrot;
 
@@ -634,4 +635,286 @@ TEST_CASE(Gpu, InteractiveStrideAndMultiPassTryComputeMatchCpu)
         CompareCpuAndGpuRender(cpu, gpu, deepExp, 4.5);
     }
 }
+
+TEST_CASE(Gpu, MultiPassSubpixelsMatchSinglePassAndCpu)
+{
+    std::atomic<bool> cancel{};
+    MandelbrotEngine cpu(ExecutionMode::Automatic);
+    MandelbrotEngine gpu(ExecutionMode::Gpu, true);
+    ASSERT_TRUE(gpu.IsGpuAvailable());
+
+    auto verifyScene = [&](const FractalConfig& cfg, double maxCpuErr)
+    {
+        std::vector<float> singleIters, multiIters, batchedIters;
+        std::vector<SubpixelSamples> singleSubs, multiSubs, batchedSubs;
+
+        // 1. Interactive TryCompute: single-pass vs multi-pass vs small-batch multi-pass
+        gpu.SetGpuMultiPassSubpixelBatchLimit(0);
+        gpu.SetGpuMultiPassSubpixelsEnabled(false);
+        gpu.Compute(cfg, singleIters, nullptr, &singleSubs);
+
+        gpu.SetGpuMultiPassSubpixelsEnabled(true);
+        gpu.Compute(cfg, multiIters, nullptr, &multiSubs);
+
+        gpu.SetGpuMultiPassSubpixelBatchLimit(256);
+        gpu.Compute(cfg, batchedIters, nullptr, &batchedSubs);
+        gpu.SetGpuMultiPassSubpixelBatchLimit(0);
+
+        const size_t total = static_cast<size_t>(cfg.width) * static_cast<size_t>(cfg.height);
+        ASSERT_EQ(total, singleIters.size());
+        ASSERT_EQ(singleIters.size(), multiIters.size());
+        ASSERT_EQ(singleIters.size(), batchedIters.size());
+        ASSERT_GT(singleSubs.size(), static_cast<size_t>(64)); // Ensure multi-batch actually runs > 1 batch (64*4 = 256 rays)
+        ASSERT_EQ(singleSubs.size(), multiSubs.size());
+        ASSERT_EQ(singleSubs.size(), batchedSubs.size());
+        AssertValidSubpixels(multiSubs, total);
+        AssertValidSubpixels(batchedSubs, total);
+
+        for (size_t i = 0; i < singleSubs.size(); ++i)
+        {
+            ASSERT_EQ(singleSubs[i].pixelIndex, multiSubs[i].pixelIndex);
+            ASSERT_EQ(singleSubs[i].pixelIndex, batchedSubs[i].pixelIndex);
+            ASSERT_NEAR(singleSubs[i].weight, multiSubs[i].weight, 1e-6f);
+            ASSERT_NEAR(singleSubs[i].weight, batchedSubs[i].weight, 1e-6f);
+            for (int c = 0; c < 4; ++c)
+            {
+                ASSERT_NEAR(singleSubs[i].iterations[c], multiSubs[i].iterations[c], 1e-4f);
+                ASSERT_NEAR(singleSubs[i].iterations[c], batchedSubs[i].iterations[c], 1e-4f);
+            }
+        }
+
+        // 2. Movie pipeline RenderMovieFrame: single-pass vs multi-pass vs multi-batch vs CPU
+        MoviePlan plan;
+        plan.width = cfg.width;
+        plan.height = cfg.height;
+        plan.fps = 24;
+        plan.seconds = 1;
+        plan.motionSmoothing = false;
+        plan.useGpu = true;
+        plan.start = cfg;
+        plan.targetX = cfg.hpCenterX;
+        plan.targetY = cfg.hpCenterY;
+        plan.endZoom = cfg.zoom;
+
+        gpu.SetGpuMultiPassSubpixelBatchLimit(0);
+        gpu.SetGpuMultiPassSubpixelsEnabled(false);
+        const auto singleMovie = RenderMovieFrame(plan, 0.0, cancel, {}, plan.height, &gpu);
+
+        gpu.SetGpuMultiPassSubpixelsEnabled(true);
+        const auto multiMovie = RenderMovieFrame(plan, 0.0, cancel, {}, plan.height, &gpu);
+
+        gpu.SetGpuMultiPassSubpixelBatchLimit(256);
+        const auto batchedMovie = RenderMovieFrame(plan, 0.0, cancel, {}, plan.height, &gpu);
+        gpu.SetGpuMultiPassSubpixelBatchLimit(0);
+
+        MoviePlan cpuPlan = plan;
+        cpuPlan.useGpu = false;
+        const auto cpuMovie = RenderMovieFrame(cpuPlan, 0.0, cancel, {}, cpuPlan.height, &cpu);
+
+        ASSERT_EQ(total, singleMovie.size());
+        ASSERT_TRUE(multiMovie == batchedMovie);
+        ASSERT_LT(FilteredPixelError(singleMovie, multiMovie, cfg.width, cfg.height), 0.5);
+        ASSERT_LT(FilteredPixelError(cpuMovie, multiMovie, cfg.width, cfg.height), maxCpuErr);
+    };
+
+    // PerturbLdsBla (framed period-16 minibrot at zoom = 1.5e17, maxIterations = 5000 > 2048)
+    {
+        FractalConfig cfg;
+        cfg.width = 81;
+        cfg.height = 57;
+        cfg.SetCenter(
+            BigFloat("-1.99999999655308045362110874015473483139206276235932946992201526"),
+            BigFloat(0.0));
+        cfg.zoom = 1.5e17;
+        cfg.maxIterations = 5000;
+        verifyScene(cfg, 4.5);
+    }
+
+    // PerturbDeepExp (framed period-40 minibrot at zoom = 1.5e46, maxIterations = 4500 > 2048)
+    {
+        FractalConfig cfg;
+        cfg.width = 81;
+        cfg.height = 57;
+        cfg.SetCenter(
+            BigFloat("-1.99999999999999999999998775408187877626974572395292894510228233"),
+            BigFloat(0.0));
+        cfg.zoom = 1.5e46;
+        cfg.maxIterations = 4500;
+        verifyScene(cfg, 4.5);
+    }
+}
+
+TEST_CASE(Gpu, BenchmarkMultiPassSubpixelsDeepZoom)
+{
+    std::atomic<bool> cancel{};
+    MandelbrotEngine gpu(ExecutionMode::Gpu, true);
+    ASSERT_TRUE(gpu.IsGpuAvailable());
+
+    bool fullBench = false;
+#if defined(_WIN32)
+    char* envVal = nullptr;
+    size_t envLen = 0;
+    if (_dupenv_s(&envVal, &envLen, "MANDEL_RUN_GPU_BENCH") == 0 && envVal)
+    {
+        fullBench = (envVal[0] == '1');
+        std::free(envVal);
+    }
+#endif
+    const int trials = fullBench ? 3 : 1;
+
+    auto medianOf = [](std::vector<double> vals) -> double
+    {
+        std::sort(vals.begin(), vals.end());
+        return vals[vals.size() / 2];
+    };
+
+    auto runBench = [&](const char* label, const FractalConfig& cfg)
+    {
+        MoviePlan plan;
+        plan.width = cfg.width;
+        plan.height = cfg.height;
+        plan.fps = 24;
+        plan.seconds = 1;
+        plan.motionSmoothing = false;
+        plan.useGpu = true;
+        plan.start = cfg;
+        plan.targetX = cfg.hpCenterX;
+        plan.targetY = cfg.hpCenterY;
+        plan.endZoom = cfg.zoom;
+
+        // Pre-warm shaders, reference orbit, and BLA table for both modes.
+        gpu.PrepareDeepReference(cfg, &cancel);
+        gpu.SetGpuMultiPassSubpixelsEnabled(false);
+        const auto warmSingle = RenderMovieFrame(plan, 0.0, cancel, {}, plan.height, &gpu);
+        gpu.SetGpuMultiPassSubpixelsEnabled(true);
+        const auto warmMulti = RenderMovieFrame(plan, 0.0, cancel, {}, plan.height, &gpu);
+        ASSERT_LT(FilteredPixelError(warmSingle, warmMulti, cfg.width, cfg.height), 0.5);
+
+        // Measure boundary subpixel count and primary-only baseline.
+        std::vector<float> iters;
+        std::vector<SubpixelSamples> subs;
+        gpu.Compute(cfg, iters, nullptr, &subs);
+        const size_t totalPixels = static_cast<size_t>(cfg.width) * static_cast<size_t>(cfg.height);
+        size_t interiorSubRays = 0;
+        for (const auto& s : subs)
+        {
+            for (float v : s.iterations)
+            {
+                if (v < 0.0f) ++interiorSubRays;
+            }
+        }
+
+        // Alternating A/B trials to minimize background scheduling drift.
+        std::vector<double> singleMovieTimes, multiMovieTimes;
+        std::vector<double> primaryOnlyTimes, singleComputeTimes, multiComputeTimes;
+
+        for (int t = 0; t < trials; ++t)
+        {
+            const bool multiFirst = (t & 1) != 0;
+            auto measureMovie = [&](bool multi) -> double
+            {
+                gpu.SetGpuMultiPassSubpixelsEnabled(multi);
+                const auto t0 = std::chrono::steady_clock::now();
+                auto px = RenderMovieFrame(plan, 0.0, cancel, {}, plan.height, &gpu);
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                ASSERT_EQ(totalPixels, px.size());
+                return ms;
+            };
+            auto measureCompute = [&](bool multi, bool withSubs) -> double
+            {
+                gpu.SetGpuMultiPassSubpixelsEnabled(multi);
+                const auto t0 = std::chrono::steady_clock::now();
+                gpu.Compute(cfg, iters, nullptr, withSubs ? &subs : nullptr);
+                return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            };
+
+            primaryOnlyTimes.push_back(measureCompute(true, false));
+            if (multiFirst)
+            {
+                multiMovieTimes.push_back(measureMovie(true));
+                singleMovieTimes.push_back(measureMovie(false));
+                multiComputeTimes.push_back(measureCompute(true, true));
+                singleComputeTimes.push_back(measureCompute(false, true));
+            }
+            else
+            {
+                singleMovieTimes.push_back(measureMovie(false));
+                multiMovieTimes.push_back(measureMovie(true));
+                singleComputeTimes.push_back(measureCompute(false, true));
+                multiComputeTimes.push_back(measureCompute(true, true));
+            }
+        }
+        gpu.SetGpuMultiPassSubpixelsEnabled(true);
+
+        const double medPrimary = medianOf(primaryOnlyTimes);
+        const double medSingleMovie = medianOf(singleMovieTimes);
+        const double medMultiMovie = medianOf(multiMovieTimes);
+        const double medSingleSub = std::max(0.01, medianOf(singleComputeTimes) - medPrimary);
+        const double medMultiSub = std::max(0.01, medianOf(multiComputeTimes) - medPrimary);
+
+        std::cout << "  [BENCH] " << label
+                  << " | " << cfg.width << "x" << cfg.height
+                  << " maxIter=" << cfg.maxIterations
+                  << " subPix=" << subs.size() << "/" << totalPixels
+                  << " (" << std::fixed << std::setprecision(1) << (100.0 * subs.size() / totalPixels) << "%)"
+                  << " interiorRays=" << interiorSubRays << "/" << (subs.size() * 4)
+                  << " | Movie single=" << medSingleMovie << "ms multi=" << medMultiMovie << "ms"
+                  << " (" << std::setprecision(2) << (medSingleMovie / std::max(0.01, medMultiMovie)) << "x)"
+                  << " | SubPass single=" << std::setprecision(1) << medSingleSub << "ms multi=" << medMultiSub << "ms"
+                  << " (" << std::setprecision(2) << (medSingleSub / medMultiSub) << "x)\n";
+    };
+
+    // 1. PerturbLdsBla framed period-16 minibrot (zoom = 1.5e17, maxIter = 16000) — sharp interior/exterior boundary
+    {
+        FractalConfig cfg;
+        cfg.width = fullBench ? 192 : 96;
+        cfg.height = fullBench ? 144 : 72;
+        cfg.SetCenter(
+            BigFloat("-1.99999999655308045362110874015473483139206276235932946992201526"),
+            BigFloat(0.0));
+        cfg.zoom = 1.5e17;
+        cfg.maxIterations = 16000;
+        runBench("PerturbLdsBla_1.5e17_Minibrot", cfg);
+    }
+
+    // 2. Seahorse Valley deep minibrot edge (zoom = 5e23, maxIter = 18000) — high-period interior + 14k filaments
+    {
+        FractalConfig cfg;
+        cfg.width = fullBench ? 160 : 80;
+        cfg.height = fullBench ? 120 : 60;
+        cfg.SetCenter(
+            BigFloat("-0.743643887037158704752191506114774"),
+            BigFloat("0.131825904205311970493132056385139"));
+        cfg.zoom = 5e23;
+        cfg.maxIterations = 18000;
+        runBench("Seahorse_5e23_Minibrot", cfg);
+    }
+
+    // 3. PerturbLdsBla escaping filament spread (zoom = 2.5e15, maxIter = 16000)
+    {
+        FractalConfig cfg;
+        cfg.width = fullBench ? 192 : 96;
+        cfg.height = fullBench ? 144 : 72;
+        cfg.SetCenter(
+            BigFloat("-1.7497591451303665161306330584152263895062626668"),
+            BigFloat("0.0000000036851379492923185000018595062626668"));
+        cfg.zoom = 2.5e15;
+        cfg.maxIterations = 16000;
+        runBench("PerturbLdsBla_2.5e15_FilamentSpread", cfg);
+    }
+
+    // 4. PerturbDeepExp ultra-deep period-40 minibrot (zoom = 1.5e46, maxIter = 12000) — FloatExp interior/exterior boundary
+    {
+        FractalConfig cfg;
+        cfg.width = fullBench ? 160 : 80;
+        cfg.height = fullBench ? 120 : 60;
+        cfg.SetCenter(
+            BigFloat("-1.99999999999999999999998775408187877626974572395292894510228233"),
+            BigFloat(0.0));
+        cfg.zoom = 1.5e46;
+        cfg.maxIterations = 12000;
+        runBench("PerturbDeepExp_1.5e46_Minibrot", cfg);
+    }
+}
+
 
