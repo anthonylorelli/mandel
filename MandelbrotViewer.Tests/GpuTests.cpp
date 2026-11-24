@@ -729,15 +729,15 @@ TEST_CASE(Gpu, MultiPassSubpixelsMatchSinglePassAndCpu)
         verifyScene(cfg, 4.5);
     }
 
-    // PerturbDeepExp (zoom = 1e50, maxIterations = 4500 > 2048)
+    // PerturbDeepExp (exact period-80 minibrot at zoom = 1e48, maxIterations = 4500 > 2048)
     {
         FractalConfig cfg;
         cfg.width = 65;
         cfg.height = 49;
         cfg.SetCenter(
-            BigFloat("-1.74975914513036651613063305841522638950626266680180909383610018508190914266589615"),
-            BigFloat("0.00000000368513794929231850000185950626266680180909383610018508190914266589615"));
-        cfg.zoom = 1e50;
+            BigFloat("-1.99999999999999999999999999999999999999999999998987041394721193"),
+            BigFloat(0.0));
+        cfg.zoom = 1e48;
         cfg.maxIterations = 4500;
         verifyScene(cfg, 4.5);
     }
@@ -852,20 +852,33 @@ TEST_CASE(Gpu, BenchmarkMultiPassSubpixelsDeepZoom)
                   << " (" << std::setprecision(2) << (medSingleSub / medMultiSub) << "x)\n";
     };
 
-    // 1. PerturbLdsBla deep minibrot/filament scene (zoom = 1e18, maxIter = 12000)
+    // 1. PerturbLdsBla deep period-31 minibrot (zoom = 1e18, maxIter = 16000) — sharp interior/exterior boundary
     {
         FractalConfig cfg;
         cfg.width = 192;
         cfg.height = 144;
         cfg.SetCenter(
-            BigFloat("-0.743643887037158704752191506114774"),
-            BigFloat("0.131825904205311970493132056385139"));
+            BigFloat("-1.99999999999999999678980604002992640582094090293837417913303182"),
+            BigFloat(0.0));
         cfg.zoom = 1e18;
-        cfg.maxIterations = 12000;
-        runBench("PerturbLdsBla_1e18_Seahorse", cfg);
+        cfg.maxIterations = 16000;
+        runBench("PerturbLdsBla_1e18_Minibrot", cfg);
     }
 
-    // 2. PerturbLdsBla high-divergence minibrot edge (zoom = 2.5e15, maxIter = 16000)
+    // 2. PerturbLdsBla Seahorse Valley deep minibrot edge (zoom = 5e23, maxIter = 18000) — high-period interior + 14k filaments
+    {
+        FractalConfig cfg;
+        cfg.width = 160;
+        cfg.height = 120;
+        cfg.SetCenter(
+            BigFloat("-0.743643887037158704752191506114774"),
+            BigFloat("0.131825904205311970493132056385139"));
+        cfg.zoom = 5e23;
+        cfg.maxIterations = 18000;
+        runBench("PerturbLdsBla_5e23_SeahorseMinibrot", cfg);
+    }
+
+    // 3. PerturbLdsBla escaping filament spread (zoom = 2.5e15, maxIter = 16000)
     {
         FractalConfig cfg;
         cfg.width = 192;
@@ -875,20 +888,20 @@ TEST_CASE(Gpu, BenchmarkMultiPassSubpixelsDeepZoom)
             BigFloat("0.0000000036851379492923185000018595062626668"));
         cfg.zoom = 2.5e15;
         cfg.maxIterations = 16000;
-        runBench("PerturbLdsBla_2.5e15_MinibrotEdge", cfg);
+        runBench("PerturbLdsBla_2.5e15_FilamentSpread", cfg);
     }
 
-    // 3. PerturbDeepExp ultra-deep minibrot/filament scene (zoom = 1e50, maxIter = 10000)
+    // 4. PerturbDeepExp ultra-deep period-80 minibrot (zoom = 1e48, maxIter = 12000) — FloatExp interior/exterior boundary
     {
         FractalConfig cfg;
-        cfg.width = 128;
-        cfg.height = 96;
+        cfg.width = 160;
+        cfg.height = 120;
         cfg.SetCenter(
-            BigFloat("-1.74975914513036651613063305841522638950626266680180909383610018508190914266589615"),
-            BigFloat("0.00000000368513794929231850000185950626266680180909383610018508190914266589615"));
-        cfg.zoom = 1e50;
-        cfg.maxIterations = 10000;
-        runBench("PerturbDeepExp_1e50_UltraDeep", cfg);
+            BigFloat("-1.99999999999999999999999999999999999999999999998987041394721193"),
+            BigFloat(0.0));
+        cfg.zoom = 1e48;
+        cfg.maxIterations = 12000;
+        runBench("PerturbDeepExp_1e48_Minibrot", cfg);
     }
 }
 

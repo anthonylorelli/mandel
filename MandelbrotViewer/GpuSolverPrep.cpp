@@ -683,7 +683,6 @@ namespace Mandelbrot
                     return false;
                 }
                 context->DispatchIndirect(indirectArgsBuf.Get(), 0);
-                context->Flush();
 
                 int activeIn = 0;
                 uint32_t prevLimit = stage0Limit;
