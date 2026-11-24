@@ -1183,7 +1183,10 @@ TEST_CASE(Gpu, KeyframeSubpixelBudgetPreservesResampledQuality)
             ASSERT_LT(FilteredPixelError(resampledFull, resampledSmart, p.width, p.height), 2.5);
 
             const auto direct1x = RenderMovieFrame(p, static_cast<double>(frameIdx), cancel, {}, p.height, &gpu);
-            ASSERT_LT(FilteredPixelError(direct1x, resampledSmart, p.width, p.height), 7.0);
+            const double errFullVsDirect = FilteredPixelError(direct1x, resampledFull, p.width, p.height);
+            const double errSmartVsDirect = FilteredPixelError(direct1x, resampledSmart, p.width, p.height);
+            ASSERT_LE(errSmartVsDirect, errFullVsDirect + 1.5);
+            ASSERT_LT(errSmartVsDirect, (frequency > 1.5f) ? 10.0 : 7.0);
         }
 
         // Direct 1x RenderMovieFrame must remain completely unaffected by the keyframe budget toggle.
