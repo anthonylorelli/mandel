@@ -26,6 +26,10 @@ namespace Mandelbrot
     MandelbrotEngine::MandelbrotEngine(const MandelbrotEngine& other)
         : m_executionMode(other.m_executionMode)
         , m_allowSoftwareGpu(other.m_allowSoftwareGpu)
+        , m_gpuMultiPassSubpixelsEnabled(other.m_gpuMultiPassSubpixelsEnabled)
+        , m_gpuMultiPassSubpixelBatchLimit(other.m_gpuMultiPassSubpixelBatchLimit)
+        , m_gpuKeyframeSubpixelBudget(other.m_gpuKeyframeSubpixelBudget)
+        , m_gpuSinglePassSkipRect(other.m_gpuSinglePassSkipRect)
         , m_sampleWeights(other.m_sampleWeights)
         , m_deepCache(other.m_deepCache)
     {
@@ -37,6 +41,10 @@ namespace Mandelbrot
         {
             m_executionMode = other.m_executionMode;
             m_allowSoftwareGpu = other.m_allowSoftwareGpu;
+            m_gpuMultiPassSubpixelsEnabled = other.m_gpuMultiPassSubpixelsEnabled;
+            m_gpuMultiPassSubpixelBatchLimit = other.m_gpuMultiPassSubpixelBatchLimit;
+            m_gpuKeyframeSubpixelBudget = other.m_gpuKeyframeSubpixelBudget;
+            m_gpuSinglePassSkipRect = other.m_gpuSinglePassSkipRect;
             m_sampleWeights = other.m_sampleWeights;
             m_deepCache = other.m_deepCache;
             m_gpuSolver.reset();
@@ -318,7 +326,9 @@ namespace Mandelbrot
         bool invert,
         uint32_t interiorColor,
         uint32_t* ioBandPixels,
-        const std::atomic<bool>* cancelToken)
+        const std::atomic<bool>* cancelToken,
+        bool keyframeOversampled,
+        const GpuBandSkipRect* bandSkip)
     {
         if (m_executionMode != ExecutionMode::Gpu || theme.Lut().size() != ColorTheme::LUT_SIZE)
         {
@@ -336,6 +346,7 @@ namespace Mandelbrot
         colorParams.phaseOffset = phaseOffset;
         colorParams.invert = invert;
         colorParams.interiorColor = interiorColor;
+        colorParams.keyframeOversampled = keyframeOversampled;
 
         return EnsureGpuSolver().RenderMovieBand(
             bandConfig,
@@ -347,7 +358,8 @@ namespace Mandelbrot
             destRowOffset,
             colorParams,
             ioBandPixels,
-            cancelToken);
+            cancelToken,
+            bandSkip);
     }
 
     bool MandelbrotEngine::FinishGpuMovieFrame(
@@ -360,7 +372,7 @@ namespace Mandelbrot
             EnsureGpuSolver().EndMovieFrame(width, height, outPixels, shutterParams);
     }
 
-    void MandelbrotEngine::SetGpuMultiPassSubpixelsEnabled(bool enabled)
+    void MandelbrotEngine::SetGpuMultiPassSubpixelsEnabled(bool enabled) noexcept
     {
         m_gpuMultiPassSubpixelsEnabled = enabled;
         if (m_gpuSolver)
@@ -369,7 +381,7 @@ namespace Mandelbrot
         }
     }
 
-    void MandelbrotEngine::SetGpuMultiPassSubpixelBatchLimit(size_t maxRays)
+    void MandelbrotEngine::SetGpuMultiPassSubpixelBatchLimit(size_t maxRays) noexcept
     {
         m_gpuMultiPassSubpixelBatchLimit = maxRays;
         if (m_gpuSolver)

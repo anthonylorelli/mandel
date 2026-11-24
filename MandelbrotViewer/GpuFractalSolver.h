@@ -11,6 +11,25 @@ namespace Mandelbrot
 {
     inline constexpr double GpuPerturbationThreshold = 16.0;
 
+    struct GpuSkipRect
+    {
+        int x0{ 0 };
+        int y0{ 0 };
+        int x1{ 0 };
+        int y1{ 0 };
+
+        constexpr bool IsValid() const noexcept { return x0 < x1 && y0 < y1; }
+    };
+
+    struct GpuBandSkipRect
+    {
+        // Visible-row coordinates [0, visibleRows) skipped by boundary detection and color resolve.
+        GpuSkipRect visible{};
+        // Band-local coordinates [0, bandConfig.height) skipped by primary evaluation. Must stay
+        // inset by 1 pixel inside every non-border edge of `visible` so 3x3 neighborhoods are exact.
+        GpuSkipRect primary{};
+    };
+
     struct GpuMovieColorParams
     {
         const uint32_t* lutData{ nullptr }; // ColorTheme::LUT_SIZE (4096) BGRA entries
@@ -19,6 +38,7 @@ namespace Mandelbrot
         float phaseOffset{ 0.0f };
         bool invert{ false };
         uint32_t interiorColor{ 0xFF000000 };
+        bool keyframeOversampled{ false };
     };
 
     struct GpuMovieShutterParams
@@ -85,7 +105,8 @@ namespace Mandelbrot
             int destRowOffset,
             const GpuMovieColorParams& colorParams,
             uint32_t* ioBandPixels,
-            const std::atomic<bool>* cancelToken);
+            const std::atomic<bool>* cancelToken,
+            const GpuBandSkipRect* bandSkip = nullptr);
 
         bool EndMovieFrame(
             int width,

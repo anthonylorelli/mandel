@@ -297,7 +297,8 @@ namespace Mandelbrot
             uint32_t subTotal,
             uint32_t stageIterLimit = 0u,
             uint32_t heightLimit = 0u,
-            uint32_t subRayOffset = 0u);
+            uint32_t subRayOffset = 0u,
+            const GpuSkipRect* primSkipRect = nullptr);
 
         void BindFractalSrvs(
             detail::GpuShaderMode mode,
@@ -338,7 +339,8 @@ namespace Mandelbrot
             double juliaCy,
             double juliaBailout2,
             const std::atomic<bool>* cancelToken,
-            bool& outCanceled);
+            bool& outCanceled,
+            const GpuSkipRect* primSkipRect = nullptr);
 
         // Runs GPU 3x3 boundary detection, indirect-dispatch argument building, and
         // DispatchIndirect 4x subpixel evaluation (with multi-pass active-ray compaction

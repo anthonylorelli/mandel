@@ -22,7 +22,8 @@ cbuffer PostParams : register(b0)
     uint interiorColor;
     uint avgRgb;
     uint subGroupThreads;
-    uint subRayOffset, subRayLimit, pad2;
+    uint subRayOffset, subRayLimit, keyframeOversampled;
+    uint skipX0, skipY0, skipX1, skipY1;
 };
 
 struct GpuPixelSubInfo
@@ -47,7 +48,9 @@ void CSDetectBoundaries(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex
     if (gi == 0u) s_groupCount = 0u;
     GroupMemoryBarrierWithGroupSync();
 
-    bool valid = (tid.x < width && tid.y < visibleRows);
+    bool inBounds = (tid.x < width && tid.y < visibleRows);
+    bool skipped = (tid.x >= skipX0 && tid.x < skipX1 && tid.y >= skipY0 && tid.y < skipY1);
+    bool valid = inBounds && !skipped;
     float weight = 0.0f;
     uint fullIdx = 0u;
 
@@ -101,7 +104,10 @@ void CSDetectBoundaries(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex
                     variation = max(variation, abs(a - b) / (10.0f + min(a, b)));
                 }
             }
-            float t = saturate((variation - 0.015f) / 0.065f);
+            float freqScale = max(frequency, 1.0f);
+            float varMin = (keyframeOversampled != 0u) ? max(0.015f, 0.12f / freqScale) : 0.015f;
+            float varSpan = (keyframeOversampled != 0u) ? max(0.065f, 0.18f / freqScale) : 0.065f;
+            float t = saturate((variation - varMin) / varSpan);
             weight = boundary ? 1.0f : (t * t * (3.0f - 2.0f * t));
         }
     }
@@ -119,10 +125,10 @@ void CSDetectBoundaries(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex
     }
     GroupMemoryBarrierWithGroupSync();
 
-    if (valid)
+    if (inBounds)
     {
         GpuPixelSubInfo info;
-        if (weight > 0.0f)
+        if (valid && weight > 0.0f)
         {
             uint slot = s_groupBase + localOffset;
             OutSubpixelIndices[slot] = fullIdx;
@@ -191,7 +197,8 @@ cbuffer PostParams : register(b0)
     uint interiorColor;
     uint avgRgb;
     uint subGroupThreads;
-    uint subRayOffset, subRayLimit, pad2;
+    uint subRayOffset, subRayLimit, keyframeOversampled;
+    uint skipX0, skipY0, skipX1, skipY1;
 };
 
 struct GpuPixelSubInfo
@@ -284,6 +291,13 @@ void CSResolveAndBlend(uint3 tid : SV_DispatchThreadID)
 {
     if (tid.x >= width || tid.y >= visibleRows) return;
 
+    uint dstIdx = (destRowOffset + tid.y) * width + tid.x;
+    if (tid.x >= skipX0 && tid.x < skipX1 && tid.y >= skipY0 && tid.y < skipY1)
+    {
+        OutAccumPixels[dstIdx] = 0u;
+        return;
+    }
+
     uint fullIdx = (tid.y + topHalo) * width + tid.x;
     uint centerColor = ColorIterationGpu(InIters[fullIdx]);
     uint resolvedColor = centerColor;
@@ -365,7 +379,6 @@ void CSResolveAndBlend(uint3 tid : SV_DispatchThreadID)
         }
     }
 
-    uint dstIdx = (destRowOffset + tid.y) * width + tid.x;
     OutAccumPixels[dstIdx] = resolvedColor;
 }
 )";

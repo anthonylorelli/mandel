@@ -6,6 +6,7 @@
 #include "MandelbrotEngine.h"
 #include "MovieExport.h"
 #include "MoviePlan.h"
+#include "MovieZoomPyramid.h"
 #include <cstdlib>
 
 using namespace Mandelbrot;
@@ -916,5 +917,434 @@ TEST_CASE(Gpu, BenchmarkMultiPassSubpixelsDeepZoom)
         runBench("PerturbDeepExp_1.5e46_Minibrot", cfg);
     }
 }
+
+TEST_CASE(Gpu, SinglePassSkipRectMatchesFullKeyframeAndMultiBand)
+{
+    std::atomic<bool> cancel{};
+    MandelbrotEngine gpu(ExecutionMode::Gpu, true);
+    ASSERT_TRUE(gpu.IsGpuAvailable());
+
+    auto verifyScene = [&](FractalType type, const BigFloat& cx, const BigFloat& cy, double baseZoom, int maxIter)
+    {
+        MoviePlan p;
+        p.width = 96;
+        p.height = 72;
+        p.fps = 30;
+        p.seconds = 4;
+        p.motionSmoothing = false;
+        p.useGpu = true;
+        p.start.fractalType = type;
+        p.start.width = p.width;
+        p.start.height = p.height;
+        p.start.SetCenter(cx, cy);
+        p.start.zoom = baseZoom;
+        p.start.maxIterations = maxIter;
+        p.targetX = cx;
+        p.targetY = cy;
+        p.endZoom = baseZoom * 16.0;
+
+        const auto pyramid = PlanZoomKeyframes(p);
+        ASSERT_TRUE(pyramid.enabled);
+        ASSERT_GE(pyramid.keyframes.size(), 2u);
+
+        const auto& outerKf = pyramid.keyframes[0].camera;
+        const auto& innerKf = pyramid.keyframes[1].camera;
+        const auto innerRect = ComputeInnerSkipRect(outerKf, innerKf);
+        ASSERT_TRUE(innerRect.valid);
+
+        // Disable keyframe subpixel budget here to isolate single-pass skipRect exactness.
+        gpu.SetGpuKeyframeSubpixelBudgetEnabled(false);
+        gpu.SetGpuSinglePassSkipRectEnabled(true);
+
+        const auto fullOuter = RenderMovieKeyframe(p, outerKf, nullptr, cancel, {}, outerKf.height, &gpu);
+        const auto innerPixels = RenderMovieKeyframe(p, innerKf, nullptr, cancel, {}, innerKf.height, &gpu);
+
+        // Render outer keyframe in multiple horizontal bands (bandRows = 24) so band boundaries
+        // cut right through innerRect.y0 and innerRect.y1, exercising band-local halo clamping.
+        float lastProgress = -1.0f;
+        int progressCalls = 0;
+        auto singlePassOuter = RenderMovieKeyframe(
+            p, outerKf, &innerRect, cancel,
+            [&](float prog)
+            {
+                ASSERT_GE(prog, lastProgress - 1e-5f);
+                ASSERT_LE(prog, 1.0001f);
+                lastProgress = prog;
+                ++progressCalls;
+            },
+            24, &gpu);
+
+        ASSERT_GT(progressCalls, 1);
+        ASSERT_NEAR(1.0f, lastProgress, 1e-3f);
+        ASSERT_EQ(fullOuter.size(), singlePassOuter.size());
+
+        // Inside skipRect, CSResolveAndBlend must write deterministic 0u; outside skipRect,
+        // every pixel has an identical 3x3 primary neighborhood and must match fullOuter tightly.
+        double outerMaxDiff = 0.0;
+        for (int y = 0; y < outerKf.height; ++y)
+        {
+            for (int x = 0; x < outerKf.width; ++x)
+            {
+                const size_t i = static_cast<size_t>(y) * static_cast<size_t>(outerKf.width) + static_cast<size_t>(x);
+                if (x >= innerRect.x0 && x < innerRect.x1 &&
+                    y >= innerRect.y0 && y < innerRect.y1)
+                {
+                    ASSERT_EQ(0u, singlePassOuter[i]);
+                    continue;
+                }
+                for (int shift : { 0, 8, 16 })
+                {
+                    outerMaxDiff = std::max(outerMaxDiff,
+                        std::abs(static_cast<double>((fullOuter[i] >> shift) & 255) -
+                                 static_cast<double>((singlePassOuter[i] >> shift) & 255)));
+                }
+            }
+        }
+        ASSERT_LE(outerMaxDiff, 1.0);
+
+        CompositeInnerKeyframe(singlePassOuter, outerKf, innerPixels, innerKf, innerRect, cancel);
+        ASSERT_LT(FilteredPixelError(fullOuter, singlePassOuter, outerKf.width, outerKf.height), 4.5);
+    };
+
+    // 1. Shallow FP32 shader
+    verifyScene(FractalType::Mandelbrot, BigFloat(-0.7436438870371587), BigFloat(0.1318259042053119), 2.0, 250);
+    // 2. PerturbLds (BurningShip, no BLA)
+    verifyScene(FractalType::BurningShip, BigFloat(-1.755), BigFloat(-0.025), 200.0, 400);
+    // 3. PerturbLdsBla multi-pass (maxIter > 2048)
+    verifyScene(
+        FractalType::Mandelbrot,
+        BigFloat("-1.99999999655308045362110874015473483139206276235932946992201526"),
+        BigFloat(0.0),
+        1.5e17,
+        4500);
+    // 4. kGpuDeepExpThreshold-straddling zoom (5e29): 4-strip Left/Right strips would inflate above 1e30,
+    //    whereas single-pass skipRect stays at full keyframe zoom in PerturbLdsBla.
+    verifyScene(
+        FractalType::Mandelbrot,
+        BigFloat("-0.743643887037158704752191506114774"),
+        BigFloat("0.131825904205311970493132056385139"),
+        5e29,
+        4500);
+    // 5. PerturbDeepExp multi-pass (zoom = 1.5e46, maxIter > 2048)
+    verifyScene(
+        FractalType::Mandelbrot,
+        BigFloat("-1.99999999999999999999998775408187877626974572395292894510228233"),
+        BigFloat(0.0),
+        1.5e46,
+        4500);
+
+    // 6. Border-touching skipRect (x0 == 0, y0 == 0) and defensive RenderGpuMovieBand primary clamping
+    {
+        MoviePlan p;
+        p.width = 64;
+        p.height = 48;
+        p.fps = 24;
+        p.seconds = 1;
+        p.motionSmoothing = false;
+        p.useGpu = true;
+        p.start.width = p.width;
+        p.start.height = p.height;
+        p.start.SetCenter(BigFloat(-0.7436438870371587), BigFloat(0.1318259042053119));
+        p.start.zoom = 2.0;
+        p.start.maxIterations = 250;
+        p.targetX = p.start.hpCenterX;
+        p.targetY = p.start.hpCenterY;
+        p.endZoom = 2.0;
+
+        gpu.SetGpuKeyframeSubpixelBudgetEnabled(false);
+        gpu.SetGpuSinglePassSkipRectEnabled(true);
+        const auto fullKf = RenderMovieKeyframe(p, p.start, nullptr, cancel, {}, p.height, &gpu);
+
+        KeyframeInnerRect borderRect{};
+        borderRect.valid = true;
+        borderRect.x0 = 0;
+        borderRect.y0 = 0;
+        borderRect.x1 = p.width / 2;
+        borderRect.y1 = p.height / 2;
+        const auto borderKf = RenderMovieKeyframe(p, p.start, &borderRect, cancel, {}, 16, &gpu);
+        ASSERT_EQ(fullKf.size(), borderKf.size());
+        double borderMaxDiff = 0.0;
+        for (int y = 0; y < p.height; ++y)
+        {
+            for (int x = 0; x < p.width; ++x)
+            {
+                const size_t i = static_cast<size_t>(y) * static_cast<size_t>(p.width) + static_cast<size_t>(x);
+                if (x < borderRect.x1 && y < borderRect.y1)
+                {
+                    ASSERT_EQ(0u, borderKf[i]);
+                }
+                else
+                {
+                    for (int shift : { 0, 8, 16 })
+                    {
+                        borderMaxDiff = std::max(borderMaxDiff,
+                            std::abs(static_cast<double>((fullKf[i] >> shift) & 255) -
+                                     static_cast<double>((borderKf[i] >> shift) & 255)));
+                    }
+                }
+            }
+        }
+        ASSERT_LE(borderMaxDiff, 1.0);
+
+        // Direct RenderGpuMovieBand: un-inset primary (primary == visible) must be clamped inward by 1 px,
+        // and empty visible with valid primary must skip nothing.
+        auto renderDirectBand = [&](const GpuBandSkipRect* skip) -> std::vector<uint32_t>
+        {
+            std::vector<uint32_t> out(static_cast<size_t>(p.width) * static_cast<size_t>(p.height), 0xDEADBEEFu);
+            ASSERT_TRUE(gpu.BeginGpuMovieFrame(p.width, p.height, false));
+            ASSERT_TRUE(gpu.RenderGpuMovieBand(
+                p.start, 0, p.height, 0,
+                p.theme, p.frequency, p.phase, p.invert, p.interior,
+                out.data(), &cancel, false, skip));
+            ASSERT_TRUE(gpu.FinishGpuMovieFrame(p.width, p.height, out.data(), nullptr));
+            return out;
+        };
+
+        GpuBandSkipRect unInset{};
+        unInset.visible = { 16, 12, 48, 36 };
+        unInset.primary = unInset.visible; // Intentionally missing 1-px inset
+        const auto clampedOut = renderDirectBand(&unInset);
+        for (int y = 0; y < p.height; ++y)
+        {
+            for (int x = 0; x < p.width; ++x)
+            {
+                const size_t i = static_cast<size_t>(y) * static_cast<size_t>(p.width) + static_cast<size_t>(x);
+                if (x >= 16 && x < 48 && y >= 12 && y < 36)
+                {
+                    ASSERT_EQ(0u, clampedOut[i]);
+                }
+                else
+                {
+                    ASSERT_EQ(fullKf[i], clampedOut[i]);
+                }
+            }
+        }
+
+        GpuBandSkipRect emptyVis{};
+        emptyVis.primary = { 16, 12, 48, 36 }; // Must be ignored because visible is empty
+        const auto fullFromEmptyVis = renderDirectBand(&emptyVis);
+        ASSERT_TRUE(fullKf == fullFromEmptyVis);
+    }
+
+    gpu.SetGpuKeyframeSubpixelBudgetEnabled(true);
+}
+
+TEST_CASE(Gpu, KeyframeSubpixelBudgetPreservesResampledQuality)
+{
+    std::atomic<bool> cancel{};
+    MandelbrotEngine gpu(ExecutionMode::Gpu, true);
+    ASSERT_TRUE(gpu.IsGpuAvailable());
+
+    auto verifyBudget = [&](const BigFloat& cx, const BigFloat& cy, double baseZoom, int maxIter, float frequency, bool smooth)
+    {
+        MoviePlan p;
+        p.width = 128;
+        p.height = 96;
+        p.fps = 30;
+        p.seconds = 4;
+        p.frequency = frequency;
+        p.motionSmoothing = false;
+        p.useGpu = true;
+        p.start.width = p.width;
+        p.start.height = p.height;
+        p.start.SetCenter(cx, cy);
+        p.start.zoom = baseZoom;
+        p.start.maxIterations = maxIter;
+        p.start.smooth = smooth;
+        p.targetX = cx;
+        p.targetY = cy;
+        p.endZoom = baseZoom * 16.0;
+
+        const auto pyramid = PlanZoomKeyframes(p);
+        ASSERT_TRUE(pyramid.enabled);
+        ASSERT_GE(pyramid.keyframes.size(), 2u);
+        const auto& kf = pyramid.keyframes[0].camera;
+
+        gpu.SetGpuKeyframeSubpixelBudgetEnabled(false);
+        const auto kfFull = RenderMovieKeyframe(p, kf, nullptr, cancel, {}, kf.height, &gpu);
+        gpu.SetGpuKeyframeSubpixelBudgetEnabled(true);
+        const auto kfSmart = RenderMovieKeyframe(p, kf, nullptr, cancel, {}, kf.height, &gpu);
+        ASSERT_EQ(kfFull.size(), kfSmart.size());
+
+        // Compare resampled 1x frames across the keyframe's full rho range: anchor (1.5x),
+        // mid-range (~1.22x), and lastFrame (~1.0x, matching the deepest keyframe's center).
+        const uint32_t sampleFrames[3]{
+            pyramid.keyframes[0].firstFrame,
+            (pyramid.keyframes[0].firstFrame + pyramid.keyframes[0].lastFrame) / 2,
+            pyramid.keyframes[0].lastFrame
+        };
+        for (uint32_t frameIdx : sampleFrames)
+        {
+            const auto cam = p.CameraAt(static_cast<double>(frameIdx));
+            std::vector<uint32_t> resampledFull, resampledSmart;
+            ResampleKeyframeFrame(kfFull, kf, nullptr, nullptr, 0.0f, cam, nullptr, resampledFull, cancel);
+            ResampleKeyframeFrame(kfSmart, kf, nullptr, nullptr, 0.0f, cam, nullptr, resampledSmart, cancel);
+            ASSERT_EQ(resampledFull.size(), resampledSmart.size());
+            ASSERT_LT(FilteredPixelError(resampledFull, resampledSmart, p.width, p.height), 2.5);
+
+            const auto direct1x = RenderMovieFrame(p, static_cast<double>(frameIdx), cancel, {}, p.height, &gpu);
+            const double errFullVsDirect = FilteredPixelError(direct1x, resampledFull, p.width, p.height);
+            const double errSmartVsDirect = FilteredPixelError(direct1x, resampledSmart, p.width, p.height);
+            ASSERT_LE(errSmartVsDirect, errFullVsDirect + 1.5);
+            ASSERT_LT(errSmartVsDirect, (frequency > 1.5f) ? 10.0 : 7.0);
+        }
+
+        // Direct 1x RenderMovieFrame must remain completely unaffected by the keyframe budget toggle.
+        gpu.SetGpuKeyframeSubpixelBudgetEnabled(false);
+        const auto directOff = RenderMovieFrame(p, 0.0, cancel, {}, p.height, &gpu);
+        gpu.SetGpuKeyframeSubpixelBudgetEnabled(true);
+        const auto directOn = RenderMovieFrame(p, 0.0, cancel, {}, p.height, &gpu);
+        ASSERT_TRUE(directOff == directOn);
+    };
+
+    const BigFloat p16X("-1.99999999655308045362110874015473483139206276235932946992201526");
+    const BigFloat p16Y(0.0);
+
+    // 1. Standard palette frequency at deep PerturbLdsBla minibrot
+    verifyBudget(p16X, p16Y, 1.5e17, 4500, 1.0f, true);
+    // 2. High palette frequency (4x) verifies frequency-scaled threshold prevents gradient aliasing
+    verifyBudget(p16X, p16Y, 1.5e17, 4500, 4.0f, true);
+    // 3. Non-smooth (banded) coloring verifies hard iteration steps stay at full 4x subpixels
+    verifyBudget(BigFloat(-0.7436438870371587), BigFloat(0.1318259042053119), 2.0, 250, 1.0f, false);
+}
+
+TEST_CASE(Gpu, BenchmarkKeyframeOptimizationsDeepZoom)
+{
+    std::atomic<bool> cancel{};
+    MandelbrotEngine gpu(ExecutionMode::Gpu, true);
+    ASSERT_TRUE(gpu.IsGpuAvailable());
+
+    bool fullBench = false;
+#if defined(_WIN32)
+    char* envVal = nullptr;
+    size_t envLen = 0;
+    if (_dupenv_s(&envVal, &envLen, "MANDEL_RUN_GPU_BENCH") == 0 && envVal)
+    {
+        fullBench = (envVal[0] == '1');
+        std::free(envVal);
+    }
+#endif
+    const int trials = fullBench ? 3 : 1;
+
+    auto medianOf = [](std::vector<double> vals) -> double
+    {
+        std::sort(vals.begin(), vals.end());
+        return vals[vals.size() / 2];
+    };
+
+    auto runBench = [&](const char* label, const BigFloat& cx, const BigFloat& cy, double baseZoom, int maxIter)
+    {
+        MoviePlan p;
+        p.width = fullBench ? 160 : 96;
+        p.height = fullBench ? 120 : 72;
+        p.fps = 30;
+        p.seconds = 4;
+        p.motionSmoothing = false;
+        p.useGpu = true;
+        p.start.width = p.width;
+        p.start.height = p.height;
+        p.start.SetCenter(cx, cy);
+        p.start.zoom = baseZoom;
+        p.start.maxIterations = maxIter;
+        p.targetX = cx;
+        p.targetY = cy;
+        p.endZoom = baseZoom * 16.0;
+
+        const auto pyramid = PlanZoomKeyframes(p);
+        ASSERT_TRUE(pyramid.enabled);
+        ASSERT_GE(pyramid.keyframes.size(), 2u);
+        const auto& outerKf = pyramid.keyframes[0].camera;
+        const auto& innerKf = pyramid.keyframes[1].camera;
+        const auto innerRect = ComputeInnerSkipRect(outerKf, innerKf);
+        ASSERT_TRUE(innerRect.valid);
+
+        // Pre-render inner keyframe for visual equivalence check and warm up GPU shaders.
+        gpu.SetGpuSinglePassSkipRectEnabled(true);
+        gpu.SetGpuKeyframeSubpixelBudgetEnabled(true);
+        const auto innerPixels = RenderMovieKeyframe(p, innerKf, nullptr, cancel, {}, innerKf.height, &gpu);
+        gpu.PrepareDeepReference(outerKf, &cancel);
+
+        auto renderMode = [&](bool singlePass, bool smartBudget, std::vector<uint32_t>* outPixels) -> double
+        {
+            gpu.SetGpuSinglePassSkipRectEnabled(singlePass);
+            gpu.SetGpuKeyframeSubpixelBudgetEnabled(smartBudget);
+            const auto t0 = std::chrono::steady_clock::now();
+            auto px = RenderMovieKeyframe(p, outerKf, &innerRect, cancel, {}, outerKf.height, &gpu);
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            ASSERT_EQ(static_cast<size_t>(outerKf.width) * static_cast<size_t>(outerKf.height), px.size());
+            if (outPixels) *outPixels = std::move(px);
+            return ms;
+        };
+
+        // Warm up all 3 configurations and verify resampled 1x visual quality.
+        std::vector<uint32_t> baseKf, spOnlyKf, optKf;
+        renderMode(false, false, &baseKf);
+        renderMode(true, false, &spOnlyKf);
+        renderMode(true, true, &optKf);
+
+        CompositeInnerKeyframe(baseKf, outerKf, innerPixels, innerKf, innerRect, cancel);
+        CompositeInnerKeyframe(optKf, outerKf, innerPixels, innerKf, innerRect, cancel);
+        std::vector<uint32_t> base1x, opt1x;
+        const auto cam0 = p.CameraAt(static_cast<double>(pyramid.keyframes[0].firstFrame));
+        ResampleKeyframeFrame(baseKf, outerKf, nullptr, nullptr, 0.0f, cam0, nullptr, base1x, cancel);
+        ResampleKeyframeFrame(optKf, outerKf, nullptr, nullptr, 0.0f, cam0, nullptr, opt1x, cancel);
+        const double err1x = FilteredPixelError(base1x, opt1x, p.width, p.height);
+        ASSERT_LT(err1x, 2.5);
+
+        std::vector<double> baseTimes, spOnlyTimes, optTimes;
+        for (int t = 0; t < trials; ++t)
+        {
+            if ((t & 1) == 0)
+            {
+                baseTimes.push_back(renderMode(false, false, nullptr));
+                spOnlyTimes.push_back(renderMode(true, false, nullptr));
+                optTimes.push_back(renderMode(true, true, nullptr));
+            }
+            else
+            {
+                optTimes.push_back(renderMode(true, true, nullptr));
+                spOnlyTimes.push_back(renderMode(true, false, nullptr));
+                baseTimes.push_back(renderMode(false, false, nullptr));
+            }
+        }
+        gpu.SetGpuSinglePassSkipRectEnabled(true);
+        gpu.SetGpuKeyframeSubpixelBudgetEnabled(true);
+
+        const double medBase = medianOf(baseTimes);
+        const double medSpOnly = medianOf(spOnlyTimes);
+        const double medOpt = medianOf(optTimes);
+
+        std::cout << "  [KF-BENCH] " << label
+                  << " | kf=" << outerKf.width << "x" << outerKf.height
+                  << " skip=" << (innerRect.x1 - innerRect.x0) << "x" << (innerRect.y1 - innerRect.y0)
+                  << " maxIter=" << maxIter
+                  << " | 4strip+full=" << std::fixed << std::setprecision(1) << medBase << "ms"
+                  << " | 1pass+full=" << medSpOnly << "ms (" << std::setprecision(2) << (medBase / std::max(0.01, medSpOnly)) << "x)"
+                  << " | 1pass+smartSub=" << std::setprecision(1) << medOpt << "ms (" << std::setprecision(2) << (medBase / std::max(0.01, medOpt)) << "x)"
+                  << " | 1xErr=" << std::setprecision(2) << err1x << "\n";
+    };
+
+    runBench(
+        "Seahorse_5e23_Minibrot",
+        BigFloat("-0.743643887037158704752191506114774"),
+        BigFloat("0.131825904205311970493132056385139"),
+        5e23,
+        18000);
+
+    runBench(
+        "Boundary_5e29_DeepExpStraddle",
+        BigFloat("-0.743643887037158704752191506114774"),
+        BigFloat("0.131825904205311970493132056385139"),
+        5e29,
+        12000);
+
+    runBench(
+        "PerturbDeepExp_1.5e46_Minibrot",
+        BigFloat("-1.99999999999999999999998775408187877626974572395292894510228233"),
+        BigFloat(0.0),
+        1.5e46,
+        12000);
+}
+
 
 

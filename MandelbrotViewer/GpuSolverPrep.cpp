@@ -415,11 +415,28 @@ namespace Mandelbrot
         uint32_t subTotal,
         uint32_t stageIterLimit,
         uint32_t heightLimit,
-        uint32_t subRayOffset)
+        uint32_t subRayOffset,
+        const GpuSkipRect* primSkipRect)
     {
         const uint32_t effectiveHeight = (heightLimit > 0u)
             ? std::min<uint32_t>(heightLimit, static_cast<uint32_t>(config.height))
             : static_cast<uint32_t>(config.height);
+
+        uint32_t skipX0 = 0u, skipY0 = 0u, skipX1 = 0u, skipY1 = 0u;
+        if (primSkipRect && primSkipRect->IsValid())
+        {
+            const int cx0 = std::clamp(primSkipRect->x0, 0, config.width);
+            const int cx1 = std::clamp(primSkipRect->x1, 0, config.width);
+            const int cy0 = std::clamp(primSkipRect->y0, 0, static_cast<int>(effectiveHeight));
+            const int cy1 = std::clamp(primSkipRect->y1, 0, static_cast<int>(effectiveHeight));
+            if (cx0 < cx1 && cy0 < cy1)
+            {
+                skipX0 = static_cast<uint32_t>(cx0);
+                skipY0 = static_cast<uint32_t>(cy0);
+                skipX1 = static_cast<uint32_t>(cx1);
+                skipY1 = static_cast<uint32_t>(cy1);
+            }
+        }
 
         switch (mode)
         {
@@ -438,6 +455,10 @@ namespace Mandelbrot
             cb.juliaCy = static_cast<float>(juliaCy);
             cb.bailout2 = static_cast<float>(juliaBailout2);
             cb.outRowOffset = outRowOffset;
+            cb.skipX0 = skipX0;
+            cb.skipY0 = skipY0;
+            cb.skipX1 = skipX1;
+            cb.skipY1 = skipY1;
             return UploadBufferDiscard(constantBuffer.Get(), &cb, sizeof(cb));
         }
         case GpuShaderMode::PerturbLds:
@@ -456,6 +477,10 @@ namespace Mandelbrot
             cb.refCx = static_cast<float>(refState.refCxDouble);
             cb.refCy = static_cast<float>(refState.refCyDouble);
             cb.outRowOffset = outRowOffset;
+            cb.skipX0 = skipX0;
+            cb.skipY0 = skipY0;
+            cb.skipX1 = skipX1;
+            cb.skipY1 = skipY1;
             return UploadBufferDiscard(constantBuffer.Get(), &cb, sizeof(cb));
         }
         case GpuShaderMode::PerturbLdsBla:
@@ -476,6 +501,10 @@ namespace Mandelbrot
             cb.outRowOffset = outRowOffset;
             cb.stageIterLimit = (stageIterLimit > 0u) ? stageIterLimit : cb.maxIter;
             cb.subRayOffset = subRayOffset;
+            cb.skipX0 = skipX0;
+            cb.skipY0 = skipY0;
+            cb.skipX1 = skipX1;
+            cb.skipY1 = skipY1;
             return UploadBufferDiscard(constantBuffer.Get(), &cb, sizeof(cb));
         }
         case GpuShaderMode::PerturbDeepExp:
@@ -499,6 +528,10 @@ namespace Mandelbrot
             cb.outRowOffset = outRowOffset;
             cb.stageIterLimit = (stageIterLimit > 0u) ? stageIterLimit : cb.maxIter;
             cb.subRayOffset = subRayOffset;
+            cb.skipX0 = skipX0;
+            cb.skipY0 = skipY0;
+            cb.skipX1 = skipX1;
+            cb.skipY1 = skipY1;
             return UploadBufferDiscard(constantBuffer.Get(), &cb, sizeof(cb));
         }
         }

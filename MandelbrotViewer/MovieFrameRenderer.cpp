@@ -205,6 +205,132 @@ namespace Mandelbrot
             }
         }
 
+        GpuBandSkipRect ComputeBandSkipRect(
+            const KeyframeInnerRect& skipRect,
+            int fullW,
+            int fullH,
+            int globalRow,
+            int topHalo,
+            int visibleRows,
+            int bandHeight) noexcept
+        {
+            GpuBandSkipRect out{};
+            if (!skipRect.valid ||
+                skipRect.x0 >= skipRect.x1 || skipRect.y0 >= skipRect.y1)
+            {
+                return out;
+            }
+
+            const int sx0 = std::clamp(skipRect.x0, 0, fullW);
+            const int sx1 = std::clamp(skipRect.x1, 0, fullW);
+            const int sy0 = std::clamp(skipRect.y0, 0, fullH);
+            const int sy1 = std::clamp(skipRect.y1, 0, fullH);
+            if (sx0 >= sx1 || sy0 >= sy1) return out;
+
+            const int visY0 = std::clamp(sy0 - globalRow, 0, visibleRows);
+            const int visY1 = std::clamp(sy1 - globalRow, 0, visibleRows);
+            if (visY0 < visY1)
+            {
+                out.visible = { sx0, visY0, sx1, visY1 };
+            }
+
+            // Primary shader skips the 1-px inset of skipRect on every non-border edge so every
+            // non-skipped pixel keeps an exact 3x3 primary neighborhood for boundary detection.
+            const int primGlobalX0 = (sx0 > 0) ? (sx0 + 1) : 0;
+            const int primGlobalX1 = (sx1 < fullW) ? (sx1 - 1) : fullW;
+            const int primGlobalY0 = (sy0 > 0) ? (sy0 + 1) : 0;
+            const int primGlobalY1 = (sy1 < fullH) ? (sy1 - 1) : fullH;
+            if (primGlobalX0 < primGlobalX1 && primGlobalY0 < primGlobalY1)
+            {
+                const int firstGlobalY = globalRow - topHalo;
+                const int primY0 = std::clamp(primGlobalY0 - firstGlobalY, 0, bandHeight);
+                const int primY1 = std::clamp(primGlobalY1 - firstGlobalY, 0, bandHeight);
+                if (primY0 < primY1)
+                {
+                    out.primary = { primGlobalX0, primY0, primGlobalX1, primY1 };
+                }
+            }
+            return out;
+        }
+
+        bool TryRenderGpuMovieKeyframe(
+            const MoviePlan& plan,
+            const FractalConfig& keyframeCamera,
+            const KeyframeInnerRect* skipRect,
+            bool keyframeOversampled,
+            uint32_t* dstPixels,
+            MandelbrotEngine& engine,
+            const std::atomic<bool>& cancel,
+            int bandRows,
+            uint64_t totalWorkPixels,
+            const std::function<void(float)>& progress)
+        {
+            const int kfW = keyframeCamera.width;
+            const int kfH = keyframeCamera.height;
+            if (!engine.CanUseGpu(keyframeCamera) || !engine.BeginGpuMovieFrame(kfW, kfH, false))
+            {
+                return false;
+            }
+
+            const int gpuBandRows = ComputeGpuBandRows(keyframeCamera, kfW, kfH, bandRows);
+            const BigFloat step = BigFloat(3.0 / keyframeCamera.zoom).Mul(BigFloat(1.0 / static_cast<double>(kfW)));
+
+            bool gpuOk = true;
+            uint64_t donePixels = 0;
+            for (int globalRow = 0; globalRow < kfH && gpuOk; globalRow += gpuBandRows)
+            {
+                if (cancel.load(std::memory_order_relaxed)) return false;
+                const int rows = std::min(gpuBandRows, kfH - globalRow);
+                const int topHalo = (globalRow > 0) ? 1 : 0;
+                const int bottomHalo = (globalRow + rows < kfH) ? 1 : 0;
+                const int firstGlobalY = globalRow - topHalo;
+                const int bandHeight = rows + topHalo + bottomHalo;
+                const BigFloat rowOffset((kfH - bandHeight) * 0.5 - firstGlobalY);
+
+                auto band = keyframeCamera;
+                band.height = bandHeight;
+                band.renderStride = 1;
+                band.edgeRefine = false;
+                band.SetCenter(keyframeCamera.hpCenterX, keyframeCamera.hpCenterY + step.Mul(rowOffset));
+
+                GpuBandSkipRect bandSkip{};
+                const GpuBandSkipRect* bandSkipPtr = nullptr;
+                if (skipRect)
+                {
+                    bandSkip = ComputeBandSkipRect(*skipRect, kfW, kfH, globalRow, topHalo, rows, bandHeight);
+                    if (bandSkip.visible.IsValid() || bandSkip.primary.IsValid())
+                    {
+                        bandSkipPtr = &bandSkip;
+                    }
+                }
+
+                uint32_t* outBand = dstPixels + static_cast<size_t>(globalRow) * static_cast<size_t>(kfW);
+                gpuOk = engine.RenderGpuMovieBand(
+                    band, topHalo, rows, globalRow,
+                    plan.theme, plan.frequency, plan.phase, plan.invert, plan.interior,
+                    outBand, &cancel, keyframeOversampled, bandSkipPtr);
+                if (cancel.load(std::memory_order_relaxed)) return false;
+
+                if (gpuOk)
+                {
+                    uint64_t bandWorkPixels = static_cast<uint64_t>(kfW) * static_cast<uint64_t>(rows);
+                    if (bandSkip.visible.IsValid())
+                    {
+                        bandWorkPixels -= static_cast<uint64_t>(bandSkip.visible.x1 - bandSkip.visible.x0) *
+                                          static_cast<uint64_t>(bandSkip.visible.y1 - bandSkip.visible.y0);
+                    }
+                    donePixels += bandWorkPixels;
+                    if (progress && totalWorkPixels > 0)
+                    {
+                        progress(static_cast<float>(static_cast<double>(donePixels) / static_cast<double>(totalWorkPixels)));
+                    }
+                }
+            }
+
+            if (cancel.load(std::memory_order_relaxed)) return false;
+            return gpuOk && engine.FinishGpuMovieFrame(kfW, kfH, dstPixels, nullptr);
+        }
+
         bool RenderMovieCameraRect(
             const MoviePlan& plan,
             const FractalConfig& fullCamera,
@@ -219,7 +345,8 @@ namespace Mandelbrot
             int bandRows,
             uint64_t& completedPixels,
             uint64_t totalWorkPixels,
-            const std::function<void(float)>& progress)
+            const std::function<void(float)>& progress,
+            bool keyframeOversampled = false)
         {
             if (rw <= 0 || rh <= 0) return true;
             if (cancel.load(std::memory_order_relaxed)) return false;
@@ -314,7 +441,7 @@ namespace Mandelbrot
                     gpuOk = engine.RenderGpuMovieBand(
                         band, topHalo, rows, localRow,
                         plan.theme, plan.frequency, plan.phase, plan.invert, plan.interior,
-                        outBand, &cancel);
+                        outBand, &cancel, keyframeOversampled, nullptr);
                     if (cancel.load(std::memory_order_relaxed)) return false;
 
                     if (gpuOk)
@@ -590,6 +717,11 @@ namespace Mandelbrot
                               skipRect->x0 >= 0 && skipRect->y0 >= 0 &&
                               skipRect->x1 <= kfW && skipRect->y1 <= kfH &&
                               skipRect->x0 < skipRect->x1 && skipRect->y0 < skipRect->y1);
+        const bool keyframeOversampled =
+            engine.IsGpuKeyframeSubpixelBudgetEnabled() &&
+            plan.width > 0 && plan.height > 0 &&
+            kfW >= plan.width + (plan.width / 4) &&
+            kfH >= plan.height + (plan.height / 4);
 
         uint64_t totalWorkPixels = static_cast<uint64_t>(kfW) * static_cast<uint64_t>(kfH);
         if (useSkip)
@@ -597,12 +729,33 @@ namespace Mandelbrot
             totalWorkPixels -= static_cast<uint64_t>(skipRect->x1 - skipRect->x0) *
                                static_cast<uint64_t>(skipRect->y1 - skipRect->y0);
         }
+
+        ExecutionMode rectMode = effectiveMode;
+        if (effectiveMode == ExecutionMode::Gpu &&
+            (!useSkip || engine.IsGpuSinglePassSkipRectEnabled()))
+        {
+            if (TryRenderGpuMovieKeyframe(
+                    plan, keyframeCamera, useSkip ? skipRect : nullptr, keyframeOversampled,
+                    output.data(), engine, cancel, bandRows, totalWorkPixels, progress))
+            {
+                return output;
+            }
+            if (cancel.load(std::memory_order_relaxed)) return {};
+            // Single-pass GPU path failed (not canceled); switch to CPU and prepare the full
+            // keyframe CPU deep reference once before rendering fallback strips.
+            rectMode = ExecutionMode::Automatic;
+            engine.SetExecutionMode(ExecutionMode::Automatic);
+            engine.PrepareDeepReference(keyframeCamera, &cancel);
+            if (cancel.load(std::memory_order_relaxed)) return {};
+        }
+
         uint64_t completedPixels = 0;
 
         if (!useSkip)
         {
             if (!RenderMovieCameraRect(plan, keyframeCamera, 0, 0, kfW, kfH,
-                output.data(), engine, effectiveMode, cancel, bandRows, completedPixels, totalWorkPixels, progress))
+                output.data(), engine, rectMode, cancel, bandRows, completedPixels, totalWorkPixels, progress,
+                keyframeOversampled))
             {
                 return {};
             }
@@ -622,7 +775,8 @@ namespace Mandelbrot
         {
             if (s[2] <= 0 || s[3] <= 0) continue;
             if (!RenderMovieCameraRect(plan, keyframeCamera, s[0], s[1], s[2], s[3],
-                output.data(), engine, effectiveMode, cancel, bandRows, completedPixels, totalWorkPixels, progress))
+                output.data(), engine, rectMode, cancel, bandRows, completedPixels, totalWorkPixels, progress,
+                keyframeOversampled))
             {
                 return {};
             }
