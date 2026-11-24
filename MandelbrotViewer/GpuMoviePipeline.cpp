@@ -52,7 +52,8 @@ namespace Mandelbrot
         int destRowOffset,
         const GpuMovieColorParams& colorParams,
         uint32_t* ioBandPixels,
-        const std::atomic<bool>* cancelToken)
+        const std::atomic<bool>* cancelToken,
+        const GpuBandSkipRect* bandSkip)
     {
         if (!m_impl || !m_impl->CanSupportConfig(bandConfig))
         {
@@ -144,10 +145,11 @@ namespace Mandelbrot
         m_impl->UnbindComputeResources();
 
         // Step A: Evaluate primary center pixels across the band (including halo rows) into OutIters in VRAM
+        const GpuSkipRect* primSkipPtr = (bandSkip && bandSkip->primary.IsValid()) ? &bandSkip->primary : nullptr;
         bool primaryCanceled = false;
         if (!m_impl->DispatchPrimaryPass(
                 mode, bandConfig, refState, juliaCx, juliaCy, juliaBailout2,
-                cancelToken, primaryCanceled) || primaryCanceled)
+                cancelToken, primaryCanceled, primSkipPtr) || primaryCanceled)
         {
             return false;
         }
@@ -168,6 +170,21 @@ namespace Mandelbrot
         postCb.avgRgb = colorParams.avgRgb;
         postCb.subGroupThreads =
             (mode == GpuShaderMode::PerturbLds || mode == GpuShaderMode::PerturbLdsBla) ? 512u : 256u;
+        postCb.keyframeOversampled = colorParams.keyframeOversampled ? 1u : 0u;
+        if (bandSkip && bandSkip->visible.IsValid())
+        {
+            const int vx0 = std::clamp(bandSkip->visible.x0, 0, width);
+            const int vx1 = std::clamp(bandSkip->visible.x1, 0, width);
+            const int vy0 = std::clamp(bandSkip->visible.y0, 0, visibleRows);
+            const int vy1 = std::clamp(bandSkip->visible.y1, 0, visibleRows);
+            if (vx0 < vx1 && vy0 < vy1)
+            {
+                postCb.skipX0 = static_cast<uint32_t>(vx0);
+                postCb.skipY0 = static_cast<uint32_t>(vy0);
+                postCb.skipX1 = static_cast<uint32_t>(vx1);
+                postCb.skipY1 = static_cast<uint32_t>(vy1);
+            }
+        }
 
         bool subCanceled = false;
         if (!m_impl->DispatchGpuSubpixelPass(

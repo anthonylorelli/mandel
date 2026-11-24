@@ -84,8 +84,9 @@ namespace Mandelbrot::detail
         uint32_t fractalType, juliaFlag, rowOffset, subpixelTotal;
         float juliaCx, juliaCy, bailout2, pad0;
         uint32_t outRowOffset, pad2, pad3, pad4;
+        uint32_t skipX0, skipY0, skipX1, skipY1;
     };
-    static_assert(sizeof(ShallowCb) == 64);
+    static_assert(sizeof(ShallowCb) == 80);
 
     struct alignas(16) PerturbLdsCb
     {
@@ -94,8 +95,9 @@ namespace Mandelbrot::detail
         uint32_t rowOffset, subpixelTotal;
         float refCx, refCy;
         uint32_t outRowOffset, pad1, pad2, pad3;
+        uint32_t skipX0, skipY0, skipX1, skipY1;
     };
-    static_assert(sizeof(PerturbLdsCb) == 64);
+    static_assert(sizeof(PerturbLdsCb) == 80);
 
     struct alignas(16) PerturbLdsBlaCb
     {
@@ -103,8 +105,9 @@ namespace Mandelbrot::detail
         uint32_t smoothFlag, blaNumLevels, rowOffset, subpixelTotal;
         float blaMaxRadius, refCx, refCy, pad0;
         uint32_t checkCardioid, outRowOffset, stageIterLimit, subRayOffset;
+        uint32_t skipX0, skipY0, skipX1, skipY1;
     };
-    static_assert(sizeof(PerturbLdsBlaCb) == 64);
+    static_assert(sizeof(PerturbLdsBlaCb) == 80);
 
     struct alignas(16) PerturbDeepExpCb
     {
@@ -118,8 +121,9 @@ namespace Mandelbrot::detail
         uint32_t outRowOffset;
         uint32_t stageIterLimit;
         uint32_t subRayOffset;
+        uint32_t skipX0, skipY0, skipX1, skipY1;
     };
-    static_assert(sizeof(PerturbDeepExpCb) == 64);
+    static_assert(sizeof(PerturbDeepExpCb) == 80);
 
     struct alignas(16) PostProcessCb
     {
@@ -127,9 +131,10 @@ namespace Mandelbrot::detail
         uint32_t destRowOffset, fractalType, smoothFlag, invertFlag;
         float frequency, phaseOffset;
         uint32_t interiorColor, avgRgb;
-        uint32_t subGroupThreads, subRayOffset, subRayLimit, pad2;
+        uint32_t subGroupThreads, subRayOffset, subRayLimit, keyframeOversampled;
+        uint32_t skipX0, skipY0, skipX1, skipY1;
     };
-    static_assert(sizeof(PostProcessCb) == 64);
+    static_assert(sizeof(PostProcessCb) == 80);
 
     struct GpuShutterTap
     {

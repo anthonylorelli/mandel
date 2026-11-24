@@ -24,6 +24,7 @@ cbuffer Params : register(b0)
     float refCx;
     float refCy;
     uint outRowOffset, pad1, pad2, pad3;
+    uint skipX0, skipY0, skipX1, skipY1;
 };
 
 Buffer<float2> OrbitFast : register(t0);
@@ -293,6 +294,7 @@ void CSPrimary(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
 
     uint py = tid.y + rowOffset;
     if (tid.x >= width || py >= height) return;
+    if (tid.x >= skipX0 && tid.x < skipX1 && py >= skipY0 && py < skipY1) return;
     OutIters[(tid.y + outRowOffset) * width + tid.x] = EvalPerturbLds(ColCoords[tid.x * 3u + 1u], RowCoords[py * 3u + 1u], sharedLim);
 }
 
@@ -336,6 +338,7 @@ cbuffer Params : register(b0)
     float refCy;
     float pad0;
     uint checkCardioid, outRowOffset, stageIterLimit, subRayOffset;
+    uint skipX0, skipY0, skipX1, skipY1;
 };
 
 struct GpuBlaBlockF32
@@ -548,6 +551,7 @@ void CSPrimary(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
 
     uint py = tid.y + rowOffset;
     if (tid.x >= width || py >= height) return;
+    if (tid.x >= skipX0 && tid.x < skipX1 && py >= skipY0 && py < skipY1) return;
     OutIters[(tid.y + outRowOffset) * width + tid.x] = EvalPerturbLdsBla(ColCoords[tid.x * 3u + 1u], RowCoords[py * 3u + 1u], sharedLim);
 }
 
@@ -561,7 +565,8 @@ void CSPrimaryStage0(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
     GroupMemoryBarrierWithGroupSync();
 
     uint py = tid.y + rowOffset;
-    bool valid = (tid.x < width && py < height);
+    bool valid = (tid.x < width && py < height) &&
+        !(tid.x >= skipX0 && tid.x < skipX1 && py >= skipY0 && py < skipY1);
     bool keepAlive = false;
     uint fullIdx = py * width + tid.x;
 

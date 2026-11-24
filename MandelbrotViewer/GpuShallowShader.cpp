@@ -22,6 +22,7 @@ cbuffer Params : register(b0)
     float bailout2;
     float pad0;
     uint outRowOffset, pad2, pad3, pad4;
+    uint skipX0, skipY0, skipX1, skipY1;
 };
 
 Buffer<float> ColCoords : register(t0);
@@ -291,6 +292,7 @@ void CSPrimary(uint3 tid : SV_DispatchThreadID)
 {
     uint py = tid.y + rowOffset;
     if (tid.x >= width || py >= height) return;
+    if (tid.x >= skipX0 && tid.x < skipX1 && py >= skipY0 && py < skipY1) return;
     float xc = ColCoords[tid.x * 3u + 1u];
     float yc = RowCoords[py * 3u + 1u];
     OutIters[(tid.y + outRowOffset) * width + tid.x] = EvalShallowSample(xc, yc);

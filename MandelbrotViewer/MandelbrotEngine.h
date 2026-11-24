@@ -15,6 +15,7 @@ namespace Mandelbrot
 {
     class ColorTheme;
     class GpuFractalSolver;
+    struct GpuBandSkipRect;
     struct GpuMovieShutterParams;
     using MandelbrotConfig = FractalConfig;
 
@@ -87,14 +88,20 @@ namespace Mandelbrot
             bool invert,
             uint32_t interiorColor,
             uint32_t* ioBandPixels,
-            const std::atomic<bool>* cancelToken = nullptr);
+            const std::atomic<bool>* cancelToken = nullptr,
+            bool keyframeOversampled = false,
+            const GpuBandSkipRect* bandSkip = nullptr);
         bool FinishGpuMovieFrame(
             int width,
             int height,
             uint32_t* outPixels,
             const GpuMovieShutterParams* shutterParams = nullptr);
-        void SetGpuMultiPassSubpixelsEnabled(bool enabled);
-        void SetGpuMultiPassSubpixelBatchLimit(size_t maxRays);
+        void SetGpuMultiPassSubpixelsEnabled(bool enabled) noexcept;
+        void SetGpuMultiPassSubpixelBatchLimit(size_t maxRays) noexcept;
+        void SetGpuKeyframeSubpixelBudgetEnabled(bool enabled) noexcept { m_gpuKeyframeSubpixelBudget = enabled; }
+        bool IsGpuKeyframeSubpixelBudgetEnabled() const noexcept { return m_gpuKeyframeSubpixelBudget; }
+        void SetGpuSinglePassSkipRectEnabled(bool enabled) noexcept { m_gpuSinglePassSkipRect = enabled; }
+        bool IsGpuSinglePassSkipRectEnabled() const noexcept { return m_gpuSinglePassSkipRect; }
 
         static void ZoomViewport(
             FractalConfig& config,
@@ -153,6 +160,8 @@ namespace Mandelbrot
         bool m_allowSoftwareGpu{ false };
         bool m_gpuMultiPassSubpixelsEnabled{ true };
         size_t m_gpuMultiPassSubpixelBatchLimit{ 0 };
+        bool m_gpuKeyframeSubpixelBudget{ true };
+        bool m_gpuSinglePassSkipRect{ true };
         std::vector<float> m_sampleWeights;
         DeepReferenceCache m_deepCache;
         std::unique_ptr<GpuFractalSolver> m_gpuSolver;

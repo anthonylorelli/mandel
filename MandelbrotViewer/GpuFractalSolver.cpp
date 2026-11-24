@@ -60,7 +60,8 @@ namespace Mandelbrot
         double juliaCy,
         double juliaBailout2,
         const std::atomic<bool>* cancelToken,
-        bool& outCanceled)
+        bool& outCanceled,
+        const GpuSkipRect* primSkipRect)
     {
         outCanceled = false;
         auto canceled = [&] { return cancelToken && cancelToken->load(std::memory_order_relaxed); };
@@ -112,7 +113,7 @@ namespace Mandelbrot
 
             if (!UploadFractalCb(
                 mode, config, refState, juliaCx, juliaCy, juliaBailout2,
-                0u, 0u, 0u, stage0Limit))
+                0u, 0u, 0u, stage0Limit, 0u, 0u, primSkipRect))
             {
                 UnbindComputeResources();
                 return false;
@@ -161,7 +162,7 @@ namespace Mandelbrot
             if (!UploadFractalCb(
                 mode, config, refState, juliaCx, juliaCy, juliaBailout2,
                 static_cast<uint32_t>(rowStart), static_cast<uint32_t>(rowStart), 0u, 0u,
-                static_cast<uint32_t>(rowStart + chunkRows)))
+                static_cast<uint32_t>(rowStart + chunkRows), 0u, primSkipRect))
             {
                 UnbindComputeResources();
                 return false;
