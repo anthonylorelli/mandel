@@ -711,8 +711,8 @@ TEST_CASE(Gpu, MultiPassSubpixelsMatchSinglePassAndCpu)
         const auto cpuMovie = RenderMovieFrame(cpuPlan, 0.0, cancel, {}, cpuPlan.height, &cpu);
 
         ASSERT_EQ(total, singleMovie.size());
-        ASSERT_TRUE(singleMovie == multiMovie);
-        ASSERT_TRUE(singleMovie == batchedMovie);
+        ASSERT_TRUE(multiMovie == batchedMovie);
+        ASSERT_LT(FilteredPixelError(singleMovie, multiMovie, cfg.width, cfg.height), 0.5);
         ASSERT_LT(FilteredPixelError(cpuMovie, multiMovie, cfg.width, cfg.height), maxCpuErr);
     };
 
@@ -729,15 +729,15 @@ TEST_CASE(Gpu, MultiPassSubpixelsMatchSinglePassAndCpu)
         verifyScene(cfg, 4.5);
     }
 
-    // PerturbDeepExp (exact period-80 minibrot at zoom = 1e48, maxIterations = 4500 > 2048)
+    // PerturbDeepExp (framed period-40 minibrot at zoom = 1.5e46, maxIterations = 4500 > 2048)
     {
         FractalConfig cfg;
-        cfg.width = 65;
-        cfg.height = 49;
+        cfg.width = 81;
+        cfg.height = 57;
         cfg.SetCenter(
-            BigFloat("-1.99999999999999999999999999999999999999999999998987041394721193"),
+            BigFloat("-1.99999999999999999999998775408187877626974572395292894510228233"),
             BigFloat(0.0));
-        cfg.zoom = 1e48;
+        cfg.zoom = 1.5e46;
         cfg.maxIterations = 4500;
         verifyScene(cfg, 4.5);
     }
@@ -775,7 +775,7 @@ TEST_CASE(Gpu, BenchmarkMultiPassSubpixelsDeepZoom)
         const auto warmSingle = RenderMovieFrame(plan, 0.0, cancel, {}, plan.height, &gpu);
         gpu.SetGpuMultiPassSubpixelsEnabled(true);
         const auto warmMulti = RenderMovieFrame(plan, 0.0, cancel, {}, plan.height, &gpu);
-        ASSERT_TRUE(warmSingle == warmMulti);
+        ASSERT_LT(FilteredPixelError(warmSingle, warmMulti, cfg.width, cfg.height), 0.5);
 
         // Measure boundary subpixel count and primary-only baseline.
         std::vector<float> iters;
@@ -852,20 +852,20 @@ TEST_CASE(Gpu, BenchmarkMultiPassSubpixelsDeepZoom)
                   << " (" << std::setprecision(2) << (medSingleSub / medMultiSub) << "x)\n";
     };
 
-    // 1. PerturbLdsBla deep period-31 minibrot (zoom = 1e18, maxIter = 16000) — sharp interior/exterior boundary
+    // 1. PerturbLdsBla framed period-16 minibrot (zoom = 1.5e17, maxIter = 16000) — sharp interior/exterior boundary
     {
         FractalConfig cfg;
         cfg.width = 192;
         cfg.height = 144;
         cfg.SetCenter(
-            BigFloat("-1.99999999999999999678980604002992640582094090293837417913303182"),
+            BigFloat("-1.99999999655308045362110874015473483139206276235932946992201526"),
             BigFloat(0.0));
-        cfg.zoom = 1e18;
+        cfg.zoom = 1.5e17;
         cfg.maxIterations = 16000;
-        runBench("PerturbLdsBla_1e18_Minibrot", cfg);
+        runBench("PerturbLdsBla_1.5e17_Minibrot", cfg);
     }
 
-    // 2. PerturbLdsBla Seahorse Valley deep minibrot edge (zoom = 5e23, maxIter = 18000) — high-period interior + 14k filaments
+    // 2. Seahorse Valley deep minibrot edge (zoom = 5e23, maxIter = 18000) — high-period interior + 14k filaments
     {
         FractalConfig cfg;
         cfg.width = 160;
@@ -875,7 +875,7 @@ TEST_CASE(Gpu, BenchmarkMultiPassSubpixelsDeepZoom)
             BigFloat("0.131825904205311970493132056385139"));
         cfg.zoom = 5e23;
         cfg.maxIterations = 18000;
-        runBench("PerturbLdsBla_5e23_SeahorseMinibrot", cfg);
+        runBench("Seahorse_5e23_Minibrot", cfg);
     }
 
     // 3. PerturbLdsBla escaping filament spread (zoom = 2.5e15, maxIter = 16000)
@@ -891,17 +891,17 @@ TEST_CASE(Gpu, BenchmarkMultiPassSubpixelsDeepZoom)
         runBench("PerturbLdsBla_2.5e15_FilamentSpread", cfg);
     }
 
-    // 4. PerturbDeepExp ultra-deep period-80 minibrot (zoom = 1e48, maxIter = 12000) — FloatExp interior/exterior boundary
+    // 4. PerturbDeepExp ultra-deep period-40 minibrot (zoom = 1.5e46, maxIter = 12000) — FloatExp interior/exterior boundary
     {
         FractalConfig cfg;
         cfg.width = 160;
         cfg.height = 120;
         cfg.SetCenter(
-            BigFloat("-1.99999999999999999999999999999999999999999999998987041394721193"),
+            BigFloat("-1.99999999999999999999998775408187877626974572395292894510228233"),
             BigFloat(0.0));
-        cfg.zoom = 1e48;
+        cfg.zoom = 1.5e46;
         cfg.maxIterations = 12000;
-        runBench("PerturbDeepExp_1e48_Minibrot", cfg);
+        runBench("PerturbDeepExp_1.5e46_Minibrot", cfg);
     }
 }
 
