@@ -13,8 +13,9 @@ namespace Mandelbrot::detail
     inline constexpr uint64_t kMaxPrimaryIterBudget = 6'000'000'000ULL;
     inline constexpr size_t kMaxSubpixelBatchPixels = 2ULL * 1024 * 1024;
     inline constexpr size_t kMaxMultiPassSubRays = 4ULL * 1024 * 1024;
-    inline constexpr size_t kMaxFullFrameAccumPixels = 16ULL * 1024 * 1024;
+    inline constexpr size_t kMaxFullFrameAccumPixels = 32ULL * 1024 * 1024;
     inline constexpr size_t kD3D11SafeMaxBufferBytes = 128ULL * 1024 * 1024;
+    static_assert(kMaxFullFrameAccumPixels * sizeof(uint32_t) <= kD3D11SafeMaxBufferBytes);
     inline constexpr uint32_t kIndirectSubpixelSentinel = 0xFFFFFFFFu;
     inline constexpr uint32_t kMovieShutterTapCount = 7;
     inline constexpr size_t kPaletteLutSize = 4096;

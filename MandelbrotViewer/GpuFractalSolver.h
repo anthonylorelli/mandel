@@ -69,6 +69,8 @@ namespace Mandelbrot
         bool CanSupportConfig(const FractalConfig& config) const noexcept;
         void SetMultiPassSubpixelsEnabled(bool enabled) noexcept;
         void SetMultiPassSubpixelBatchLimit(size_t maxRays) noexcept;
+        void SetFullFrameAccumMaxPixels(size_t maxPixels) noexcept;
+        bool LastMovieFrameUsedFullAccum() const noexcept;
 
         // Pre-computes and uploads the full-frame reference orbit and GPU BLA table
         // so horizontal render bands share identical skip radii without re-uploading.

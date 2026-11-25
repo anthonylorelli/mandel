@@ -4,6 +4,7 @@
 #include "DeepZoomSolver.h"
 #include "FractalFormulas.h"
 #include "GpuFractalSolver.h"
+#include "GpuSolverTypes.h"
 #include "JuliaSolver.h"
 #include "MandelbrotSimd.h"
 #include "RenderPass.h"
@@ -28,6 +29,7 @@ namespace Mandelbrot
         , m_allowSoftwareGpu(other.m_allowSoftwareGpu)
         , m_gpuMultiPassSubpixelsEnabled(other.m_gpuMultiPassSubpixelsEnabled)
         , m_gpuMultiPassSubpixelBatchLimit(other.m_gpuMultiPassSubpixelBatchLimit)
+        , m_gpuFullFrameAccumMaxPixels(other.m_gpuFullFrameAccumMaxPixels)
         , m_gpuKeyframeSubpixelBudget(other.m_gpuKeyframeSubpixelBudget)
         , m_gpuSinglePassSkipRect(other.m_gpuSinglePassSkipRect)
         , m_sampleWeights(other.m_sampleWeights)
@@ -43,6 +45,7 @@ namespace Mandelbrot
             m_allowSoftwareGpu = other.m_allowSoftwareGpu;
             m_gpuMultiPassSubpixelsEnabled = other.m_gpuMultiPassSubpixelsEnabled;
             m_gpuMultiPassSubpixelBatchLimit = other.m_gpuMultiPassSubpixelBatchLimit;
+            m_gpuFullFrameAccumMaxPixels = other.m_gpuFullFrameAccumMaxPixels;
             m_gpuKeyframeSubpixelBudget = other.m_gpuKeyframeSubpixelBudget;
             m_gpuSinglePassSkipRect = other.m_gpuSinglePassSkipRect;
             m_sampleWeights = other.m_sampleWeights;
@@ -62,6 +65,7 @@ namespace Mandelbrot
             m_gpuSolver = std::make_unique<GpuFractalSolver>(m_allowSoftwareGpu);
             m_gpuSolver->SetMultiPassSubpixelsEnabled(m_gpuMultiPassSubpixelsEnabled);
             m_gpuSolver->SetMultiPassSubpixelBatchLimit(m_gpuMultiPassSubpixelBatchLimit);
+            m_gpuSolver->SetFullFrameAccumMaxPixels(m_gpuFullFrameAccumMaxPixels);
         }
         return *m_gpuSolver;
     }
@@ -388,6 +392,27 @@ namespace Mandelbrot
         {
             m_gpuSolver->SetMultiPassSubpixelBatchLimit(maxRays);
         }
+    }
+
+    void MandelbrotEngine::SetGpuFullFrameAccumMaxPixels(size_t maxPixels) noexcept
+    {
+        m_gpuFullFrameAccumMaxPixels = maxPixels;
+        if (m_gpuSolver)
+        {
+            m_gpuSolver->SetFullFrameAccumMaxPixels(maxPixels);
+        }
+    }
+
+    size_t MandelbrotEngine::GetGpuFullFrameAccumMaxPixels() const noexcept
+    {
+        return (m_gpuFullFrameAccumMaxPixels == 0)
+            ? detail::kMaxFullFrameAccumPixels
+            : std::min<size_t>(m_gpuFullFrameAccumMaxPixels, detail::kMaxFullFrameAccumPixels);
+    }
+
+    bool MandelbrotEngine::LastGpuMovieFrameUsedFullAccum() const noexcept
+    {
+        return m_gpuSolver ? m_gpuSolver->LastMovieFrameUsedFullAccum() : false;
     }
 
     void MandelbrotEngine::ZoomViewport(

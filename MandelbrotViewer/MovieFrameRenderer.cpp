@@ -372,7 +372,7 @@ namespace Mandelbrot
             subCam.SetCenter(subCenterX, fullCamera.hpCenterY);
 
             const size_t subVisiblePixels = static_cast<size_t>(subW) * static_cast<size_t>(rh);
-            const bool gpuFullRect = (subVisiblePixels <= 16ULL * 1024 * 1024);
+            const bool gpuFullRect = (subVisiblePixels <= engine.GetGpuFullFrameAccumMaxPixels());
 
             auto copySubRows = [&](const uint32_t* srcBase, int localStartRow, int rowCount)
             {
@@ -565,7 +565,7 @@ namespace Mandelbrot
         const BigFloat step(3.0 / camera.zoom / plan.width);
         GpuMovieShutterParams shutter{};
         const bool hasShutter = detail::BuildShutterParams(plan, frameIndex, camera, shutter);
-        const bool gpuFullFrame = (totalPixels <= 16ULL * 1024 * 1024);
+        const bool gpuFullFrame = (totalPixels <= engine.GetGpuFullFrameAccumMaxPixels());
 
         if (effectiveMode == ExecutionMode::Gpu &&
             engine.CanUseGpu(camera) &&

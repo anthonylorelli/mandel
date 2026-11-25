@@ -16,11 +16,12 @@ namespace Mandelbrot
 
         std::lock_guard lock(m_impl->mutex);
         m_impl->movieFullFrameAccum = false;
+        m_impl->lastMovieFrameUsedFullAccum = false;
         m_impl->movieShutterBlur = false;
         m_impl->movieFrameWidth = 0;
         m_impl->movieFrameHeight = 0;
         const size_t totalPixels = static_cast<size_t>(width) * static_cast<size_t>(height);
-        if (totalPixels <= kMaxFullFrameAccumPixels)
+        if (totalPixels <= m_impl->fullFrameAccumMaxPixels)
         {
             if (!m_impl->EnsureStructuredUavSrvBuffer(
                     totalPixels, sizeof(uint32_t),
@@ -35,6 +36,7 @@ namespace Mandelbrot
                 return false;
             }
             m_impl->movieFullFrameAccum = true;
+            m_impl->lastMovieFrameUsedFullAccum = true;
             m_impl->movieShutterBlur = enableShutterBlur;
             m_impl->movieFrameWidth = width;
             m_impl->movieFrameHeight = height;
