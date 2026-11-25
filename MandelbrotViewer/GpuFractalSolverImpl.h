@@ -65,6 +65,7 @@ namespace Mandelbrot
         bool usingSoftwareAdapter{ false };
         bool multiPassSubpixelsEnabled{ true };
         size_t multiPassSubpixelBatchLimit{ detail::kMaxMultiPassSubRays };
+        size_t fullFrameAccumMaxPixels{ detail::kMaxFullFrameAccumPixels };
 
         ComPtr<ID3D11Device> device;
         ComPtr<ID3D11DeviceContext> context;
@@ -134,6 +135,7 @@ namespace Mandelbrot
         size_t accumPixelsCapElems{ 0 };
         size_t accumPixelsStagingCapBytes{ 0 };
         bool movieFullFrameAccum{ false };
+        bool lastMovieFrameUsedFullAccum{ false };
         bool movieShutterBlur{ false };
         int movieFrameWidth{ 0 };
         int movieFrameHeight{ 0 };

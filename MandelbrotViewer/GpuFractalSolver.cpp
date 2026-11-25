@@ -52,6 +52,22 @@ namespace Mandelbrot
             : std::clamp<size_t>(maxRays, 1, kMaxMultiPassSubRays);
     }
 
+    void GpuFractalSolver::SetFullFrameAccumMaxPixels(size_t maxPixels) noexcept
+    {
+        if (!m_impl) return;
+        std::lock_guard lock(m_impl->mutex);
+        m_impl->fullFrameAccumMaxPixels = (maxPixels == 0)
+            ? kMaxFullFrameAccumPixels
+            : std::min<size_t>(maxPixels, kMaxFullFrameAccumPixels);
+    }
+
+    bool GpuFractalSolver::LastMovieFrameUsedFullAccum() const noexcept
+    {
+        if (!m_impl) return false;
+        std::lock_guard lock(m_impl->mutex);
+        return m_impl->lastMovieFrameUsedFullAccum;
+    }
+
     bool GpuFractalSolver::Impl::DispatchPrimaryPass(
         GpuShaderMode mode,
         const FractalConfig& config,

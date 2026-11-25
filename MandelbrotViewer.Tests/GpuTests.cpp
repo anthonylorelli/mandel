@@ -435,11 +435,19 @@ TEST_CASE(Gpu, FusedMoviePostProcessCoversThemesNewtonDeepExpAndNoSmoothing)
         verifyMoviePlan(deepPlan, 12.0, 4.5);
     }
 
-    // 5. >16M-pixel strip-based readback path (!movieFullFrameAccum)
+    // 5. >32M boundary check and strip-based readback + CPU shutter fallback (!movieFullFrameAccum)
     {
+        ASSERT_EQ(32ULL * 1024 * 1024, sharedGpu.GetGpuFullFrameAccumMaxPixels());
+        ASSERT_TRUE(sharedGpu.BeginGpuMovieFrame(8192, 4097, false)); // 33,562,624 > 32M
+        ASSERT_FALSE(sharedGpu.LastGpuMovieFrameUsedFullAccum());
+        uint32_t dummyPixel = 0;
+        ASSERT_TRUE(sharedGpu.FinishGpuMovieFrame(8192, 4097, &dummyPixel, nullptr));
+
+        sharedGpu.SetGpuFullFrameAccumMaxPixels(16ULL * 1024 * 1024);
+
         MoviePlan stripPlan;
         stripPlan.width = 4096;
-        stripPlan.height = 4097; // 16,781,312 pixels > kMaxFullFrameAccumPixels (16,777,216)
+        stripPlan.height = 4097; // 16,781,312 pixels > 16M override cap
         stripPlan.fps = 24;
         stripPlan.seconds = 1;
         stripPlan.motionSmoothing = true;
@@ -453,7 +461,11 @@ TEST_CASE(Gpu, FusedMoviePostProcessCoversThemesNewtonDeepExpAndNoSmoothing)
         stripPlan.start.maxIterations = 64;
 
         const auto stripDefault = RenderMovieFrame(stripPlan, 6.0, cancel, {}, stripPlan.height, &sharedGpu);
+        ASSERT_FALSE(sharedGpu.LastGpuMovieFrameUsedFullAccum());
         const auto stripFine = RenderMovieFrame(stripPlan, 6.0, cancel, {}, 512, &sharedGpu);
+        ASSERT_FALSE(sharedGpu.LastGpuMovieFrameUsedFullAccum());
+        sharedGpu.SetGpuFullFrameAccumMaxPixels(0);
+
         ASSERT_EQ(static_cast<size_t>(stripPlan.width) * static_cast<size_t>(stripPlan.height), stripDefault.size());
         ASSERT_EQ(stripDefault.size(), stripFine.size());
         for (size_t i = 0; i < stripDefault.size(); i += 997)
@@ -1346,5 +1358,124 @@ TEST_CASE(Gpu, BenchmarkKeyframeOptimizationsDeepZoom)
         12000);
 }
 
+TEST_CASE(Gpu, BenchmarkFullFrameAccum4KKeyframe)
+{
+    std::atomic<bool> cancel{};
+    MandelbrotEngine gpu(ExecutionMode::Gpu, true);
+    ASSERT_TRUE(gpu.IsGpuAvailable());
+    ASSERT_EQ(32ULL * 1024 * 1024, gpu.GetGpuFullFrameAccumMaxPixels());
 
+    bool fullBench = false;
+#if defined(_WIN32)
+    char* envVal = nullptr;
+    size_t envLen = 0;
+    if (_dupenv_s(&envVal, &envLen, "MANDEL_RUN_GPU_BENCH") == 0 && envVal)
+    {
+        fullBench = (envVal[0] == '1');
+        std::free(envVal);
+    }
+#endif
+    const int trials = fullBench ? 5 : 3;
 
+    auto medianOf = [](std::vector<double> vals) -> double
+    {
+        std::sort(vals.begin(), vals.end());
+        return vals[vals.size() / 2];
+    };
+
+    MoviePlan p;
+    p.width = 3840;
+    p.height = 2160;
+    p.fps = 30;
+    p.seconds = 4;
+    p.motionSmoothing = false;
+    p.useGpu = true;
+    p.start.width = p.width;
+    p.start.height = p.height;
+    p.start.SetCenter(BigFloat(-0.7436438870371587), BigFloat(0.1318259042053119));
+    p.start.zoom = 2.0;
+    p.start.maxIterations = 64;
+    p.targetX = p.start.hpCenterX;
+    p.targetY = p.start.hpCenterY;
+    p.endZoom = 32.0;
+
+    const auto pyramid = PlanZoomKeyframes(p);
+    ASSERT_TRUE(pyramid.enabled);
+    ASSERT_GE(pyramid.keyframes.size(), 2u);
+    const auto& outerKf = pyramid.keyframes[0].camera;
+    const auto& innerKf = pyramid.keyframes[1].camera;
+    ASSERT_EQ(5772, outerKf.width);
+    ASSERT_EQ(3252, outerKf.height);
+    const size_t kfPixels = static_cast<size_t>(outerKf.width) * static_cast<size_t>(outerKf.height);
+    ASSERT_GT(kfPixels, 16ULL * 1024 * 1024);
+    ASSERT_LE(kfPixels, 32ULL * 1024 * 1024);
+
+    const auto innerRect = ComputeInnerSkipRect(outerKf, innerKf);
+    ASSERT_TRUE(innerRect.valid);
+
+    // Match MovieExport.cpp's GPU keyframe band budget (3840*1080 / 5772 = 718 rows -> 5 bands)
+    const int prodBandRows = std::clamp((3840 * 1080) / outerKf.width, 64, outerKf.height);
+
+    auto runBench = [&](const char* label, const KeyframeInnerRect* skipRect, int bandRows)
+    {
+        const int expectedBands = (outerKf.height + bandRows - 1) / bandRows;
+        auto renderMode = [&](bool fullAccum32M, std::vector<uint32_t>* outPixels) -> double
+        {
+            gpu.SetGpuFullFrameAccumMaxPixels(fullAccum32M ? 0 : (16ULL * 1024 * 1024));
+            const auto t0 = std::chrono::steady_clock::now();
+            auto px = RenderMovieKeyframe(p, outerKf, skipRect, cancel, {}, bandRows, &gpu);
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            ASSERT_EQ(kfPixels, px.size());
+            ASSERT_EQ(fullAccum32M, gpu.LastGpuMovieFrameUsedFullAccum());
+            if (outPixels) *outPixels = std::move(px);
+            return ms;
+        };
+
+        // Warm up both paths (allocates full-frame accum & staging buffers once) and verify
+        // bit-exact equivalence between 16M strip readback and 32M GPU-resident accumulation.
+        std::vector<uint32_t> stripPx, fullPx;
+        renderMode(false, &stripPx);
+        renderMode(true, &fullPx);
+        ASSERT_TRUE(stripPx == fullPx);
+        stripPx.clear();
+        stripPx.shrink_to_fit();
+        fullPx.clear();
+        fullPx.shrink_to_fit();
+
+        std::vector<double> stripTimes, fullTimes;
+        stripTimes.reserve(static_cast<size_t>(trials));
+        fullTimes.reserve(static_cast<size_t>(trials));
+        for (int t = 0; t < trials; ++t)
+        {
+            if ((t & 1) == 0)
+            {
+                stripTimes.push_back(renderMode(false, nullptr));
+                fullTimes.push_back(renderMode(true, nullptr));
+            }
+            else
+            {
+                fullTimes.push_back(renderMode(true, nullptr));
+                stripTimes.push_back(renderMode(false, nullptr));
+            }
+        }
+        gpu.SetGpuFullFrameAccumMaxPixels(0);
+
+        const double medStrip = medianOf(stripTimes);
+        const double medFull = medianOf(fullTimes);
+        const double speedup = medStrip / std::max(0.01, medFull);
+
+        std::cout << "  [ACCUM-BENCH] " << label
+                  << " | kf=" << outerKf.width << "x" << outerKf.height
+                  << " (" << std::fixed << std::setprecision(1) << (static_cast<double>(kfPixels) / 1e6) << "M px)"
+                  << " bands=" << expectedBands
+                  << " | 16M-strip=" << medStrip << "ms"
+                  << " | 32M-full=" << medFull << "ms"
+                  << " (" << std::setprecision(2) << speedup << "x)\n";
+    };
+
+    // 1. 4K 1.5x outer keyframe with single-pass skipRect at production band budget (718 rows -> 5 bands)
+    runBench("4K_1.5x_OuterKf_5band", &innerRect, prodBandRows);
+
+    // 2. 4K 1.5x full keyframe at deep-zoom TDR band size (~204 rows -> 16 bands)
+    runBench("4K_1.5x_FullKf_16band", nullptr, 204);
+}
