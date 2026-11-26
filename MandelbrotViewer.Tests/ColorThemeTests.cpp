@@ -371,4 +371,54 @@ TEST_CASE(ColorTheme, DirectionalLighting_OptionalReliefAsymmetryInteriorAndNewt
     {
         ASSERT_EQ(0xFFu, (p >> 24) & 0xFFu);
     }
+
+    // Non-finite lighting parameters must never cause out-of-bounds LUT indexing or UB.
+    {
+        const float nanVal = std::numeric_limits<float>::quiet_NaN();
+        const float infVal = std::numeric_limits<float>::infinity();
+
+        DirectionalLightingParams badStrength{};
+        badStrength.enabled = true;
+        badStrength.strength = nanVal;
+        ASSERT_FALSE(badStrength.IsActive());
+        badStrength.strength = infVal;
+        ASSERT_FALSE(badStrength.IsActive());
+
+        DirectionalLightingParams badAngles{};
+        badAngles.enabled = true;
+        badAngles.azimuthDeg = nanVal;
+        badAngles.elevationDeg = infVal;
+        badAngles.strength = 1.0f;
+
+        DirectionalLightingParams defaultAngles{};
+        defaultAngles.enabled = true;
+        defaultAngles.azimuthDeg = 135.0f;
+        defaultAngles.elevationDeg = 45.0f;
+        defaultAngles.strength = 1.0f;
+
+        std::vector<uint32_t> sanitizedOut(W * H), defaultOut(W * H);
+        grayTheme.Recolor(hill, sanitizedOut.data(), hill.size(), 1.0f, 0.0f, false, interiorColor, FractalType::Mandelbrot, W, nullptr, true, &badAngles);
+        grayTheme.Recolor(hill, defaultOut.data(), hill.size(), 1.0f, 0.0f, false, interiorColor, FractalType::Mandelbrot, W, nullptr, true, &defaultAngles);
+        ASSERT_TRUE(sanitizedOut == defaultOut);
+    }
+
+    // Mixed interior/escaped boundary pixels (weight = 1.0, 1/4 escaped + 3/4 interior subpixels)
+    // must receive the same specular weighting regardless of whether centerIter >= 0 or < 0.
+    {
+        std::vector<float> hillCenterEsc = hill;
+        std::vector<float> hillCenterInt = hill;
+        const size_t probeIdx = topLeftSlope;
+        const float probeIter = hill[probeIdx];
+        hillCenterInt[probeIdx] = -1.0f;
+
+        std::vector<SubpixelSamples> subs{
+            SubpixelSamples{ probeIdx, 1.0f, { probeIter, -1.0f, -1.0f, -1.0f } }
+        };
+
+        std::vector<uint32_t> outEsc(W * H), outInt(W * H);
+        grayTheme.Recolor(hillCenterEsc, outEsc.data(), hill.size(), 1.0f, 0.0f, false, interiorColor, FractalType::Mandelbrot, W, &subs, true, &nw);
+        grayTheme.Recolor(hillCenterInt, outInt.data(), hill.size(), 1.0f, 0.0f, false, interiorColor, FractalType::Mandelbrot, W, &subs, true, &nw);
+        ASSERT_NEAR(redOf(outEsc[probeIdx]), redOf(outInt[probeIdx]), 1);
+    }
 }
+

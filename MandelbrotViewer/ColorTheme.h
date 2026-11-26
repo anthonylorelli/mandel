@@ -53,15 +53,19 @@ namespace Mandelbrot
         float elevationDeg{ 45.0f }; // Light altitude above plane [5, 85] degrees
         float strength{ 1.0f };      // Relief / bump depth [0.0, 2.5]
 
-        constexpr bool IsActive() const noexcept
+        bool IsActive() const noexcept
         {
-            return enabled && strength > 0.0f;
+            return enabled && std::isfinite(strength) && strength > 0.0f;
         }
 
         void ComputeLightDirection(float& lx, float& ly, float& lz) const noexcept
         {
-            const float azRad = azimuthDeg * (std::numbers::pi_v<float> / 180.0f);
-            const float elRad = std::clamp(elevationDeg, MinElevationDeg, MaxElevationDeg) * (std::numbers::pi_v<float> / 180.0f);
+            const float safeAz = std::isfinite(azimuthDeg) ? azimuthDeg : 135.0f;
+            const float safeEl = std::isfinite(elevationDeg)
+                ? std::clamp(elevationDeg, MinElevationDeg, MaxElevationDeg)
+                : 45.0f;
+            const float azRad = safeAz * (std::numbers::pi_v<float> / 180.0f);
+            const float elRad = safeEl * (std::numbers::pi_v<float> / 180.0f);
             const float cosEl = std::cos(elRad);
             lx = std::cos(azRad) * cosEl;
             ly = std::sin(azRad) * cosEl;

@@ -611,11 +611,51 @@ namespace Mandelbrot
             const float outG = std::clamp(linG * shade + spec * (0.75f + 0.25f * linG), 0.0f, 1.0f);
             const float outR = std::clamp(linR * shade + spec * (0.75f + 0.25f * linR), 0.0f, 1.0f);
 
-            const uint32_t b = colorSpace.encode[static_cast<size_t>(outB * 4096.0f + 0.5f)];
-            const uint32_t g = colorSpace.encode[static_cast<size_t>(outG * 4096.0f + 0.5f)];
-            const uint32_t r = colorSpace.encode[static_cast<size_t>(outR * 4096.0f + 0.5f)];
+            auto encodeLinear = [&](float v) noexcept -> uint32_t
+            {
+                const float clamped = std::isfinite(v) ? std::clamp(v, 0.0f, 1.0f) : 0.0f;
+                const size_t encIdx = std::min<size_t>(
+                    colorSpace.encode.size() - 1,
+                    static_cast<size_t>(clamped * 4096.0f + 0.5f));
+                return static_cast<uint32_t>(colorSpace.encode[encIdx]);
+            };
+
+            const uint32_t b = encodeLinear(outB);
+            const uint32_t g = encodeLinear(outG);
+            const uint32_t r = encodeLinear(outR);
             pDestPixels[idx] = (bgra & 0xFF000000u) | (r << 16) | (g << 8) | b;
         };
+
+        // Snapshot unlit colors for sparse boundary pixels where center escaped but >= 1 subpixel
+        // is interior, so they are shaded once with their true escaped fraction (no double-shading).
+        struct MixedCenterSubpixel
+        {
+            size_t pixelIndex;
+            uint32_t unlitColor;
+            float escapedFrac;
+        };
+        std::vector<MixedCenterSubpixel> mixedCenterSubpixels;
+        if (subpixelSamples && !subpixelSamples->empty())
+        {
+            for (const auto& sample : *subpixelSamples)
+            {
+                if (sample.pixelIndex >= count || !(sample.weight > 0.0f)) continue;
+                if (iterData[sample.pixelIndex] < 0.0f) continue;
+                int escapedCount = 0;
+                for (int s = 0; s < 4; ++s)
+                {
+                    if (sample.iterations[s] >= 0.0f) ++escapedCount;
+                }
+                if (escapedCount < 4)
+                {
+                    const float weight = std::min(sample.weight, 1.0f);
+                    const float escapedFrac = (escapedCount == 0 && weight >= 1.0f)
+                        ? 0.0f
+                        : ((1.0f - weight) + (static_cast<float>(escapedCount) * 0.25f) * weight);
+                    mixedCenterSubpixels.push_back({ sample.pixelIndex, pDestPixels[sample.pixelIndex], escapedFrac });
+                }
+            }
+        }
 
         #pragma omp parallel for schedule(static, 4096)
         for (intptr_t idx = 0; idx < totalCount; ++idx)
@@ -623,6 +663,19 @@ namespace Mandelbrot
             const float iter = iterData[idx];
             if (iter < 0.0f) continue;
             shadePixel(static_cast<size_t>(idx), HeightFromIter(iter, isNewton), 1.0f);
+        }
+
+        for (const auto& mixed : mixedCenterSubpixels)
+        {
+            if (mixed.escapedFrac <= 0.0f)
+            {
+                pDestPixels[mixed.pixelIndex] = interiorColor;
+            }
+            else
+            {
+                pDestPixels[mixed.pixelIndex] = mixed.unlitColor;
+                shadePixel(mixed.pixelIndex, HeightFromIter(iterData[mixed.pixelIndex], isNewton), mixed.escapedFrac);
+            }
         }
 
         if (subpixelSamples && !subpixelSamples->empty())
@@ -633,17 +686,7 @@ namespace Mandelbrot
             {
                 const auto& sample = (*subpixelSamples)[i];
                 if (sample.pixelIndex >= count || !(sample.weight > 0.0f)) continue;
-                const float weight = std::min(sample.weight, 1.0f);
-                if (iterData[sample.pixelIndex] >= 0.0f)
-                {
-                    if (sample.iterations[0] < 0.0f && sample.iterations[1] < 0.0f &&
-                        sample.iterations[2] < 0.0f && sample.iterations[3] < 0.0f &&
-                        weight >= 1.0f)
-                    {
-                        pDestPixels[sample.pixelIndex] = interiorColor;
-                    }
-                    continue;
-                }
+                if (iterData[sample.pixelIndex] >= 0.0f) continue;
 
                 float hSum = 0.0f;
                 int escapedCount = 0;
@@ -657,6 +700,7 @@ namespace Mandelbrot
                 }
                 if (escapedCount == 0) continue;
                 const float avgH = hSum / static_cast<float>(escapedCount);
+                const float weight = std::min(sample.weight, 1.0f);
                 const float escapedFrac = (static_cast<float>(escapedCount) * 0.25f) * weight;
                 shadePixel(sample.pixelIndex, avgH, escapedFrac);
             }

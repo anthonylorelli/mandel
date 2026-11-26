@@ -347,7 +347,7 @@ void CSResolveAndBlend(uint3 tid : SV_DispatchThreadID)
         }
         else
         {
-            if (lightStrength > 0.0f && centerIter < 0.0f)
+            if (lightStrength > 0.0f)
             {
                 float hSum = 0.0f;
                 uint escapedCount = 0u;
@@ -356,14 +356,21 @@ void CSResolveAndBlend(uint3 tid : SV_DispatchThreadID)
                 {
                     if (sIter[s] >= 0.0f)
                     {
-                        hSum += HeightFromIterGpu(sIter[s]);
+                        if (centerIter < 0.0f) hSum += HeightFromIterGpu(sIter[s]);
                         ++escapedCount;
                     }
                 }
-                if (escapedCount > 0u)
+                if (centerIter < 0.0f)
                 {
-                    lightCenterH = hSum / float(escapedCount);
-                    lightEscapedFrac = (float(escapedCount) * 0.25f) * weight;
+                    if (escapedCount > 0u)
+                    {
+                        lightCenterH = hSum / float(escapedCount);
+                        lightEscapedFrac = (float(escapedCount) * 0.25f) * weight;
+                    }
+                }
+                else
+                {
+                    lightEscapedFrac = (1.0f - weight) + (float(escapedCount) * 0.25f) * weight;
                 }
             }
 
