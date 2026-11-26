@@ -72,7 +72,8 @@ namespace Mandelbrot
 
     inline std::wstring SerializeViewState(
         const MandelbrotConfig& config, const ColorTheme& theme,
-        float frequency, float phaseOffset, bool invert, uint32_t interiorColor)
+        float frequency, float phaseOffset, bool invert, uint32_t interiorColor,
+        const DirectionalLightingParams& lighting = {})
     {
         std::wostringstream ss;
         ss.imbue(std::locale::classic());
@@ -97,8 +98,13 @@ namespace Mandelbrot
            << L"  \"frequency\": " << frequency << L",\n"
            << L"  \"phaseOffset\": " << phaseOffset << L",\n"
            << L"  \"invert\": " << (invert ? L"true" : L"false") << L",\n"
-           << L"  \"interiorColor\": " << interiorColor << L",\n"
-           << L"  \"theme\": \"" << GetPresetName(theme.CurrentPreset()) << L"\",\n"
+           << L"  \"interiorColor\": " << interiorColor << L",\n";
+        if (lighting.enabled)
+            ss << L"  \"lighting3d\": true,\n"
+               << L"  \"lightAzimuth\": " << lighting.azimuthDeg << L",\n"
+               << L"  \"lightElevation\": " << lighting.elevationDeg << L",\n"
+               << L"  \"lightStrength\": " << lighting.strength << L",\n";
+        ss << L"  \"theme\": \"" << GetPresetName(theme.CurrentPreset()) << L"\",\n"
            << L"  \"gradientStops\": [";
         bool first = true;
         for (const auto& stop : theme.Stops())

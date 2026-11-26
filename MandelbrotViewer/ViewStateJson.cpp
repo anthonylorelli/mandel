@@ -654,6 +654,41 @@ namespace Mandelbrot
             }
         }
 
+        if (const auto it = obj->find("lighting3d"); it != obj->end())
+        {
+            const auto* b = std::get_if<bool>(&it->second.data);
+            if (!b) throw std::invalid_argument("Config JSON 'lighting3d' must be a boolean.");
+            plan.lighting.enabled = *b;
+        }
+        if (const auto it = obj->find("lightAzimuth"); it != obj->end())
+        {
+            const auto* n = std::get_if<JsonValue::Number>(&it->second.data);
+            const float f = n ? static_cast<float>(n->numeric) : 0.0f;
+            if (!n || !std::isfinite(f))
+                throw std::invalid_argument("Invalid 'lightAzimuth' in config JSON.");
+            plan.lighting.azimuthDeg = f;
+        }
+        if (const auto it = obj->find("lightElevation"); it != obj->end())
+        {
+            const auto* n = std::get_if<JsonValue::Number>(&it->second.data);
+            const float f = n ? static_cast<float>(n->numeric) : 0.0f;
+            if (!n || !std::isfinite(f) ||
+                f < DirectionalLightingParams::MinElevationDeg ||
+                f > DirectionalLightingParams::MaxElevationDeg)
+                throw std::invalid_argument("Invalid 'lightElevation' in config JSON.");
+            plan.lighting.elevationDeg = f;
+        }
+        if (const auto it = obj->find("lightStrength"); it != obj->end())
+        {
+            const auto* n = std::get_if<JsonValue::Number>(&it->second.data);
+            const float f = n ? static_cast<float>(n->numeric) : 0.0f;
+            if (!n || !std::isfinite(f) ||
+                f < DirectionalLightingParams::MinStrength ||
+                f > DirectionalLightingParams::MaxStrength)
+                throw std::invalid_argument("Invalid 'lightStrength' in config JSON.");
+            plan.lighting.strength = f;
+        }
+
         std::optional<PresetTheme> parsedPreset;
         if (const auto it = obj->find("theme"); it != obj->end())
         {

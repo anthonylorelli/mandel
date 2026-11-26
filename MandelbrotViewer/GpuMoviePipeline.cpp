@@ -214,6 +214,10 @@ namespace Mandelbrot
             postCb.skipX1 = static_cast<uint32_t>(visSkip.x1);
             postCb.skipY1 = static_cast<uint32_t>(visSkip.y1);
         }
+        postCb.lightDirX = colorParams.lightDirX;
+        postCb.lightDirY = colorParams.lightDirY;
+        postCb.lightDirZ = colorParams.lightDirZ;
+        postCb.lightStrength = colorParams.lightStrength;
 
         bool subCanceled = false;
         if (!m_impl->DispatchGpuSubpixelPass(

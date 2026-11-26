@@ -1479,3 +1479,148 @@ TEST_CASE(Gpu, BenchmarkFullFrameAccum4KKeyframe)
     // 2. 4K 1.5x full keyframe at deep-zoom TDR band size (~204 rows -> 16 bands)
     runBench("4K_1.5x_FullKf_16band", nullptr, 204);
 }
+
+TEST_CASE(Gpu, DirectionalLightingMatchesCpuAcrossBandsNewtonAndSkipRect)
+{
+    std::atomic<bool> cancel{};
+    MandelbrotEngine gpu(ExecutionMode::Gpu, true);
+    MandelbrotEngine cpu(ExecutionMode::Automatic);
+    ASSERT_TRUE(gpu.IsGpuAvailable());
+
+    auto verifyLitMovie = [&](MoviePlan gpuPlan, double frame)
+    {
+        MoviePlan cpuPlan = gpuPlan;
+        cpuPlan.useGpu = false;
+
+        MoviePlan unlitPlan = gpuPlan;
+        unlitPlan.lighting.enabled = false;
+
+        const auto gpuWhole = RenderMovieFrame(gpuPlan, frame, cancel, {}, gpuPlan.height, &gpu);
+        const auto gpuBanded = RenderMovieFrame(gpuPlan, frame, cancel, {}, 7, &gpu);
+        const auto cpuWhole = RenderMovieFrame(cpuPlan, frame, cancel, {}, cpuPlan.height, &cpu);
+        const auto gpuUnlit = RenderMovieFrame(unlitPlan, frame, cancel, {}, unlitPlan.height, &gpu);
+
+        ASSERT_EQ(static_cast<size_t>(gpuPlan.width) * static_cast<size_t>(gpuPlan.height), gpuWhole.size());
+        ASSERT_EQ(gpuWhole.size(), gpuBanded.size());
+        ASSERT_FALSE(gpuWhole == gpuUnlit);
+
+        // Halo rows must guarantee zero band seams with 3x3 Sobel 3D lighting.
+        for (size_t i = 0; i < gpuWhole.size(); ++i)
+        {
+            for (int shift : { 0, 8, 16 })
+            {
+                ASSERT_NEAR((gpuWhole[i] >> shift) & 255, (gpuBanded[i] >> shift) & 255, 1);
+            }
+        }
+
+        const double err = FilteredPixelError(cpuWhole, gpuWhole, gpuPlan.width, gpuPlan.height);
+        ASSERT_LT(err, 4.5);
+    };
+
+    // 1. Mandelbrot deep perturbation + motion smoothing + 3D directional lighting
+    {
+        MoviePlan p;
+        p.width = 97;
+        p.height = 65;
+        p.fps = 24;
+        p.seconds = 1;
+        p.motionSmoothing = true;
+        p.useGpu = true;
+        p.theme = ColorTheme(PresetTheme::Inferno);
+        p.start.SetCenter(
+            BigFloat("-0.743643887037158704752191506114774"),
+            BigFloat("0.131825904205311970493132056385139"));
+        p.targetX = p.start.hpCenterX;
+        p.targetY = p.start.hpCenterY;
+        p.start.zoom = 50.0;
+        p.endZoom = 5e5;
+        p.start.maxIterations = 600;
+        p.lighting.enabled = true;
+        p.lighting.azimuthDeg = 135.0f;
+        p.lighting.elevationDeg = 40.0f;
+        p.lighting.strength = 1.4f;
+        verifyLitMovie(p, 12.0);
+    }
+
+    // 2. Newton multi-basin fractal + 3D directional lighting
+    {
+        MoviePlan p;
+        p.width = 96;
+        p.height = 64;
+        p.fps = 24;
+        p.seconds = 1;
+        p.motionSmoothing = false;
+        p.useGpu = true;
+        p.theme = ColorTheme(PresetTheme::TwilightOcean);
+        p.start.fractalType = FractalType::Newton;
+        p.start.SetCenter(0.0, 0.0);
+        p.targetX = BigFloat(0.0);
+        p.targetY = BigFloat(0.0);
+        p.start.zoom = 1.0;
+        p.endZoom = 6.0;
+        p.start.maxIterations = 256;
+        p.lighting.enabled = true;
+        p.lighting.azimuthDeg = 225.0f;
+        p.lighting.elevationDeg = 35.0f;
+        p.lighting.strength = 1.2f;
+        verifyLitMovie(p, 8.0);
+    }
+
+    // 3. Single-pass skipRect keyframe with 3D directional lighting matches full keyframe outside skipRect
+    {
+        MoviePlan p;
+        p.width = 96;
+        p.height = 72;
+        p.fps = 30;
+        p.seconds = 4;
+        p.motionSmoothing = false;
+        p.useGpu = true;
+        p.start.width = p.width;
+        p.start.height = p.height;
+        p.start.SetCenter(BigFloat(-0.7436438870371587), BigFloat(0.1318259042053119));
+        p.start.zoom = 2.0;
+        p.start.maxIterations = 250;
+        p.targetX = p.start.hpCenterX;
+        p.targetY = p.start.hpCenterY;
+        p.endZoom = 32.0;
+        p.lighting.enabled = true;
+        p.lighting.azimuthDeg = 135.0f;
+        p.lighting.elevationDeg = 45.0f;
+        p.lighting.strength = 1.3f;
+
+        const auto pyramid = PlanZoomKeyframes(p);
+        ASSERT_TRUE(pyramid.enabled);
+        ASSERT_GE(pyramid.keyframes.size(), 2u);
+        const auto& outerKf = pyramid.keyframes[0].camera;
+        const auto& innerKf = pyramid.keyframes[1].camera;
+        const auto innerRect = ComputeInnerSkipRect(outerKf, innerKf);
+        ASSERT_TRUE(innerRect.valid);
+
+        gpu.SetGpuKeyframeSubpixelBudgetEnabled(false);
+        gpu.SetGpuSinglePassSkipRectEnabled(true);
+        const auto fullKf = RenderMovieKeyframe(p, outerKf, nullptr, cancel, {}, outerKf.height, &gpu);
+        const auto skipKf = RenderMovieKeyframe(p, outerKf, &innerRect, cancel, {}, 24, &gpu);
+        gpu.SetGpuKeyframeSubpixelBudgetEnabled(true);
+
+        ASSERT_EQ(fullKf.size(), skipKf.size());
+        for (int y = 0; y < outerKf.height; ++y)
+        {
+            for (int x = 0; x < outerKf.width; ++x)
+            {
+                const size_t i = static_cast<size_t>(y) * static_cast<size_t>(outerKf.width) + static_cast<size_t>(x);
+                if (x >= innerRect.x0 && x < innerRect.x1 && y >= innerRect.y0 && y < innerRect.y1)
+                {
+                    ASSERT_EQ(0u, skipKf[i]);
+                }
+                else
+                {
+                    for (int shift : { 0, 8, 16 })
+                    {
+                        ASSERT_NEAR((fullKf[i] >> shift) & 255, (skipKf[i] >> shift) & 255, 1);
+                    }
+                }
+            }
+        }
+    }
+}
+

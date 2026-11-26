@@ -39,6 +39,7 @@ namespace Mandelbrot
         int baseIterations{500};
         uint64_t targetSeed{1};
         uint32_t interior{0xFF000000};
+        DirectionalLightingParams lighting{};
 
         static double EndZoomForSpeed(double startZoom, bool zoomIn, double speed, int seconds)
         {
@@ -89,6 +90,12 @@ namespace Mandelbrot
                 !std::isfinite(start.hpCenterX.ToDouble()) || !std::isfinite(start.hpCenterY.ToDouble()) ||
                 !std::isfinite(frequency) || !(frequency > 0.0f) || !std::isfinite(phase))
                 throw std::invalid_argument("Invalid movie resolution, frame rate, duration, or zoom.");
+            if (!std::isfinite(lighting.azimuthDeg) || !std::isfinite(lighting.elevationDeg) || !std::isfinite(lighting.strength) ||
+                lighting.elevationDeg < DirectionalLightingParams::MinElevationDeg ||
+                lighting.elevationDeg > DirectionalLightingParams::MaxElevationDeg ||
+                lighting.strength < DirectionalLightingParams::MinStrength ||
+                lighting.strength > DirectionalLightingParams::MaxStrength)
+                throw std::invalid_argument("Invalid 3D directional lighting parameters.");
             if (autoRetarget && (endZoom <= start.zoom || start.juliaSet))
                 throw std::invalid_argument("Auto-Pick Target requires zooming in on a fractal's main view.");
         }

@@ -39,6 +39,10 @@ namespace Mandelbrot
         bool invert{ false };
         uint32_t interiorColor{ 0xFF000000 };
         bool keyframeOversampled{ false };
+        float lightDirX{ 0.0f };
+        float lightDirY{ 0.0f };
+        float lightDirZ{ 1.0f };
+        float lightStrength{ 0.0f };
     };
 
     struct GpuMovieShutterParams

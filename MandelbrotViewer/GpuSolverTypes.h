@@ -136,8 +136,9 @@ namespace Mandelbrot::detail
         uint32_t interiorColor, avgRgb;
         uint32_t subGroupThreads, subRayOffset, subRayLimit, keyframeOversampled;
         uint32_t skipX0, skipY0, skipX1, skipY1;
+        float lightDirX, lightDirY, lightDirZ, lightStrength;
     };
-    static_assert(sizeof(PostProcessCb) == 80 && sizeof(PostProcessCb) <= kGpuConstantBufferBytes);
+    static_assert(sizeof(PostProcessCb) == 96 && sizeof(PostProcessCb) <= kGpuConstantBufferBytes);
 
     struct GpuShutterTap
     {

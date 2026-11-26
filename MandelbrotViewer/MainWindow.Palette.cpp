@@ -90,6 +90,50 @@ namespace winrt::MandelbrotViewer::implementation
         RecolorBuffer();
     }
 
+    void MainWindow::OnLightingToggleChanged(IInspectable const&, RoutedEventArgs const&)
+    {
+        if (IsSuppressingEvents()) return;
+        m_lighting.enabled = LightingToggle().IsOn();
+        if (LightingSettingsPanel())
+        {
+            LightingSettingsPanel().Visibility(m_lighting.enabled ? Visibility::Visible : Visibility::Collapsed);
+        }
+        RecolorBuffer();
+    }
+
+    void MainWindow::OnLightAzimuthSliderChanged(IInspectable const&, Primitives::RangeBaseValueChangedEventArgs const& e)
+    {
+        if (IsSuppressingEvents()) return;
+        m_lighting.azimuthDeg = static_cast<float>(e.NewValue());
+        if (LightAzimuthValueText())
+        {
+            LightAzimuthValueText().Text(winrt::to_hstring(static_cast<int>(std::lround(m_lighting.azimuthDeg))) + L"\u00B0");
+        }
+        if (m_lighting.enabled) RecolorBuffer();
+    }
+
+    void MainWindow::OnLightElevationSliderChanged(IInspectable const&, Primitives::RangeBaseValueChangedEventArgs const& e)
+    {
+        if (IsSuppressingEvents()) return;
+        m_lighting.elevationDeg = static_cast<float>(e.NewValue());
+        if (LightElevationValueText())
+        {
+            LightElevationValueText().Text(winrt::to_hstring(static_cast<int>(std::lround(m_lighting.elevationDeg))) + L"\u00B0");
+        }
+        if (m_lighting.enabled) RecolorBuffer();
+    }
+
+    void MainWindow::OnLightStrengthSliderChanged(IInspectable const&, Primitives::RangeBaseValueChangedEventArgs const& e)
+    {
+        if (IsSuppressingEvents()) return;
+        m_lighting.strength = static_cast<float>(e.NewValue());
+        if (LightStrengthValueText())
+        {
+            LightStrengthValueText().Text(FormatFloat(m_lighting.strength, 2));
+        }
+        if (m_lighting.enabled) RecolorBuffer();
+    }
+
     void MainWindow::PopulateStopSelector()
     {
         {

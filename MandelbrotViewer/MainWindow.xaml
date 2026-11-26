@@ -465,6 +465,47 @@
                             <CheckBox x:Name="InvertCheckBox" Grid.Column="1" Content="Invert Palette"
                                       Checked="OnInvertChecked" Unchecked="OnInvertUnchecked"/>
                         </Grid>
+
+                        <!-- Optional 3D Directional Lighting -->
+                        <ToggleSwitch x:Name="LightingToggle" Header="3D Directional Lighting"
+                                      OnContent="Sculpted Relief Shading"
+                                      OffContent="Flat (Standard)"
+                                      IsOn="False"
+                                      Toggled="OnLightingToggleChanged"/>
+                        <StackPanel x:Name="LightingSettingsPanel" Visibility="Collapsed" Spacing="8">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="Light Angle" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="LightAzimuthValueText" Grid.Column="1" Text="135&#x00B0;" FontFamily="Consolas"/>
+                            </Grid>
+                            <Slider x:Name="LightAzimuthSlider" Minimum="0" Maximum="360" StepFrequency="5" Value="135"
+                                    ValueChanged="OnLightAzimuthSliderChanged" AutomationProperties.Name="3D light angle"/>
+
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="Light Elevation" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="LightElevationValueText" Grid.Column="1" Text="45&#x00B0;" FontFamily="Consolas"/>
+                            </Grid>
+                            <Slider x:Name="LightElevationSlider" Minimum="10" Maximum="85" StepFrequency="1" Value="45"
+                                    ValueChanged="OnLightElevationSliderChanged" AutomationProperties.Name="3D light elevation"/>
+
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="Relief Strength" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="LightStrengthValueText" Grid.Column="1" Text="1.00" FontFamily="Consolas"/>
+                            </Grid>
+                            <Slider x:Name="LightStrengthSlider" Minimum="0.1" Maximum="2.5" StepFrequency="0.05" Value="1.0"
+                                    ValueChanged="OnLightStrengthSliderChanged" AutomationProperties.Name="3D relief strength"/>
+                        </StackPanel>
                     </StackPanel>
 
                     <MenuFlyoutSeparator />

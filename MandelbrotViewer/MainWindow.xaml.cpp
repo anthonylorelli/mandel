@@ -799,7 +799,9 @@ namespace winrt::MandelbrotViewer::implementation
             m_interiorColor,
             config.fractalType,
             config.width,
-            &samples);
+            &samples,
+            true,
+            &m_lighting);
 
         bitmap.Invalidate();
     }

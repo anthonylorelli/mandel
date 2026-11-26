@@ -76,7 +76,7 @@ namespace winrt::MandelbrotViewer::implementation
     {
         CopyTextToClipboard(
             Mandelbrot::SerializeViewState(
-                PresentationCamera(), m_theme, m_frequency, m_phaseOffset, m_invertColors, m_interiorColor),
+                PresentationCamera(), m_theme, m_frequency, m_phaseOffset, m_invertColors, m_interiorColor, m_lighting),
             HudTimingText(),
             L"Coordinates copied to clipboard!");
     }

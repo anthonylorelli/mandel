@@ -119,3 +119,24 @@ TEST_CASE(ViewState, AppThemeDefaultsToSystemAndResolvesLightAndDarkModes)
     ASSERT_TRUE(!IsSystemBackgroundDark(255, 255, 255));
     ASSERT_TRUE(!IsSystemBackgroundDark(243, 243, 243));
 }
+
+TEST_CASE(ViewState, DirectionalLightingSerializesOnlyWhenEnabled)
+{
+    MandelbrotConfig config;
+    ColorTheme theme;
+
+    const auto offJson = SerializeViewState(config, theme, 1.0f, 0.0f, false, 0xFF000000);
+    ASSERT_TRUE(offJson.find(L"lighting3d") == std::wstring::npos);
+
+    DirectionalLightingParams lit{};
+    lit.enabled = true;
+    lit.azimuthDeg = 210.0f;
+    lit.elevationDeg = 35.0f;
+    lit.strength = 1.75f;
+    const auto onJson = SerializeViewState(config, theme, 1.0f, 0.0f, false, 0xFF000000, lit);
+    ASSERT_TRUE(JsonValue(onJson, L"lighting3d") == L"true");
+    ASSERT_NEAR(210.0, std::stod(JsonValue(onJson, L"lightAzimuth")), 1e-4);
+    ASSERT_NEAR(35.0, std::stod(JsonValue(onJson, L"lightElevation")), 1e-4);
+    ASSERT_NEAR(1.75, std::stod(JsonValue(onJson, L"lightStrength")), 1e-4);
+}
+

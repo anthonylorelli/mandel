@@ -288,3 +288,87 @@ TEST_CASE(ColorTheme, CustomStops_SanitizeNaNAndOutOfRangePositions)
     }
 }
 
+TEST_CASE(ColorTheme, DirectionalLighting_OptionalReliefAsymmetryInteriorAndNewton)
+{
+    // Uniform mid-gray palette isolates lighting brightness cleanly from palette color changes.
+    ColorTheme grayTheme;
+    grayTheme.SetStops({ { 0.0f, 150, 150, 150 }, { 1.0f, 150, 150, 150 } });
+
+    constexpr int W = 17;
+    constexpr int H = 17;
+    std::vector<float> hill(W * H, 10.0f);
+    for (int y = 0; y < H; ++y)
+    {
+        for (int x = 0; x < W; ++x)
+        {
+            const float dx = static_cast<float>(x - W / 2);
+            const float dy = static_cast<float>(y - H / 2);
+            const float r2 = dx * dx + dy * dy;
+            // Smooth hill peaking near center, with a 3x3 interior core at the very center.
+            if (std::abs(x - W / 2) <= 1 && std::abs(y - H / 2) <= 1)
+            {
+                hill[static_cast<size_t>(y) * W + x] = -1.0f;
+            }
+            else
+            {
+                hill[static_cast<size_t>(y) * W + x] = 5.0f + 200.0f * std::exp(-r2 * 0.04f);
+            }
+        }
+    }
+
+    const uint32_t interiorColor = 0xFF010203u;
+    std::vector<uint32_t> flatNull(W * H), flatOff(W * H), litNW(W * H), litSE(W * H);
+
+    DirectionalLightingParams off{};
+    off.enabled = false;
+    grayTheme.Recolor(hill, flatNull.data(), hill.size(), 1.0f, 0.0f, false, interiorColor, FractalType::Mandelbrot, W, nullptr, true, nullptr);
+    grayTheme.Recolor(hill, flatOff.data(), hill.size(), 1.0f, 0.0f, false, interiorColor, FractalType::Mandelbrot, W, nullptr, true, &off);
+    ASSERT_TRUE(flatNull == flatOff);
+
+    DirectionalLightingParams nw{};
+    nw.enabled = true;
+    nw.azimuthDeg = 135.0f; // Top-left
+    nw.elevationDeg = 40.0f;
+    nw.strength = 1.4f;
+
+    DirectionalLightingParams se = nw;
+    se.azimuthDeg = 315.0f; // Bottom-right
+
+    grayTheme.Recolor(hill, litNW.data(), hill.size(), 1.0f, 0.0f, false, interiorColor, FractalType::Mandelbrot, W, nullptr, true, &nw);
+    grayTheme.Recolor(hill, litSE.data(), hill.size(), 1.0f, 0.0f, false, interiorColor, FractalType::Mandelbrot, W, nullptr, true, &se);
+
+    // Pure interior pixels remain untouched exact interiorColor.
+    ASSERT_EQ(interiorColor, litNW[static_cast<size_t>(H / 2) * W + (W / 2)]);
+    ASSERT_EQ(interiorColor, litSE[static_cast<size_t>(H / 2) * W + (W / 2)]);
+
+    auto redOf = [](uint32_t bgra) { return static_cast<int>((bgra >> 16) & 0xFFu); };
+    const size_t topLeftSlope = static_cast<size_t>(4) * W + 4;
+    const size_t bottomRightSlope = static_cast<size_t>(12) * W + 12;
+
+    // Top-left light illuminates top-left slope brighter than bottom-right slope.
+    ASSERT_GT(redOf(litNW[topLeftSlope]), redOf(litNW[bottomRightSlope]) + 30);
+    // Flipping azimuth 180 degrees reverses which slope is lit.
+    ASSERT_GT(redOf(litSE[bottomRightSlope]), redOf(litSE[topLeftSlope]) + 30);
+    ASSERT_NEAR(redOf(litNW[topLeftSlope]), redOf(litSE[bottomRightSlope]), 1);
+
+    // Newton multi-basin values (root * 1000000 + iter) shade cleanly without overflow.
+    std::vector<float> newton(W * H);
+    for (int y = 0; y < H; ++y)
+    {
+        for (int x = 0; x < W; ++x)
+        {
+            const int root = (x < W / 2) ? 0 : 1;
+            const float iter = 4.0f + static_cast<float>(x + y) * 1.5f;
+            newton[static_cast<size_t>(y) * W + x] = static_cast<float>(root) * NewtonRootStride + iter;
+        }
+    }
+    std::vector<uint32_t> newtonFlat(W * H), newtonLit(W * H);
+    ColorTheme inferno(PresetTheme::Inferno);
+    inferno.Recolor(newton, newtonFlat.data(), newton.size(), 1.0f, 0.0f, false, 0xFF000000, FractalType::Newton, W);
+    inferno.Recolor(newton, newtonLit.data(), newton.size(), 1.0f, 0.0f, false, 0xFF000000, FractalType::Newton, W, nullptr, true, &nw);
+    ASSERT_FALSE(newtonFlat == newtonLit);
+    for (uint32_t p : newtonLit)
+    {
+        ASSERT_EQ(0xFFu, (p >> 24) & 0xFFu);
+    }
+}

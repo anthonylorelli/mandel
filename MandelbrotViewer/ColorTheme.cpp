@@ -13,6 +13,18 @@ namespace Mandelbrot
         {
             return std::isnan(position) ? 0.0f : std::clamp(position, 0.0f, 1.0f);
         }
+
+        float HeightFromIter(float value, bool isNewton) noexcept
+        {
+            if (value < 0.0f) return -1.0f;
+            float iter = value;
+            if (isNewton)
+            {
+                const int root = static_cast<int>(value / NewtonRootStride);
+                iter = std::max(0.0f, value - static_cast<float>(root) * NewtonRootStride);
+            }
+            return 1.6f * std::log(1.0f + iter * 0.1f);
+        }
     }
 
     const std::vector<PresetTheme>& GetAllPresets()
@@ -370,7 +382,9 @@ namespace Mandelbrot
         uint32_t interiorColor,
         FractalType fractalType,
         int width,
-        const std::vector<SubpixelSamples>* subpixelSamples, bool filterPalette) const
+        const std::vector<SubpixelSamples>* subpixelSamples,
+        bool filterPalette,
+        const DirectionalLightingParams* lighting) const
     {
         if (!pDestPixels || iterationBuffer.size() < count || m_lut.empty()) return;
 
@@ -456,68 +470,196 @@ namespace Mandelbrot
             }
         }
 
-        if (!subpixelSamples || subpixelSamples->empty()) return;
         const auto& colorSpace = detail::LinearSrgbTables::Instance();
-        const intptr_t sampleCount = static_cast<intptr_t>(subpixelSamples->size());
-        #pragma omp parallel for schedule(static, 64)
-        for (intptr_t i = 0; i < sampleCount; ++i)
+        if (subpixelSamples && !subpixelSamples->empty())
         {
-            const auto& sample = (*subpixelSamples)[i];
-            if (sample.pixelIndex >= count || !(sample.weight > 0.0f)) continue;
-            const uint32_t center = pDestPixels[sample.pixelIndex];
-            const float weight = std::min(sample.weight, 1.0f);
-            if (sample.iterations[0] < 0.0f && sample.iterations[1] < 0.0f &&
-                sample.iterations[2] < 0.0f && sample.iterations[3] < 0.0f &&
-                (center == interiorColor || weight >= 1.0f))
+            const intptr_t sampleCount = static_cast<intptr_t>(subpixelSamples->size());
+            #pragma omp parallel for schedule(static, 64)
+            for (intptr_t i = 0; i < sampleCount; ++i)
             {
-                pDestPixels[sample.pixelIndex] = interiorColor;
-                continue;
-            }
-            uint32_t colors[4];
-            float phases[4]{};
-            if (fractalType != FractalType::Newton)
+                const auto& sample = (*subpixelSamples)[i];
+                if (sample.pixelIndex >= count || !(sample.weight > 0.0f)) continue;
+                const uint32_t center = pDestPixels[sample.pixelIndex];
+                const float weight = std::min(sample.weight, 1.0f);
+                if (sample.iterations[0] < 0.0f && sample.iterations[1] < 0.0f &&
+                    sample.iterations[2] < 0.0f && sample.iterations[3] < 0.0f &&
+                    (center == interiorColor || weight >= 1.0f))
+                {
+                    pDestPixels[sample.pixelIndex] = interiorColor;
+                    continue;
+                }
+                uint32_t colors[4];
+                float phases[4]{};
+                if (fractalType != FractalType::Newton)
+                    for (int s = 0; s < 4; ++s)
+                        if (sample.iterations[s] >= 0.0f)
+                            phases[s] = MapIterationToPhase(sample.iterations[s], frequency);
                 for (int s = 0; s < 4; ++s)
+                {
+                    // Each quarter-pixel sample has a half-pixel footprint. Estimate its
+                    // palette filter from adjacent subpixels, excluding interior/basin boundaries.
+                    float deltaU = 0.0f;
+                    if (fractalType != FractalType::Newton && sample.iterations[s] >= 0.0f)
+                        for (int neighbor : { s ^ 1, s ^ 2 })
+                            if (sample.iterations[neighbor] >= 0.0f)
+                                deltaU = std::max(deltaU, std::abs(phases[s] - phases[neighbor]));
+                    colors[s] = fractalType != FractalType::Newton && sample.iterations[s] >= 0.0f
+                        ? ColorAtPhase(phases[s], phaseOffset, invert, deltaU)
+                        : ColorIteration(sample.iterations[s], frequency, phaseOffset, invert, interiorColor, fractalType);
+                }
+                if (colors[0] == colors[1] && colors[0] == colors[2] && colors[0] == colors[3] &&
+                    (colors[0] == center || weight >= 1.0f))
+                {
+                    pDestPixels[sample.pixelIndex] = colors[0];
+                    continue;
+                }
+                uint32_t output = 0;
+                for (int channel = 0; channel < 3; ++channel)
+                {
+                    const int shift = channel * 8;
+                    const float average = (colorSpace.decode[(colors[0] >> shift) & 0xFF] +
+                        colorSpace.decode[(colors[1] >> shift) & 0xFF] +
+                        colorSpace.decode[(colors[2] >> shift) & 0xFF] +
+                        colorSpace.decode[(colors[3] >> shift) & 0xFF]) * 0.25f;
+                    const float linear = weight >= 1.0f
+                        ? average
+                        : (average * weight + colorSpace.decode[(center >> shift) & 0xFF] * (1.0f - weight));
+                    const size_t index = static_cast<size_t>(std::clamp(linear * 4096.0f + 0.5f, 0.0f, 4096.0f));
+                    output |= static_cast<uint32_t>(colorSpace.encode[index]) << shift;
+                }
+                const float alphaAvg = static_cast<float>((colors[0] >> 24) + (colors[1] >> 24) +
+                    (colors[2] >> 24) + (colors[3] >> 24)) * 0.25f;
+                const float alpha = weight >= 1.0f
+                    ? alphaAvg
+                    : (alphaAvg * weight + static_cast<float>(center >> 24) * (1.0f - weight));
+                pDestPixels[sample.pixelIndex] = output | (static_cast<uint32_t>(alpha + 0.5f) << 24);
+            }
+        }
+
+        if (!lighting || !lighting->IsActive()) return;
+
+        float lx = 0.0f, ly = 0.0f, lz = 1.0f;
+        lighting->ComputeLightDirection(lx, ly, lz);
+        const float hx0 = lx;
+        const float hy0 = ly;
+        const float hz0 = lz + 1.0f;
+        const float hInvLen = 1.0f / std::sqrt(hx0 * hx0 + hy0 * hy0 + hz0 * hz0);
+        const float hx = hx0 * hInvLen;
+        const float hy = hy0 * hInvLen;
+        const float hz = hz0 * hInvLen;
+        const float reliefScale = std::clamp(lighting->strength, 0.0f, DirectionalLightingParams::MaxStrength) * 2.5f;
+        const bool isNewton = (fractalType == FractalType::Newton);
+
+        const int gridW = (rowStride > 0) ? static_cast<int>(rowStride) : 0;
+        const int gridH = (gridW > 0)
+            ? static_cast<int>((count + static_cast<size_t>(gridW) - 1) / static_cast<size_t>(gridW))
+            : 0;
+
+        auto sampleHeight = [&](int sx, int sy, float fallbackH) noexcept -> float
+        {
+            const int cx = std::clamp(sx, 0, gridW - 1);
+            const int cy = std::clamp(sy, 0, gridH - 1);
+            const size_t nIdx = static_cast<size_t>(cy) * static_cast<size_t>(gridW) + static_cast<size_t>(cx);
+            if (nIdx >= count) return fallbackH;
+            const float h = HeightFromIter(iterData[nIdx], isNewton);
+            return (h >= 0.0f) ? h : fallbackH;
+        };
+
+        auto shadePixel = [&](size_t idx, float centerH, float escapedFraction) noexcept
+        {
+            float nx = 0.0f, ny = 0.0f, nz = 1.0f;
+            if (gridW > 0 && gridH > 0)
+            {
+                const int x = static_cast<int>(idx % static_cast<size_t>(gridW));
+                const int y = static_cast<int>(idx / static_cast<size_t>(gridW));
+                const float hTL = sampleHeight(x - 1, y - 1, centerH);
+                const float hT  = sampleHeight(x,     y - 1, centerH);
+                const float hTR = sampleHeight(x + 1, y - 1, centerH);
+                const float hL  = sampleHeight(x - 1, y,     centerH);
+                const float hR  = sampleHeight(x + 1, y,     centerH);
+                const float hBL = sampleHeight(x - 1, y + 1, centerH);
+                const float hB  = sampleHeight(x,     y + 1, centerH);
+                const float hBR = sampleHeight(x + 1, y + 1, centerH);
+
+                const float gx = ((hTR + 2.0f * hR + hBR) - (hTL + 2.0f * hL + hBL)) * 0.125f;
+                const float gy = ((hBL + 2.0f * hB + hBR) - (hTL + 2.0f * hT + hTR)) * 0.125f;
+
+                const float nx0 = -gx * reliefScale;
+                const float ny0 =  gy * reliefScale;
+                const float invLen = 1.0f / std::sqrt(nx0 * nx0 + ny0 * ny0 + 1.0f);
+                nx = nx0 * invLen;
+                ny = ny0 * invLen;
+                nz = invLen;
+            }
+
+            const float ndotl = std::max(0.0f, nx * lx + ny * ly + nz * lz);
+            const float ndoth = std::max(0.0f, nx * hx + ny * hy + nz * hz);
+            const float slopeMask = std::min(1.0f, std::sqrt(nx * nx + ny * ny) * 2.5f);
+            const float shade = 0.30f + 0.85f * ndotl;
+            const float p2 = ndoth * ndoth;
+            const float p4 = p2 * p2;
+            const float p7 = p4 * p2 * ndoth;
+            const float p14 = p7 * p7;
+            const float spec = (p14 * p14) * 0.38f * slopeMask * escapedFraction;
+
+            const uint32_t bgra = pDestPixels[idx];
+            const float linB = colorSpace.decode[bgra & 0xFF];
+            const float linG = colorSpace.decode[(bgra >> 8) & 0xFF];
+            const float linR = colorSpace.decode[(bgra >> 16) & 0xFF];
+
+            const float outB = std::clamp(linB * shade + spec * (0.75f + 0.25f * linB), 0.0f, 1.0f);
+            const float outG = std::clamp(linG * shade + spec * (0.75f + 0.25f * linG), 0.0f, 1.0f);
+            const float outR = std::clamp(linR * shade + spec * (0.75f + 0.25f * linR), 0.0f, 1.0f);
+
+            const uint32_t b = colorSpace.encode[static_cast<size_t>(outB * 4096.0f + 0.5f)];
+            const uint32_t g = colorSpace.encode[static_cast<size_t>(outG * 4096.0f + 0.5f)];
+            const uint32_t r = colorSpace.encode[static_cast<size_t>(outR * 4096.0f + 0.5f)];
+            pDestPixels[idx] = (bgra & 0xFF000000u) | (r << 16) | (g << 8) | b;
+        };
+
+        #pragma omp parallel for schedule(static, 4096)
+        for (intptr_t idx = 0; idx < totalCount; ++idx)
+        {
+            const float iter = iterData[idx];
+            if (iter < 0.0f) continue;
+            shadePixel(static_cast<size_t>(idx), HeightFromIter(iter, isNewton), 1.0f);
+        }
+
+        if (subpixelSamples && !subpixelSamples->empty())
+        {
+            const intptr_t sampleCount = static_cast<intptr_t>(subpixelSamples->size());
+            #pragma omp parallel for schedule(static, 64)
+            for (intptr_t i = 0; i < sampleCount; ++i)
+            {
+                const auto& sample = (*subpixelSamples)[i];
+                if (sample.pixelIndex >= count || !(sample.weight > 0.0f)) continue;
+                const float weight = std::min(sample.weight, 1.0f);
+                if (iterData[sample.pixelIndex] >= 0.0f)
+                {
+                    if (sample.iterations[0] < 0.0f && sample.iterations[1] < 0.0f &&
+                        sample.iterations[2] < 0.0f && sample.iterations[3] < 0.0f &&
+                        weight >= 1.0f)
+                    {
+                        pDestPixels[sample.pixelIndex] = interiorColor;
+                    }
+                    continue;
+                }
+
+                float hSum = 0.0f;
+                int escapedCount = 0;
+                for (int s = 0; s < 4; ++s)
+                {
                     if (sample.iterations[s] >= 0.0f)
-                        phases[s] = MapIterationToPhase(sample.iterations[s], frequency);
-            for (int s = 0; s < 4; ++s)
-            {
-                // Each quarter-pixel sample has a half-pixel footprint. Estimate its
-                // palette filter from adjacent subpixels, excluding interior/basin boundaries.
-                float deltaU = 0.0f;
-                if (fractalType != FractalType::Newton && sample.iterations[s] >= 0.0f)
-                    for (int neighbor : { s ^ 1, s ^ 2 })
-                        if (sample.iterations[neighbor] >= 0.0f)
-                            deltaU = std::max(deltaU, std::abs(phases[s] - phases[neighbor]));
-                colors[s] = fractalType != FractalType::Newton && sample.iterations[s] >= 0.0f
-                    ? ColorAtPhase(phases[s], phaseOffset, invert, deltaU)
-                    : ColorIteration(sample.iterations[s], frequency, phaseOffset, invert, interiorColor, fractalType);
+                    {
+                        hSum += HeightFromIter(sample.iterations[s], isNewton);
+                        ++escapedCount;
+                    }
+                }
+                if (escapedCount == 0) continue;
+                const float avgH = hSum / static_cast<float>(escapedCount);
+                const float escapedFrac = (static_cast<float>(escapedCount) * 0.25f) * weight;
+                shadePixel(sample.pixelIndex, avgH, escapedFrac);
             }
-            if (colors[0] == colors[1] && colors[0] == colors[2] && colors[0] == colors[3] &&
-                (colors[0] == center || weight >= 1.0f))
-            {
-                pDestPixels[sample.pixelIndex] = colors[0];
-                continue;
-            }
-            uint32_t output = 0;
-            for (int channel = 0; channel < 3; ++channel)
-            {
-                const int shift = channel * 8;
-                const float average = (colorSpace.decode[(colors[0] >> shift) & 0xFF] +
-                    colorSpace.decode[(colors[1] >> shift) & 0xFF] +
-                    colorSpace.decode[(colors[2] >> shift) & 0xFF] +
-                    colorSpace.decode[(colors[3] >> shift) & 0xFF]) * 0.25f;
-                const float linear = weight >= 1.0f
-                    ? average
-                    : (average * weight + colorSpace.decode[(center >> shift) & 0xFF] * (1.0f - weight));
-                const size_t index = static_cast<size_t>(std::clamp(linear * 4096.0f + 0.5f, 0.0f, 4096.0f));
-                output |= static_cast<uint32_t>(colorSpace.encode[index]) << shift;
-            }
-            const float alphaAvg = static_cast<float>((colors[0] >> 24) + (colors[1] >> 24) +
-                (colors[2] >> 24) + (colors[3] >> 24)) * 0.25f;
-            const float alpha = weight >= 1.0f
-                ? alphaAvg
-                : (alphaAvg * weight + static_cast<float>(center >> 24) * (1.0f - weight));
-            pDestPixels[sample.pixelIndex] = output | (static_cast<uint32_t>(alpha + 0.5f) << 24);
         }
     }
 }

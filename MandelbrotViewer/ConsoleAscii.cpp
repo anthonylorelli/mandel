@@ -1125,7 +1125,8 @@ namespace Mandelbrot
             m_config.fractalType,
             m_config.width,
             &m_subpixelSamples,
-            true);
+            true,
+            &m_options.lighting);
         const std::string ascii = RenderAsciiFrameStabilized(
             m_iterations,
             m_pixels,

@@ -14,6 +14,7 @@
 namespace Mandelbrot
 {
     class ColorTheme;
+    struct DirectionalLightingParams;
     class GpuFractalSolver;
     struct GpuBandSkipRect;
     struct GpuMovieShutterParams;
@@ -90,7 +91,8 @@ namespace Mandelbrot
             uint32_t* ioBandPixels,
             const std::atomic<bool>* cancelToken = nullptr,
             bool keyframeOversampled = false,
-            const GpuBandSkipRect* bandSkip = nullptr);
+            const GpuBandSkipRect* bandSkip = nullptr,
+            const DirectionalLightingParams* lighting = nullptr);
         bool FinishGpuMovieFrame(
             int width,
             int height,
