@@ -238,6 +238,10 @@ namespace Mandelbrot
         std::optional<float> phase;
         std::optional<bool> invert;
         std::optional<uint32_t> interiorColor;
+        std::optional<bool> lightingEnabled;
+        std::optional<float> lightAzimuth;
+        std::optional<float> lightElevation;
+        std::optional<float> lightStrength;
         std::optional<BigFloat> juliaX;
         std::optional<BigFloat> juliaY;
         bool juliaRequested = false;
@@ -570,6 +574,50 @@ namespace Mandelbrot
                         return fail(L"Invalid --interior-color (use #RRGGBB, #AARRGGBB, or 0xAARRGGBB): " + std::wstring(val));
                     interiorColor = color;
                 }
+                else if (flagView == L"--lighting" || flagView == L"--3d-lighting")
+                {
+                    requireNoValue();
+                    lightingEnabled = true;
+                }
+                else if (flagView == L"--no-lighting")
+                {
+                    requireNoValue();
+                    lightingEnabled = false;
+                }
+                else if (flagView == L"--light-azimuth")
+                {
+                    double v = 0.0;
+                    const auto val = takeValue("--light-azimuth");
+                    const bool ok = TryParseDouble(val, v);
+                    const float f = static_cast<float>(v);
+                    if (!ok || !std::isfinite(f))
+                        return fail(L"Invalid --light-azimuth (expected finite degrees): " + std::wstring(val));
+                    lightAzimuth = f;
+                }
+                else if (flagView == L"--light-elevation")
+                {
+                    double v = 0.0;
+                    const auto val = takeValue("--light-elevation");
+                    const bool ok = TryParseDouble(val, v);
+                    const float f = static_cast<float>(v);
+                    if (!ok || !std::isfinite(f) ||
+                        f < DirectionalLightingParams::MinElevationDeg ||
+                        f > DirectionalLightingParams::MaxElevationDeg)
+                        return fail(L"Invalid --light-elevation (expected 5..85 degrees): " + std::wstring(val));
+                    lightElevation = f;
+                }
+                else if (flagView == L"--light-strength")
+                {
+                    double v = 0.0;
+                    const auto val = takeValue("--light-strength");
+                    const bool ok = TryParseDouble(val, v);
+                    const float f = static_cast<float>(v);
+                    if (!ok || !std::isfinite(f) ||
+                        f < DirectionalLightingParams::MinStrength ||
+                        f > DirectionalLightingParams::MaxStrength)
+                        return fail(L"Invalid --light-strength (expected 0..2.5): " + std::wstring(val));
+                    lightStrength = f;
+                }
                 else if (flagView == L"--julia")
                 {
                     const auto val = takeValue("--julia");
@@ -896,6 +944,17 @@ namespace Mandelbrot
             if (phase) plan.phase = *phase;
             if (invert) plan.invert = *invert;
             if (interiorColor) plan.interior = *interiorColor;
+            if (lightAzimuth) plan.lighting.azimuthDeg = *lightAzimuth;
+            if (lightElevation) plan.lighting.elevationDeg = *lightElevation;
+            if (lightStrength) plan.lighting.strength = *lightStrength;
+            if (lightingEnabled)
+            {
+                plan.lighting.enabled = *lightingEnabled;
+            }
+            else if (lightAzimuth || lightElevation || lightStrength)
+            {
+                plan.lighting.enabled = true;
+            }
 
             // 8. Rendering overrides.
             if (useGpu) plan.useGpu = *useGpu;
@@ -944,6 +1003,7 @@ namespace Mandelbrot
                 consoleOpts.phase = plan.phase;
                 consoleOpts.invert = plan.invert;
                 consoleOpts.interior = plan.interior;
+                consoleOpts.lighting = plan.lighting;
 
                 consoleOpts.cols = resolvedAsciiCols;
                 consoleOpts.rows = resolvedAsciiRows;

@@ -332,7 +332,8 @@ namespace Mandelbrot
         uint32_t* ioBandPixels,
         const std::atomic<bool>* cancelToken,
         bool keyframeOversampled,
-        const GpuBandSkipRect* bandSkip)
+        const GpuBandSkipRect* bandSkip,
+        const DirectionalLightingParams* lighting)
     {
         if (m_executionMode != ExecutionMode::Gpu || theme.Lut().size() != ColorTheme::LUT_SIZE)
         {
@@ -351,6 +352,11 @@ namespace Mandelbrot
         colorParams.invert = invert;
         colorParams.interiorColor = interiorColor;
         colorParams.keyframeOversampled = keyframeOversampled;
+        if (lighting && lighting->IsActive())
+        {
+            lighting->ComputeLightDirection(colorParams.lightDirX, colorParams.lightDirY, colorParams.lightDirZ);
+            colorParams.lightStrength = std::clamp(lighting->strength, 0.0f, DirectionalLightingParams::MaxStrength);
+        }
 
         return EnsureGpuSolver().RenderMovieBand(
             bandConfig,

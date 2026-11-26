@@ -274,7 +274,13 @@ TEST_CASE(MovieCli, LoadsConfigJsonFromSerializeViewStateWithOverrides)
         { 1.0f, 255, 250, 240 }
     });
 
-    const std::wstring jsonW = SerializeViewState(cfg, customTheme, 1.75f, 0.35f, true, 0xFF050A14u);
+    DirectionalLightingParams lit{};
+    lit.enabled = true;
+    lit.azimuthDeg = 225.0f;
+    lit.elevationDeg = 32.0f;
+    lit.strength = 1.6f;
+
+    const std::wstring jsonW = SerializeViewState(cfg, customTheme, 1.75f, 0.35f, true, 0xFF050A14u, lit);
     TempFile configFile(L".json");
     {
         std::ofstream out(configFile.path, std::ios::binary);
@@ -302,6 +308,10 @@ TEST_CASE(MovieCli, LoadsConfigJsonFromSerializeViewStateWithOverrides)
     ASSERT_NEAR(0.35f, p.phase, 1e-5f);
     ASSERT_TRUE(p.invert);
     ASSERT_EQ(0xFF050A14u, p.interior);
+    ASSERT_TRUE(p.lighting.enabled);
+    ASSERT_NEAR(225.0f, p.lighting.azimuthDeg, 1e-4f);
+    ASSERT_NEAR(32.0f, p.lighting.elevationDeg, 1e-4f);
+    ASSERT_NEAR(1.6f, p.lighting.strength, 1e-4f);
     ASSERT_TRUE(p.theme.CurrentPreset() == PresetTheme::Custom);
     ASSERT_EQ(3u, p.theme.Stops().size());
     ASSERT_EQ(120u, static_cast<unsigned>(p.theme.Stops()[1].r));
@@ -312,11 +322,26 @@ TEST_CASE(MovieCli, LoadsConfigJsonFromSerializeViewStateWithOverrides)
         L"--config", configFile.path.wstring(),
         L"--theme", L"viridis",
         L"--auto-iterations",
+        L"--no-lighting",
         L"--duration", L"2"
     });
     ASSERT_TRUE(overridden.action == CliAction::ExportMovie);
     ASSERT_TRUE(overridden.options.plan.theme.CurrentPreset() == PresetTheme::Viridis);
     ASSERT_TRUE(overridden.options.plan.autoScaleIterations);
+    ASSERT_FALSE(overridden.options.plan.lighting.enabled);
+
+    // Explicit light parameter flags enable lighting automatically and propagate to --ascii too.
+    const auto cliLit = ParseMovieCli({
+        L"--ascii", L"--once",
+        L"--light-azimuth", L"45",
+        L"--light-elevation", L"60",
+        L"--light-strength", L"1.25"
+    });
+    ASSERT_TRUE(cliLit.action == CliAction::ConsoleAscii);
+    ASSERT_TRUE(cliLit.consoleOptions.lighting.enabled);
+    ASSERT_NEAR(45.0f, cliLit.consoleOptions.lighting.azimuthDeg, 1e-4f);
+    ASSERT_NEAR(60.0f, cliLit.consoleOptions.lighting.elevationDeg, 1e-4f);
+    ASSERT_NEAR(1.25f, cliLit.consoleOptions.lighting.strength, 1e-4f);
 }
 
 TEST_CASE(MovieCli, RejectsInvalidAndConflictingArguments)
@@ -345,6 +370,11 @@ TEST_CASE(MovieCli, RejectsInvalidAndConflictingArguments)
         { L"--export-movie", L"a.mp4", L"--interior-color", L"#123" },
         { L"--export-movie", L"a.mp4", L"--quiet=1" },
         { L"--export-movie", L"a.mp4", L"--iterations", L"0" },
+        { L"--export-movie", L"a.mp4", L"--lighting=1" },
+        { L"--export-movie", L"a.mp4", L"--light-elevation", L"2" },
+        { L"--export-movie", L"a.mp4", L"--light-elevation", L"90" },
+        { L"--export-movie", L"a.mp4", L"--light-strength", L"-0.1" },
+        { L"--export-movie", L"a.mp4", L"--light-strength", L"3.0" },
         { L"--export-movie", L"a.mp4", L"--config", L"C:\\does-not-exist-mandel-cli.json" }
     };
 

@@ -308,7 +308,7 @@ namespace Mandelbrot
                 gpuOk = engine.RenderGpuMovieBand(
                     band, topHalo, rows, globalRow,
                     plan.theme, plan.frequency, plan.phase, plan.invert, plan.interior,
-                    outBand, &cancel, keyframeOversampled, bandSkipPtr);
+                    outBand, &cancel, keyframeOversampled, bandSkipPtr, &plan.lighting);
                 if (cancel.load(std::memory_order_relaxed)) return false;
 
                 if (gpuOk)
@@ -441,7 +441,7 @@ namespace Mandelbrot
                     gpuOk = engine.RenderGpuMovieBand(
                         band, topHalo, rows, localRow,
                         plan.theme, plan.frequency, plan.phase, plan.invert, plan.interior,
-                        outBand, &cancel, keyframeOversampled, nullptr);
+                        outBand, &cancel, keyframeOversampled, nullptr, &plan.lighting);
                     if (cancel.load(std::memory_order_relaxed)) return false;
 
                     if (gpuOk)
@@ -514,7 +514,7 @@ namespace Mandelbrot
                 if (cancel.load(std::memory_order_relaxed)) return false;
 
                 plan.theme.Recolor(iterations, painted.data(), bandCount, plan.frequency, plan.phase,
-                    plan.invert, plan.interior, band.fractalType, band.width, &subpixels, false);
+                    plan.invert, plan.interior, band.fractalType, band.width, &subpixels, false, &plan.lighting);
 
                 const uint32_t* visBase = painted.data() + static_cast<size_t>(topHalo) * static_cast<size_t>(subW);
                 if (fullWidthDirect)
@@ -602,7 +602,7 @@ namespace Mandelbrot
                 gpuOk = engine.RenderGpuMovieBand(
                     band, topHalo, rows, row,
                     plan.theme, plan.frequency, plan.phase, plan.invert, plan.interior,
-                    outBand, &cancel);
+                    outBand, &cancel, false, nullptr, &plan.lighting);
                 if (cancel.load(std::memory_order_relaxed)) return {};
 
                 if (gpuOk && progress)
@@ -663,7 +663,7 @@ namespace Mandelbrot
             // Halo rows provide complete 3x3 neighborhoods across band boundaries, making
             // adaptive subpixel refinement and colors independent of render bands.
             plan.theme.Recolor(iterations, painted.data(), bandCount, plan.frequency, plan.phase,
-                plan.invert, plan.interior, band.fractalType, band.width, &subpixels, false);
+                plan.invert, plan.interior, band.fractalType, band.width, &subpixels, false, &plan.lighting);
             const uint32_t* bandPixels = painted.data() + static_cast<size_t>(topHalo) * plan.width;
             uint32_t* outBand = cpuTargetBase + static_cast<size_t>(row) * plan.width;
             std::memcpy(outBand, bandPixels, count * sizeof(uint32_t));

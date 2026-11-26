@@ -3,6 +3,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <numbers>
 #include <string>
 #include <vector>
 #include "FractalCatalog.h"
@@ -39,6 +40,38 @@ namespace Mandelbrot
             }
         };
     }
+
+    struct DirectionalLightingParams
+    {
+        static constexpr float MinElevationDeg = 5.0f;
+        static constexpr float MaxElevationDeg = 85.0f;
+        static constexpr float MinStrength = 0.0f;
+        static constexpr float MaxStrength = 2.5f;
+
+        bool enabled{ false };
+        float azimuthDeg{ 135.0f };  // 0=Right, 90=Top, 135=Top-Left, 180=Left, 270=Bottom
+        float elevationDeg{ 45.0f }; // Light altitude above plane [5, 85] degrees
+        float strength{ 1.0f };      // Relief / bump depth [0.0, 2.5]
+
+        bool IsActive() const noexcept
+        {
+            return enabled && std::isfinite(strength) && strength > 0.0f;
+        }
+
+        void ComputeLightDirection(float& lx, float& ly, float& lz) const noexcept
+        {
+            const float safeAz = std::isfinite(azimuthDeg) ? azimuthDeg : 135.0f;
+            const float safeEl = std::isfinite(elevationDeg)
+                ? std::clamp(elevationDeg, MinElevationDeg, MaxElevationDeg)
+                : 45.0f;
+            const float azRad = safeAz * (std::numbers::pi_v<float> / 180.0f);
+            const float elRad = safeEl * (std::numbers::pi_v<float> / 180.0f);
+            const float cosEl = std::cos(elRad);
+            lx = std::cos(azRad) * cosEl;
+            ly = std::sin(azRad) * cosEl;
+            lz = std::sin(elRad);
+        }
+    };
 
     struct GradientStop
     {
@@ -102,7 +135,8 @@ namespace Mandelbrot
             FractalType fractalType = FractalType::Mandelbrot,
             int width = 0,
             const std::vector<SubpixelSamples>* subpixelSamples = nullptr,
-            bool filterPalette = true) const;
+            bool filterPalette = true,
+            const DirectionalLightingParams* lighting = nullptr) const;
 
         // Maps raw iteration count to logarithmic palette phase (before phaseOffset and modulo)
         static float MapIterationToPhase(float iter, float frequency) noexcept;

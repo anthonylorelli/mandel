@@ -43,7 +43,7 @@ namespace winrt::MandelbrotViewer::implementation
             Mandelbrot::MoviePlan plan;
             plan.start = PresentationCamera();
             plan.theme = m_theme; plan.frequency = m_frequency; plan.phase = m_phaseOffset;
-            plan.invert = m_invertColors; plan.interior = m_interiorColor;
+            plan.invert = m_invertColors; plan.interior = m_interiorColor; plan.lighting = m_lighting;
             const auto targetXText = TargetXTextBox().Text(), targetYText = TargetYTextBox().Text();
             const auto exactX = m_zoomTargetX, exactY = m_zoomTargetY;
             const bool exactXText = targetXText == m_targetXText, exactYText = targetYText == m_targetYText;

@@ -451,7 +451,7 @@ namespace winrt::MandelbrotViewer::implementation
         if (!m_juliaHasFrame) return;
         CopyTextToClipboard(
             Mandelbrot::SerializeViewState(m_juliaDisplayedConfig, m_theme,
-                m_frequency, m_phaseOffset, m_invertColors, m_interiorColor),
+                m_frequency, m_phaseOffset, m_invertColors, m_interiorColor, m_lighting),
             JuliaTimingText(),
             L"Julia coordinates and parameter copied.");
     }

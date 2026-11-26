@@ -24,6 +24,7 @@ cbuffer PostParams : register(b0)
     uint subGroupThreads;
     uint subRayOffset, subRayLimit, keyframeOversampled;
     uint skipX0, skipY0, skipX1, skipY1;
+    float lightDirX, lightDirY, lightDirZ, lightStrength;
 };
 
 struct GpuPixelSubInfo
@@ -199,6 +200,7 @@ cbuffer PostParams : register(b0)
     uint subGroupThreads;
     uint subRayOffset, subRayLimit, keyframeOversampled;
     uint skipX0, skipY0, skipX1, skipY1;
+    float lightDirX, lightDirY, lightDirZ, lightStrength;
 };
 
 struct GpuPixelSubInfo
@@ -218,6 +220,26 @@ float MapIterToPhase(float iterVal)
 {
     if (iterVal <= 0.0f) return 0.0f;
     return 1.6f * log(1.0f + iterVal * 0.1f) * frequency;
+}
+
+float HeightFromIterGpu(float value)
+{
+    if (value < 0.0f) return -1.0f;
+    float iter = value;
+    if (fractalType == 7u)
+    {
+        int root = int(value / 1000000.0f);
+        iter = max(0.0f, value - float(root) * 1000000.0f);
+    }
+    return 1.6f * log(1.0f + iter * 0.1f);
+}
+
+float SampleHeightGpu(int sx, int sy, float fallbackH)
+{
+    uint cx = uint(clamp(sx, 0, int(width) - 1));
+    uint cy = uint(clamp(sy, 0, int(bandHeight) - 1));
+    float h = HeightFromIterGpu(InIters[cy * width + cx]);
+    return (h >= 0.0f) ? h : fallbackH;
 }
 
 uint SamplePaletteLut(float phase)
@@ -299,8 +321,11 @@ void CSResolveAndBlend(uint3 tid : SV_DispatchThreadID)
     }
 
     uint fullIdx = (tid.y + topHalo) * width + tid.x;
-    uint centerColor = ColorIterationGpu(InIters[fullIdx]);
+    float centerIter = InIters[fullIdx];
+    uint centerColor = ColorIterationGpu(centerIter);
     uint resolvedColor = centerColor;
+    float lightCenterH = (lightStrength > 0.0f) ? HeightFromIterGpu(centerIter) : -1.0f;
+    float lightEscapedFrac = (centerIter >= 0.0f) ? 1.0f : 0.0f;
 
     GpuPixelSubInfo info = InPixelSubInfo[tid.y * width + tid.x];
     if (info.slot != 0xFFFFFFFFu && info.weight > 0.0f)
@@ -318,9 +343,37 @@ void CSResolveAndBlend(uint3 tid : SV_DispatchThreadID)
             (centerColor == interiorColor || weight >= 1.0f))
         {
             resolvedColor = interiorColor;
+            lightEscapedFrac = 0.0f;
         }
         else
         {
+            if (lightStrength > 0.0f)
+            {
+                float hSum = 0.0f;
+                uint escapedCount = 0u;
+                [unroll]
+                for (uint s = 0u; s < 4u; ++s)
+                {
+                    if (sIter[s] >= 0.0f)
+                    {
+                        if (centerIter < 0.0f) hSum += HeightFromIterGpu(sIter[s]);
+                        ++escapedCount;
+                    }
+                }
+                if (centerIter < 0.0f)
+                {
+                    if (escapedCount > 0u)
+                    {
+                        lightCenterH = hSum / float(escapedCount);
+                        lightEscapedFrac = (float(escapedCount) * 0.25f) * weight;
+                    }
+                }
+                else
+                {
+                    lightEscapedFrac = (1.0f - weight) + (float(escapedCount) * 0.25f) * weight;
+                }
+            }
+
             float phases[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
             if (fractalType != 7u)
             {
@@ -377,6 +430,55 @@ void CSResolveAndBlend(uint3 tid : SV_DispatchThreadID)
                 resolvedColor = outRgb | (uint(alpha + 0.5f) << 24);
             }
         }
+    }
+
+    if (lightStrength > 0.0f && lightEscapedFrac > 0.0f)
+    {
+        int x = int(tid.x);
+        int y = int(tid.y + topHalo);
+        float hTL = SampleHeightGpu(x - 1, y - 1, lightCenterH);
+        float hT  = SampleHeightGpu(x,     y - 1, lightCenterH);
+        float hTR = SampleHeightGpu(x + 1, y - 1, lightCenterH);
+        float hL  = SampleHeightGpu(x - 1, y,     lightCenterH);
+        float hR  = SampleHeightGpu(x + 1, y,     lightCenterH);
+        float hBL = SampleHeightGpu(x - 1, y + 1, lightCenterH);
+        float hB  = SampleHeightGpu(x,     y + 1, lightCenterH);
+        float hBR = SampleHeightGpu(x + 1, y + 1, lightCenterH);
+
+        float gx = ((hTR + 2.0f * hR + hBR) - (hTL + 2.0f * hL + hBL)) * 0.125f;
+        float gy = ((hBL + 2.0f * hB + hBR) - (hTL + 2.0f * hT + hTR)) * 0.125f;
+
+        float reliefScale = lightStrength * 2.5f;
+        float nx0 = -gx * reliefScale;
+        float ny0 =  gy * reliefScale;
+        float invLen = rsqrt(nx0 * nx0 + ny0 * ny0 + 1.0f);
+        float nx = nx0 * invLen;
+        float ny = ny0 * invLen;
+        float nz = invLen;
+
+        float3 halfVec = normalize(float3(lightDirX, lightDirY, lightDirZ + 1.0f));
+        float ndotl = max(0.0f, nx * lightDirX + ny * lightDirY + nz * lightDirZ);
+        float ndoth = max(0.0f, nx * halfVec.x + ny * halfVec.y + nz * halfVec.z);
+        float slopeMask = min(1.0f, sqrt(nx * nx + ny * ny) * 2.5f);
+        float shade = 0.30f + 0.85f * ndotl;
+        float p2 = ndoth * ndoth;
+        float p4 = p2 * p2;
+        float p7 = p4 * p2 * ndoth;
+        float p14 = p7 * p7;
+        float spec = (p14 * p14) * 0.38f * slopeMask * lightEscapedFrac;
+
+        float linB = SrgbByteToLinear(resolvedColor & 255u);
+        float linG = SrgbByteToLinear((resolvedColor >> 8) & 255u);
+        float linR = SrgbByteToLinear((resolvedColor >> 16) & 255u);
+
+        float outB = clamp(linB * shade + spec * (0.75f + 0.25f * linB), 0.0f, 1.0f);
+        float outG = clamp(linG * shade + spec * (0.75f + 0.25f * linG), 0.0f, 1.0f);
+        float outR = clamp(linR * shade + spec * (0.75f + 0.25f * linR), 0.0f, 1.0f);
+
+        resolvedColor = (resolvedColor & 0xFF000000u) |
+            (LinearToSrgbByte(outR) << 16) |
+            (LinearToSrgbByte(outG) << 8) |
+            LinearToSrgbByte(outB);
     }
 
     OutAccumPixels[dstIdx] = resolvedColor;
