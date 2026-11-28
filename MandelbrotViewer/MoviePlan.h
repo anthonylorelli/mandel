@@ -22,6 +22,8 @@ namespace Mandelbrot
     inline constexpr std::array<int, 6> MovieFrameRates{24, 25, 30, 48, 50, 60};
     inline constexpr double MinMovieZoomSpeed = 0.2;
     inline constexpr double MaxMovieZoomSpeed = 5.0;
+    inline constexpr float MinMovieCycleSpeed = -5.0f;
+    inline constexpr float MaxMovieCycleSpeed = 5.0f;
 
     struct MoviePlan
     {
@@ -31,7 +33,7 @@ namespace Mandelbrot
         int width{1920}, height{1080}, fps{30}, seconds{30};
         MovieCodec codec{MovieCodec::H264};
         ColorTheme theme;
-        float frequency{1.0f}, phase{};
+        float frequency{1.0f}, phase{}, cycleSpeed{0.0f};
         bool invert{}, motionSmoothing{true};
         bool autoRetarget{};
         bool useGpu{true};
@@ -78,6 +80,13 @@ namespace Mandelbrot
             const double range = std::log(endZoom) - std::log(start.zoom);
             return std::exp(std::log(start.zoom) + range * t);
         }
+        float PhaseAt(double frameIndex) const noexcept
+        {
+            if (cycleSpeed == 0.0f || fps <= 0) return phase;
+            const double shifted = static_cast<double>(phase) +
+                (frameIndex / static_cast<double>(fps)) * static_cast<double>(cycleSpeed);
+            return static_cast<float>(shifted);
+        }
         void Validate() const
         {
             if (width < 1 || height < 1 || width > 7680 || height > 4320 ||
@@ -88,7 +97,8 @@ namespace Mandelbrot
                 (autoScaleIterations && baseIterations < 1) ||
                 !std::isfinite(targetX.ToDouble()) || !std::isfinite(targetY.ToDouble()) ||
                 !std::isfinite(start.hpCenterX.ToDouble()) || !std::isfinite(start.hpCenterY.ToDouble()) ||
-                !std::isfinite(frequency) || !(frequency > 0.0f) || !std::isfinite(phase))
+                !std::isfinite(frequency) || !(frequency > 0.0f) || !std::isfinite(phase) ||
+                !std::isfinite(cycleSpeed) || cycleSpeed < MinMovieCycleSpeed || cycleSpeed > MaxMovieCycleSpeed)
                 throw std::invalid_argument("Invalid movie resolution, frame rate, duration, or zoom.");
             if (!std::isfinite(lighting.azimuthDeg) || !std::isfinite(lighting.elevationDeg) || !std::isfinite(lighting.strength) ||
                 lighting.elevationDeg < DirectionalLightingParams::MinElevationDeg ||

@@ -236,6 +236,7 @@ namespace Mandelbrot
         std::optional<PresetTheme> themePreset;
         std::optional<float> frequency;
         std::optional<float> phase;
+        std::optional<float> cycleSpeed;
         std::optional<bool> invert;
         std::optional<uint32_t> interiorColor;
         std::optional<bool> lightingEnabled;
@@ -555,6 +556,16 @@ namespace Mandelbrot
                         return fail(L"Invalid --phase (expected finite number): " + std::wstring(val));
                     phase = f;
                 }
+                else if (flagView == L"--cycle-speed")
+                {
+                    double v = 0.0;
+                    const auto val = takeValue("--cycle-speed");
+                    const bool ok = TryParseDouble(val, v);
+                    const float f = static_cast<float>(v);
+                    if (!ok || !std::isfinite(f) || f < MinMovieCycleSpeed || f > MaxMovieCycleSpeed)
+                        return fail(L"Invalid --cycle-speed (expected -5.0..5.0 cycles/sec): " + std::wstring(val));
+                    cycleSpeed = f;
+                }
                 else if (flagView == L"--invert")
                 {
                     requireNoValue();
@@ -793,9 +804,9 @@ namespace Mandelbrot
         else
         {
             if (!outputPath.empty() || resWidth.has_value() || resHeight.has_value() ||
-                codec.has_value() || motionSmoothing.has_value())
+                codec.has_value() || motionSmoothing.has_value() || cycleSpeed.has_value())
             {
-                return fail(L"Movie-only options (--output, --resolution, --codec, --motion-smoothing) cannot be combined with --ascii.");
+                return fail(L"Movie-only options (--output, --resolution, --codec, --motion-smoothing, --cycle-speed) cannot be combined with --ascii.");
             }
             if (overrideWidth && (*overrideWidth < MinConsoleCols || *overrideWidth > MaxConsoleCols))
             {
@@ -1103,6 +1114,7 @@ namespace Mandelbrot
             if (duration) plan.seconds = *duration;
             if (codec) plan.codec = *codec;
             if (motionSmoothing) plan.motionSmoothing = *motionSmoothing;
+            if (cycleSpeed) plan.cycleSpeed = *cycleSpeed;
 
             // 10. Zoom motion & target.
             if (endZoom)

@@ -818,4 +818,68 @@ TEST_CASE(Movie, ZoomPyramidEndToEndExportZoomInAndZoomOut)
     }
 }
 
+TEST_CASE(Movie, PaletteFlowAdvancesPhaseDisablesZoomPyramidAndRendersPerFrame)
+{
+    MoviePlan p = SmallMovie();
+    p.width = 64; p.height = 48;
+    p.fps = 30; p.seconds = 4;
+    p.start.SetCenter(-0.75, 0.12);
+    p.targetX = p.start.hpCenterX; p.targetY = p.start.hpCenterY;
+    p.start.zoom = 1.0; p.endZoom = 16.0;
+    p.phase = 0.25f;
+    p.cycleSpeed = 0.0f;
+    p.Validate();
+    ASSERT_NEAR(0.25f, p.PhaseAt(0.0), 1e-6f);
+    ASSERT_NEAR(0.25f, p.PhaseAt(15.0), 1e-6f);
+    ASSERT_TRUE(PlanZoomKeyframes(p).enabled);
+
+    // Positive & negative speeds advance phase smoothly per frame and bypass zoom pyramid.
+    p.cycleSpeed = 0.5f;
+    p.Validate();
+    ASSERT_NEAR(0.25f, p.PhaseAt(0.0), 1e-6f);
+    ASSERT_NEAR(0.50f, p.PhaseAt(15.0), 1e-6f);
+    ASSERT_NEAR(0.75f, p.PhaseAt(30.0), 1e-6f);
+    ASSERT_FALSE(PlanZoomKeyframes(p).enabled);
+
+    p.cycleSpeed = -1.0f;
+    p.Validate();
+    ASSERT_NEAR(-0.25f, p.PhaseAt(15.0), 1e-6f);
+    ASSERT_FALSE(PlanZoomKeyframes(p).enabled);
+
+    // Out-of-range or non-finite cycleSpeed values are rejected.
+    for (float bad : { -5.5f, 5.5f, std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity() })
+    {
+        MoviePlan badPlan = p;
+        badPlan.cycleSpeed = bad;
+        bool rejected = false;
+        try { badPlan.Validate(); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        ASSERT_TRUE(rejected);
+    }
+
+    // CPU RenderMovieFrame with cycleSpeed matches a static render at phase = PhaseAt(frame) and differs from frame 0.
+    MoviePlan flowing = SmallMovie();
+    flowing.width = 48; flowing.height = 36;
+    flowing.fps = 24; flowing.seconds = 2;
+    flowing.start.SetCenter(-0.75, 0.12);
+    flowing.targetX = flowing.start.hpCenterX; flowing.targetY = flowing.start.hpCenterY;
+    flowing.start.zoom = 2.0; flowing.endZoom = 2.0; // static camera isolates phase change
+    flowing.phase = 0.1f;
+    flowing.cycleSpeed = 0.5f;
+    flowing.useGpu = false;
+
+    MoviePlan staticAtFrame12 = flowing;
+    staticAtFrame12.phase = flowing.PhaseAt(12.0);
+    staticAtFrame12.cycleSpeed = 0.0f;
+
+    std::atomic<bool> cancel{};
+    MandelbrotEngine cpu(ExecutionMode::Cpu);
+    const auto frame0 = RenderMovieFrame(flowing, 0.0, cancel, {}, flowing.height, &cpu);
+    const auto frame12 = RenderMovieFrame(flowing, 12.0, cancel, {}, flowing.height, &cpu);
+    const auto expected12 = RenderMovieFrame(staticAtFrame12, 12.0, cancel, {}, staticAtFrame12.height, &cpu);
+    ASSERT_FALSE(frame0 == frame12);
+    ASSERT_TRUE(frame12 == expected12);
+}
+
+
 
