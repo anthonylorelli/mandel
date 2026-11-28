@@ -110,7 +110,11 @@ namespace Mandelbrot
 
         float Lookup(float rawVal) const noexcept
         {
-            if (!valid || !(invSpan > 0.0f)) return 0.0f;
+            if (!valid || !std::isfinite(rawVal) || !std::isfinite(minVal) ||
+                !std::isfinite(invSpan) || !(invSpan > 0.0f))
+            {
+                return 0.0f;
+            }
             const float norm = std::clamp((rawVal - minVal) * invSpan, 0.0f, 1.0f);
             const float pos = norm * static_cast<float>(kBins);
             const size_t idx = std::min<size_t>(kBins - 1, static_cast<size_t>(pos));

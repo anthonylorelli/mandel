@@ -488,6 +488,11 @@ TEST_CASE(ColorTheme, HistogramEqualization_ExpandsNarrowDynamicRangePreservesIn
     std::vector<float> allInterior(64, -1.0f);
     ASSERT_FALSE(ColorTheme::BuildHistogramCdf(allInterior, allInterior.size()).valid);
 
+    // Non-finite lookup inputs must return 0.0f without undefined behavior.
+    ASSERT_EQ(0.0f, cdf.Lookup(std::numeric_limits<float>::quiet_NaN()));
+    ASSERT_EQ(0.0f, cdf.Lookup(std::numeric_limits<float>::infinity()));
+    ASSERT_EQ(0.0f, cdf.Lookup(-std::numeric_limits<float>::infinity()));
+
     // 3. Newton multi-basin values build a valid CDF and recolor cleanly.
     std::vector<float> newton(W * H);
     for (int y = 0; y < H; ++y)
