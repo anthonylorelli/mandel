@@ -562,6 +562,7 @@ namespace Mandelbrot
         std::vector<float> iterations;
         std::vector<SubpixelSamples> subpixels;
         const MandelbrotConfig camera = plan.CameraAt(frameIndex);
+        const float framePhase = plan.PhaseAt(frameIndex);
         const BigFloat step(3.0 / camera.zoom / plan.width);
         GpuMovieShutterParams shutter{};
         const bool hasShutter = detail::BuildShutterParams(plan, frameIndex, camera, shutter);
@@ -621,7 +622,7 @@ namespace Mandelbrot
                 uint32_t* outBand = bandTargetBase + static_cast<size_t>(row) * plan.width;
                 gpuOk = engine.RenderGpuMovieBand(
                     band, topHalo, rows, row,
-                    plan.theme, plan.frequency, plan.phase, plan.invert, plan.interior,
+                    plan.theme, plan.frequency, framePhase, plan.invert, plan.interior,
                     outBand, &cancel, false, nullptr, &plan.lighting, histPtr);
                 if (cancel.load(std::memory_order_relaxed)) return {};
 
@@ -682,7 +683,7 @@ namespace Mandelbrot
             if (cancel.load(std::memory_order_relaxed)) return {};
             // Halo rows provide complete 3x3 neighborhoods across band boundaries, making
             // adaptive subpixel refinement and colors independent of render bands.
-            plan.theme.Recolor(iterations, painted.data(), bandCount, plan.frequency, plan.phase,
+            plan.theme.Recolor(iterations, painted.data(), bandCount, plan.frequency, framePhase,
                 plan.invert, plan.interior, band.fractalType, band.width, &subpixels, false, &plan.lighting,
                 plan.histogramEqualize, histPtr);
             const uint32_t* bandPixels = painted.data() + static_cast<size_t>(topHalo) * plan.width;

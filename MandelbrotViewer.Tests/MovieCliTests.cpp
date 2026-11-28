@@ -375,6 +375,10 @@ TEST_CASE(MovieCli, RejectsInvalidAndConflictingArguments)
         { L"--export-movie", L"a.mp4", L"--light-elevation", L"90" },
         { L"--export-movie", L"a.mp4", L"--light-strength", L"-0.1" },
         { L"--export-movie", L"a.mp4", L"--light-strength", L"3.0" },
+        { L"--export-movie", L"a.mp4", L"--cycle-speed", L"5.5" },
+        { L"--export-movie", L"a.mp4", L"--cycle-speed", L"-5.5" },
+        { L"--export-movie", L"a.mp4", L"--cycle-speed", L"fast" },
+        { L"--ascii", L"--once", L"--cycle-speed", L"0.2" },
         { L"--export-movie", L"a.mp4", L"--histogram=1" },
         { L"--export-movie", L"a.mp4", L"--config", L"C:\\does-not-exist-mandel-cli.json" }
     };
@@ -384,6 +388,19 @@ TEST_CASE(MovieCli, RejectsInvalidAndConflictingArguments)
         const auto res = ParseMovieCli(args);
         ASSERT_TRUE(res.action == CliAction::Error);
         ASSERT_FALSE(res.errorMessage.empty());
+    }
+
+    // Valid positive and negative --cycle-speed values parse cleanly for --export-movie.
+    {
+        const auto pos = ParseMovieCli({ L"--export-movie", L"flow.mp4", L"--cycle-speed", L"0.5" });
+        ASSERT_TRUE(pos.action == CliAction::ExportMovie);
+        ASSERT_NEAR(0.5f, pos.options.plan.cycleSpeed, 1e-6f);
+
+        const auto neg = ParseMovieCli({ L"--export-movie", L"flow.mp4", L"--cycle-speed=-1.25" });
+        ASSERT_TRUE(neg.action == CliAction::ExportMovie);
+        ASSERT_NEAR(-1.25f, neg.options.plan.cycleSpeed, 1e-6f);
+
+        ASSERT_TRUE(MovieCliUsage().find(L"--cycle-speed") != std::wstring::npos);
     }
 
     // --histogram / --auto-contrast / --no-histogram work for both --export-movie and --ascii, and round-trip via JSON config.
