@@ -21,7 +21,7 @@ cbuffer Params : register(b0)
     float juliaCy;
     float bailout2;
     float pad0;
-    uint outRowOffset, pad2, pad3, pad4;
+    uint outRowOffset, coloringMode, pad3, pad4;
     uint skipX0, skipY0, skipX1, skipY1;
 };
 
@@ -31,7 +31,7 @@ Buffer<uint> SubpixelIndices : register(t4);
 Buffer<uint> SubpixelCountSrv : register(t7);
 RWStructuredBuffer<float> OutIters : register(u0);
 RWStructuredBuffer<float> OutSubpixelsFlat : register(u1);
-
+)" MANDEL_HLSL_ORBIT_COLOR_HELPERS R"(
 float FinishSmoothEscape(uint fType, uint iter, float zr, float zi, float prevZr, float prevZi, float cx, float cy)
 {
     float zr2 = zr * zr;
@@ -107,13 +107,22 @@ float EvalShallowSample(float xCoord, float yCoord)
 
         float chkZr = zr, chkZi = zi;
         uint chkPeriod = 8u, stepsSince = 0u;
+        float stripeSum = 0.0f, prevStripeSum = 0.0f, minDist = 1e30f;
+        uint stripeCount = 0u;
         [loop]
         for (uint iter = 0u; iter < maxIter; ++iter)
         {
             float zr2 = zr * zr;
             float zi2 = zi * zi;
-            if (zr2 + zi2 > bailout2)
+            float mod2 = zr2 + zi2;
+            if (coloringMode != 0u && iter > 0u)
             {
+                SampleOrbitColor(zr, zi, mod2, stripeSum, prevStripeSum, stripeCount, minDist);
+            }
+            if (mod2 > bailout2)
+            {
+                if (coloringMode != 0u)
+                    return FinishOrbitColor(fractalType, iter, mod2, bailout2, stripeSum, prevStripeSum, stripeCount, minDist);
                 if (smoothFlag == 0u) return float(iter);
                 return FinishSmoothEscape(fractalType, iter, zr, zi, 0.0f, 0.0f, jcx, jcy);
             }
@@ -189,6 +198,10 @@ float EvalShallowSample(float xCoord, float yCoord)
         return float(rootIndex) * 1000000.0f + smoothVal;
     }
 
+    float effBailout2 = (coloringMode == 1u) ? 1e6f : 16.0f;
+    float stripeSum = 0.0f, prevStripeSum = 0.0f, minDist = 1e30f;
+    uint stripeCount = 0u;
+
     if (fractalType == 0u)
     {
         float zr = 0.0f, zi = 0.0f, zr2 = 0.0f, zi2 = 0.0f;
@@ -196,13 +209,17 @@ float EvalShallowSample(float xCoord, float yCoord)
         uint chkPeriod = 8u, stepsSince = 0u, iter = 0u;
 
         [loop]
-        while (iter < maxIter && (zr2 + zi2) <= 16.0f)
+        while (iter < maxIter && (zr2 + zi2) <= effBailout2)
         {
             zi = 2.0f * zr * zi + cy;
             zr = zr2 - zi2 + cx;
             zr2 = zr * zr;
             zi2 = zi * zi;
             ++iter;
+            if (coloringMode != 0u)
+            {
+                SampleOrbitColor(zr, zi, zr2 + zi2, stripeSum, prevStripeSum, stripeCount, minDist);
+            }
             if (zr == chkZr && zi == chkZi)
             {
                 return -1.0f;
@@ -215,6 +232,8 @@ float EvalShallowSample(float xCoord, float yCoord)
             }
         }
         if (iter >= maxIter) return -1.0f;
+        if (coloringMode != 0u)
+            return FinishOrbitColor(0u, iter, zr2 + zi2, effBailout2, stripeSum, prevStripeSum, stripeCount, minDist);
         if (smoothFlag == 0u) return float(iter);
         return FinishSmoothEscape(0u, iter, zr, zi, 0.0f, 0.0f, cx, cy);
     }
@@ -228,7 +247,7 @@ float EvalShallowSample(float xCoord, float yCoord)
     uint chkPeriod = 8u, stepsSince = 0u, iter = 0u;
 
     [loop]
-    while (iter < maxIter && (zr2 + zi2) <= 16.0f)
+    while (iter < maxIter && (zr2 + zi2) <= effBailout2)
     {
         if (fractalType == 1u)
         {
@@ -268,6 +287,10 @@ float EvalShallowSample(float xCoord, float yCoord)
         zr2 = zr * zr;
         zi2 = zi * zi;
         ++iter;
+        if (coloringMode != 0u)
+        {
+            SampleOrbitColor(zr, zi, zr2 + zi2, stripeSum, prevStripeSum, stripeCount, minDist);
+        }
         if (zr == chkZr && zi == chkZi && (fractalType != 6u || (prevZr == chkPrevZr && prevZi == chkPrevZi)))
         {
             iter = maxIter;
@@ -283,6 +306,8 @@ float EvalShallowSample(float xCoord, float yCoord)
     }
 
     if (iter >= maxIter) return -1.0f;
+    if (coloringMode != 0u)
+        return FinishOrbitColor(fractalType, iter, zr2 + zi2, effBailout2, stripeSum, prevStripeSum, stripeCount, minDist);
     if (smoothFlag == 0u) return float(iter);
     return FinishSmoothEscape(fractalType, iter, zr, zi, prevZr, prevZi, cx, cy);
 }

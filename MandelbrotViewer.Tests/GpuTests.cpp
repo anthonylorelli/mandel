@@ -1755,4 +1755,111 @@ TEST_CASE(Gpu, HistogramEqualizationMatchesCpuAndHasNoBandSeams)
     }
 }
 
+TEST_CASE(Gpu, OrbitTrapAndStripeAverageMatchCpuAcrossShallowPerturbAndFallback)
+{
+    std::atomic<bool> cancel{};
+    MandelbrotEngine gpu(ExecutionMode::Gpu, true);
+    MandelbrotEngine cpu(ExecutionMode::Automatic);
+    ASSERT_TRUE(gpu.IsGpuAvailable());
+
+    const std::array<ColoringMode, 4> orbitModes{
+        ColoringMode::StripeAverage,
+        ColoringMode::OrbitTrapPoint,
+        ColoringMode::OrbitTrapCross,
+        ColoringMode::OrbitTrapRing
+    };
+
+    auto verifyParity = [&](FractalConfig cfg)
+    {
+        for (ColoringMode mode : orbitModes)
+        {
+            cfg.coloringMode = mode;
+            ASSERT_TRUE(gpu.CanUseGpu(cfg));
+
+            MoviePlan gpuPlan;
+            gpuPlan.width = cfg.width;
+            gpuPlan.height = cfg.height;
+            gpuPlan.fps = 24;
+            gpuPlan.seconds = 1;
+            gpuPlan.motionSmoothing = false;
+            gpuPlan.useGpu = true;
+            gpuPlan.theme = ColorTheme(PresetTheme::Inferno);
+            gpuPlan.start = cfg;
+            gpuPlan.targetX = cfg.hpCenterX;
+            gpuPlan.targetY = cfg.hpCenterY;
+            gpuPlan.endZoom = cfg.zoom;
+
+            MoviePlan cpuPlan = gpuPlan;
+            cpuPlan.useGpu = false;
+
+            const auto gpuPixels = RenderMovieFrame(gpuPlan, 0.0, cancel, {}, gpuPlan.height, &gpu);
+            const auto cpuPixels = RenderMovieFrame(cpuPlan, 0.0, cancel, {}, cpuPlan.height, &cpu);
+            ASSERT_EQ(static_cast<size_t>(cfg.width) * static_cast<size_t>(cfg.height), gpuPixels.size());
+            ASSERT_LT(FilteredPixelError(cpuPixels, gpuPixels, cfg.width, cfg.height), 5.0);
+        }
+    };
+
+    // 1. Shallow Mandelbrot (GpuShallowShader)
+    {
+        FractalConfig cfg;
+        cfg.width = 96;
+        cfg.height = 64;
+        cfg.SetCenter(-0.75, 0.12);
+        cfg.zoom = 2.0;
+        cfg.maxIterations = 256;
+        verifyParity(cfg);
+    }
+
+    // 2. Shallow Julia (GpuShallowShader)
+    {
+        FractalConfig cfg;
+        cfg.width = 96;
+        cfg.height = 64;
+        cfg.juliaSet = true;
+        cfg.juliaX = BigFloat(-0.75);
+        cfg.juliaY = BigFloat(0.11);
+        cfg.SetCenter(0.0, 0.0);
+        cfg.zoom = 1.5;
+        cfg.maxIterations = 256;
+        verifyParity(cfg);
+    }
+
+    // 3. PerturbLds Mandelbrot (zoom >= 16, bypasses BLA)
+    {
+        FractalConfig cfg;
+        cfg.width = 96;
+        cfg.height = 64;
+        cfg.SetCenter(-0.7436438870371587, 0.1318259042053119);
+        cfg.zoom = 500.0;
+        cfg.maxIterations = 400;
+        verifyParity(cfg);
+    }
+
+    // 4. PerturbLds Burning Ship
+    {
+        FractalConfig cfg;
+        cfg.fractalType = FractalType::BurningShip;
+        cfg.width = 96;
+        cfg.height = 64;
+        cfg.SetCenter(-1.755, -0.025);
+        cfg.zoom = 200.0;
+        cfg.maxIterations = 350;
+        verifyParity(cfg);
+    }
+
+    // 5. Ultra-deep zoom (>= kGpuDeepExpThreshold) falls back cleanly to CPU for non-EscapeTime modes.
+    {
+        FractalConfig ultra;
+        ultra.width = 32;
+        ultra.height = 24;
+        ultra.SetCenter(
+            BigFloat("-0.743643887037158704752191506114774"),
+            BigFloat("0.131825904205311970493132056385139"));
+        ultra.zoom = 1e35;
+        ultra.maxIterations = 500;
+        ultra.coloringMode = ColoringMode::OrbitTrapCross;
+        ASSERT_FALSE(gpu.CanUseGpu(ultra));
+    }
+}
+
 

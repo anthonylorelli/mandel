@@ -152,4 +152,20 @@ TEST_CASE(ViewState, HistogramEqualizeSerializesOnlyWhenEnabled)
     ASSERT_TRUE(JsonValue(onJson, L"histogramEqualize") == L"true");
 }
 
+TEST_CASE(ViewState, ColoringModeSerializesOnlyWhenNonDefault)
+{
+    MandelbrotConfig config;
+    ColorTheme theme;
+
+    const auto stdJson = SerializeViewState(config, theme, 1.0f, 0.0f, false, 0xFF000000);
+    ASSERT_TRUE(stdJson.find(L"coloringMode") == std::wstring::npos);
+
+    for (ColoringMode mode : { ColoringMode::StripeAverage, ColoringMode::OrbitTrapPoint, ColoringMode::OrbitTrapCross, ColoringMode::OrbitTrapRing })
+    {
+        config.coloringMode = mode;
+        const auto json = SerializeViewState(config, theme, 1.0f, 0.0f, false, 0xFF000000);
+        ASSERT_TRUE(JsonValue(json, L"coloringMode") == GetColoringModeName(mode));
+    }
+}
+
 

@@ -303,6 +303,8 @@ namespace Mandelbrot
         switch (config.fractalType)
         {
         case FractalType::Mandelbrot:
+            if (config.coloringMode != ColoringMode::EscapeTime)
+                return config.zoom < kGpuDeepExpThreshold;
             return config.zoom <= MaxZoom;
         case FractalType::Tricorn:
             return config.zoom < kGpuTricornMaxZoom;

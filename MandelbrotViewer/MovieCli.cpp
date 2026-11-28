@@ -254,6 +254,7 @@ namespace Mandelbrot
             L"  --auto-iterations            Scale iteration budget automatically with zoom depth\n"
             L"  --no-auto-iterations         Keep iteration budget fixed across frames\n"
             L"  --smooth / --no-smooth       Smooth continuous coloring (default) or discrete bands\n"
+            L"  --coloring <style>           escape-time (default), stripe, trap-point, trap-cross, trap-ring\n"
             L"  --gpu / --no-gpu (--cpu)     Use GPU (movie default) or CPU (--ascii default) rendering\n"
             L"  --theme <name>               electric-blue (default), inferno, psychedelic, cyberpunk,\n"
             L"                               viridis, twilight-ocean, sunset-glow, monochrome\n"

@@ -315,7 +315,9 @@ namespace winrt::MandelbrotViewer::implementation
         const int iterations = m_autoScaleIterations
             ? Mandelbrot::MandelbrotEngine::RecommendMaxIterations(m_juliaConfig.zoom, m_juliaConfig.fractalType, m_baseIterations)
             : m_config.maxIterations;
-        if (m_juliaConfig.maxIterations != iterations || m_juliaConfig.smooth != m_config.smooth) RenderJulia();
+        if (m_juliaConfig.maxIterations != iterations ||
+            m_juliaConfig.smooth != m_config.smooth ||
+            m_juliaConfig.coloringMode != m_config.coloringMode) RenderJulia();
     }
 
     void MainWindow::RenderJulia(bool continueTravel)
@@ -325,6 +327,7 @@ namespace winrt::MandelbrotViewer::implementation
             ? Mandelbrot::MandelbrotEngine::RecommendMaxIterations(m_juliaConfig.zoom, m_juliaConfig.fractalType, m_baseIterations)
             : m_config.maxIterations;
         m_juliaConfig.smooth = m_config.smooth;
+        m_juliaConfig.coloringMode = m_config.coloringMode;
         if (!continueTravel)
         {
             m_juliaHasFrame = false;

@@ -138,17 +138,21 @@ namespace Mandelbrot
         const double halfW = static_cast<double>(width) * 0.5;
         const double halfH = static_cast<double>(height) * 0.5;
 
+        const ColoringMode coloringMode = config.coloringMode;
+
         auto evalStandardPixel = [&](double px, double py) -> float
         {
             if (cancelToken && cancelToken->load(std::memory_order_relaxed)) return -1.0f;
             const double cy = config.centerY + (halfH - (static_cast<double>(py) + 0.5)) * dy;
             const double cx = config.centerX + ((static_cast<double>(px) + 0.5) - halfW) * dx;
-            return detail::EvalStandardPoint(type, cx, cy, maxIter, smooth);
+            return detail::EvalStandardPoint(type, cx, cy, maxIter, smooth, coloringMode);
         };
 
 #if defined(_M_ARM64)
         if (cpuMode == ExecutionMode::Automatic &&
-            type == FractalType::Mandelbrot && config.renderStride <= 1)
+            type == FractalType::Mandelbrot &&
+            coloringMode == ColoringMode::EscapeTime &&
+            config.renderStride <= 1)
         {
             constexpr int kSegmentWidth = 64;
             const int segmentsPerRow = std::max(1, (width + kSegmentWidth - 1) / kSegmentWidth);
@@ -220,7 +224,9 @@ namespace Mandelbrot
         }
 
 #if defined(_M_ARM64)
-        if (cpuMode == ExecutionMode::Automatic && type == FractalType::Mandelbrot)
+        if (cpuMode == ExecutionMode::Automatic &&
+            type == FractalType::Mandelbrot &&
+            coloringMode == ColoringMode::EscapeTime)
         {
             detail::RefineSubpixelsQuads(width, height, smooth, type, outIterations, m_sampleWeights,
                 subpixelSamples, cancelToken,

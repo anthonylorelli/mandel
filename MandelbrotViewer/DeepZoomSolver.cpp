@@ -332,7 +332,11 @@ namespace Mandelbrot
         // Escape-time fractals:
         // High-precision reference orbit + hardware double perturbation with Zhuoran's dynamic rebasing,
         // cross-frame reference orbit caching, and fast sample-grid reference search when the center escapes early.
-        constexpr double bailoutRadius2 = 16.0;
+        const ColoringMode coloringMode = config.coloringMode;
+        const bool useOrbitColor = (coloringMode != ColoringMode::EscapeTime);
+        const double bailoutRadius2 = (coloringMode == ColoringMode::StripeAverage)
+            ? detail::kStripeBailoutRadius2
+            : 16.0;
         DeepReferenceState refState{};
         if (!referenceCache.Ensure(config, centerX, centerY, executionMode, refState, cancelToken))
         {
@@ -362,10 +366,9 @@ namespace Mandelbrot
             double escapedZy = 0.0;
             double escapedPrevZx = 0.0;
             double escapedPrevZy = 0.0;
+            detail::OrbitColorAccumulator orbitColor{ coloringMode };
 
-            switch (type)
-            {
-            case FractalType::Mandelbrot:
+            if (type == FractalType::Mandelbrot && !useOrbitColor)
             {
                 auto result = bla.Enabled()
                     ? detail::EvalMandelbrotPerturbation<true>(orbitPtr, refLen, maxIter, dcx, dcy, bla)
@@ -375,48 +378,8 @@ namespace Mandelbrot
                 iter = result.iterations;
                 escapedZx = result.x;
                 escapedZy = result.y;
-                break;
             }
-
-            case FractalType::BurningShip:
-            case FractalType::Tricorn:
-            case FractalType::Celtic:
-            case FractalType::Buffalo:
-            case FractalType::CubicMultibrot:
-                while (iter < maxIter)
-                {
-                    double rx = orbitPtr[m].x;
-                    double ry = orbitPtr[m].y;
-                    const double zx = rx + dx;
-                    const double zy = ry + dy;
-                    const double mod2 = zx * zx + zy * zy;
-
-                    if (mod2 > bailoutRadius2)
-                    {
-                        escapedZx = zx;
-                        escapedZy = zy;
-                        break;
-                    }
-
-                    const double dz2 = dx * dx + dy * dy;
-                    if (m == refLen || (m > 0 && mod2 < dz2))
-                    {
-                        dx = zx;
-                        dy = zy;
-                        m = 0;
-                        rx = 0.0;
-                        ry = 0.0;
-                    }
-
-                    detail::StepPerturbationDelta(
-                        type, rx, ry, zx, zy, dcx, dcy, dx, dy, prevDx, prevDy);
-                    m++;
-                    iter++;
-                }
-                break;
-
-            case FractalType::Phoenix:
-            default:
+            else if (type == FractalType::Phoenix)
             {
                 dx = dcy;
                 dy = dcx;
@@ -440,6 +403,10 @@ namespace Mandelbrot
 
                         if (mod2 > bailoutRadius2)
                         {
+                            if (useOrbitColor && iter > 0)
+                            {
+                                orbitColor.Sample(zx, zy, mod2);
+                            }
                             escapedZx = zx;
                             escapedZy = zy;
                             escapedPrevZx = (m > 0) ? (orbitPtr[m - 1].x + prevDx) : 0.0;
@@ -457,6 +424,11 @@ namespace Mandelbrot
                             continue;
                         }
 
+                        if (useOrbitColor && iter > 0)
+                        {
+                            orbitColor.Sample(zx, zy, mod2);
+                        }
+
                         detail::StepPerturbationDelta(
                             FractalType::Phoenix, rx, ry, zx, zy, dcx, dcy, dx, dy, prevDx, prevDy);
                         m++;
@@ -465,6 +437,10 @@ namespace Mandelbrot
                     else
                     {
                         const double mod2 = zr * zr + zi * zi;
+                        if (useOrbitColor && iter > 0)
+                        {
+                            orbitColor.Sample(zr, zi, mod2);
+                        }
                         if (mod2 > bailoutRadius2)
                         {
                             escapedZx = zr;
@@ -482,13 +458,54 @@ namespace Mandelbrot
                         iter++;
                     }
                 }
-                break;
             }
+            else
+            {
+                while (iter < maxIter)
+                {
+                    double rx = orbitPtr[m].x;
+                    double ry = orbitPtr[m].y;
+                    const double zx = rx + dx;
+                    const double zy = ry + dy;
+                    const double mod2 = zx * zx + zy * zy;
+
+                    if (useOrbitColor && iter > 0)
+                    {
+                        orbitColor.Sample(zx, zy, mod2);
+                    }
+
+                    if (mod2 > bailoutRadius2)
+                    {
+                        escapedZx = zx;
+                        escapedZy = zy;
+                        break;
+                    }
+
+                    const double dz2 = dx * dx + dy * dy;
+                    if (m == refLen || (m > 0 && mod2 < dz2))
+                    {
+                        dx = zx;
+                        dy = zy;
+                        m = 0;
+                        rx = 0.0;
+                        ry = 0.0;
+                    }
+
+                    detail::StepPerturbationDelta(
+                        type, rx, ry, zx, zy, dcx, dcy, dx, dy, prevDx, prevDy);
+                    m++;
+                    iter++;
+                }
             }
 
             if (iter >= maxIter)
             {
                 return -1.0f;
+            }
+
+            if (useOrbitColor)
+            {
+                return orbitColor.Finish(type, iter, escapedZx * escapedZx + escapedZy * escapedZy, bailoutRadius2, smooth);
             }
 
             if (smooth)
@@ -617,6 +634,7 @@ namespace Mandelbrot
 
         if (executionMode == ExecutionMode::Automatic &&
             type == FractalType::Mandelbrot &&
+            !useOrbitColor &&
             (config.renderStride <= 1 || width < 8 || height < 8))
         {
             constexpr int kSegmentWidth = 64;
@@ -689,7 +707,7 @@ namespace Mandelbrot
         }
 
 #if defined(_M_ARM64)
-        if (executionMode == ExecutionMode::Automatic && type == FractalType::Mandelbrot)
+        if (executionMode == ExecutionMode::Automatic && type == FractalType::Mandelbrot && !useOrbitColor)
         {
             detail::RefineSubpixelsQuads(width, height, smooth, type, outIterations, sampleWeights,
                 subpixelSamples, cancelToken,

@@ -181,14 +181,99 @@ namespace Mandelbrot::detail
         }
     }
 
+    inline constexpr double kStripeBailoutRadius2 = 1e6; // R = 1000 for seamless Harkonen stripe blending
+
+    // Encodes a smooth palette phase s >= 0 (before frequency/phaseOffset) into the
+    // iteration buffer domain by inverting ColorTheme::MapIterationToPhase(v, 1.0f) = 1.6 * log(1 + 0.1 * v).
+    inline float EncodeTrapPotential(double smoothPhase) noexcept
+    {
+        const double clamped = std::clamp(smoothPhase, 0.0, 12.0);
+        return static_cast<float>(10.0 * (std::exp(clamped * 0.625) - 1.0));
+    }
+
+    struct OrbitColorAccumulator
+    {
+        ColoringMode mode{ ColoringMode::EscapeTime };
+        double stripeSum{ 0.0 };
+        double prevStripeSum{ 0.0 };
+        int stripeCount{ 0 };
+        double minDist{ 1e30 };
+
+        void Sample(double zr, double zi, double mod2) noexcept
+        {
+            switch (mode)
+            {
+            case ColoringMode::StripeAverage:
+            {
+                prevStripeSum = stripeSum;
+                const double angle = (zr == 0.0 && zi == 0.0) ? 0.0 : std::atan2(zi, zr);
+                stripeSum += 0.5 + 0.5 * std::sin(3.0 * angle);
+                ++stripeCount;
+                break;
+            }
+            case ColoringMode::OrbitTrapPoint:
+                minDist = std::min(minDist, mod2); // tracks min |z|^2; sqrt applied in Finish()
+                break;
+            case ColoringMode::OrbitTrapCross:
+                minDist = std::min(minDist, std::min(std::abs(zr), std::abs(zi)));
+                break;
+            case ColoringMode::OrbitTrapRing:
+                minDist = std::min(minDist, std::abs(std::sqrt(std::max(mod2, 0.0)) - 1.0));
+                break;
+            case ColoringMode::EscapeTime:
+            default:
+                break;
+            }
+        }
+
+        float Finish(FractalType type, int iter, double escapeMod2, double bailout2, bool smooth) const noexcept
+        {
+            if (mode == ColoringMode::StripeAverage)
+            {
+                if (stripeCount <= 0) return 0.0f;
+                const double curAvg = stripeSum / static_cast<double>(stripeCount);
+                double avg = curAvg;
+                double t = 1.0;
+                if (smooth && stripeCount >= 2 && escapeMod2 > 1.0 && bailout2 > 1.0)
+                {
+                    const double logZn = 0.5 * std::log(escapeMod2);
+                    const double logR = 0.5 * std::log(bailout2);
+                    if (logZn > 0.0 && logR > 0.0)
+                    {
+                        constexpr double invLn2 = 1.44269504088896340736;
+                        constexpr double invLn3 = 0.91023922662683739361;
+                        const double invLnDeg = (type == FractalType::CubicMultibrot) ? invLn3 : invLn2;
+                        t = std::clamp(1.0 - std::log(logZn / logR) * invLnDeg, 0.0, 1.0);
+                        const double prevAvg = prevStripeSum / static_cast<double>(stripeCount - 1);
+                        avg = prevAvg * (1.0 - t) + curAvg * t;
+                    }
+                }
+                const double contIter = std::max(0.0, static_cast<double>(iter - 1) + t);
+                const double smoothPhase = avg * 2.4 + 0.18 * std::log(1.0 + 0.1 * contIter);
+                return EncodeTrapPotential(smoothPhase);
+            }
+
+            if (minDist >= 1e29) return 0.0f;
+            const double d = (mode == ColoringMode::OrbitTrapPoint)
+                ? std::sqrt(std::max(minDist, 0.0))
+                : minDist;
+            const double smoothPhase = 0.9 * std::log(1.0 + 1.0 / std::max(d, 1e-4));
+            return EncodeTrapPotential(smoothPhase);
+        }
+    };
+
     inline float EvalStandardPoint(
         FractalType type,
         double cx,
         double cy,
         int maxIter,
-        bool smooth) noexcept
+        bool smooth,
+        ColoringMode coloringMode = ColoringMode::EscapeTime) noexcept
     {
-        constexpr double bailoutRadius2 = 16.0; // R=4, R^2=16 for smooth coloring
+        const bool useOrbitColor = (coloringMode != ColoringMode::EscapeTime && type != FractalType::Newton);
+        const double bailoutRadius2 = (useOrbitColor && coloringMode == ColoringMode::StripeAverage)
+            ? kStripeBailoutRadius2
+            : 16.0; // R=4, R^2=16 for smooth coloring
         constexpr double invLn2 = 1.44269504088896340736; // 1.0 / ln(2)
 
         // Fast check for points in cardioid or main bulb (Mandelbrot only)
@@ -288,6 +373,7 @@ namespace Mandelbrot::detail
         int checkPeriod = 8;
         int stepsSinceCheck = 0;
         int iter = 0;
+        OrbitColorAccumulator orbitColor{ coloringMode };
 
         auto runEscapeLoop = [&](auto&& stepFn) noexcept
         {
@@ -297,6 +383,10 @@ namespace Mandelbrot::detail
                 zr2 = zr * zr;
                 zi2 = zi * zi;
                 iter++;
+                if (useOrbitColor)
+                {
+                    orbitColor.Sample(zr, zi, zr2 + zi2);
+                }
                 if (zr == checkZr && zi == checkZi)
                 {
                     iter = maxIter;
@@ -373,6 +463,10 @@ namespace Mandelbrot::detail
                 zr2 = zr * zr;
                 zi2 = zi * zi;
                 iter++;
+                if (useOrbitColor)
+                {
+                    orbitColor.Sample(zr, zi, zr2 + zi2);
+                }
                 if (zr == checkZr && zi == checkZi && prevZr == checkPrevZr && prevZi == checkPrevZi)
                 {
                     iter = maxIter;
@@ -397,6 +491,11 @@ namespace Mandelbrot::detail
         if (iter >= maxIter)
         {
             return -1.0f; // Inside set
+        }
+
+        if (useOrbitColor)
+        {
+            return orbitColor.Finish(type, iter, zr2 + zi2, bailoutRadius2, smooth);
         }
 
         if (smooth)

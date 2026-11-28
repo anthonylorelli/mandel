@@ -20,4 +20,5 @@ namespace Mandelbrot::detail
     bool TryParseColor(std::string_view raw, uint32_t& out);
     bool TryParseFractalType(std::string_view text, FractalType& outType, std::optional<bool>& outJulia);
     bool TryParsePresetTheme(std::string_view text, PresetTheme& outTheme);
+    bool TryParseColoringMode(std::string_view text, ColoringMode& outMode);
 }
