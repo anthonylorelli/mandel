@@ -422,3 +422,94 @@ TEST_CASE(ColorTheme, DirectionalLighting_OptionalReliefAsymmetryInteriorAndNewt
     }
 }
 
+TEST_CASE(ColorTheme, HistogramEqualization_ExpandsNarrowDynamicRangePreservesInteriorAndNewton)
+{
+    // 1. Narrow high-iteration band [12000, 12050] with interior pixels:
+    //    Standard log mapping squeezes all escaped pixels into a tiny slice of the palette,
+    //    whereas histogram equalization expands them across the full gradient.
+    ColorTheme mono;
+    mono.SetStops({ { 0.0f, 0, 0, 0 }, { 1.0f, 250, 250, 250 } });
+
+    constexpr int W = 16;
+    constexpr int H = 16;
+    std::vector<float> narrow(W * H, -1.0f);
+    for (int y = 0; y < H; ++y)
+    {
+        for (int x = 0; x < W; ++x)
+        {
+            const size_t idx = static_cast<size_t>(y) * W + x;
+            if (x < 2)
+            {
+                narrow[idx] = -1.0f; // interior strip
+            }
+            else
+            {
+                narrow[idx] = 12000.0f + 50.0f * (static_cast<float>(y * W + x) / static_cast<float>(W * H - 1));
+            }
+        }
+    }
+
+    const HistogramCdf cdf = ColorTheme::BuildHistogramCdf(narrow, narrow.size(), FractalType::Mandelbrot);
+    ASSERT_TRUE(cdf.valid);
+    ASSERT_NEAR(0.0f, cdf.cdf.front(), 1e-6f);
+    ASSERT_NEAR(1.0f, cdf.cdf.back(), 1e-6f);
+    for (size_t i = 1; i < cdf.cdf.size(); ++i)
+    {
+        ASSERT_GE(cdf.cdf[i], cdf.cdf[i - 1]);
+    }
+
+    const uint32_t interiorColor = 0xFF112233u;
+    std::vector<uint32_t> stdPixels(W * H), histPixels(W * H);
+    mono.Recolor(narrow, stdPixels.data(), narrow.size(), 1.0f, 0.0f, false, interiorColor, FractalType::Mandelbrot, W, nullptr, false, nullptr, false);
+    mono.Recolor(narrow, histPixels.data(), narrow.size(), 1.0f, 0.0f, false, interiorColor, FractalType::Mandelbrot, W, nullptr, false, nullptr, true);
+
+    int stdMinR = 255, stdMaxR = 0, histMinR = 255, histMaxR = 0;
+    for (size_t i = 0; i < narrow.size(); ++i)
+    {
+        if (narrow[i] < 0.0f)
+        {
+            ASSERT_EQ(interiorColor, histPixels[i]);
+            continue;
+        }
+        const int sr = static_cast<int>((stdPixels[i] >> 16) & 0xFFu);
+        const int hr = static_cast<int>((histPixels[i] >> 16) & 0xFFu);
+        stdMinR = std::min(stdMinR, sr);
+        stdMaxR = std::max(stdMaxR, sr);
+        histMinR = std::min(histMinR, hr);
+        histMaxR = std::max(histMaxR, hr);
+    }
+
+    ASSERT_LT(stdMaxR - stdMinR, 25);   // Standard mapping has low contrast on [12000, 12050]
+    ASSERT_GT(histMaxR - histMinR, 200); // Equalized mapping spans nearly the full [0, 250] gradient
+
+    // 2. Uniform or all-interior buffers produce valid == false and safely fall back to standard coloring.
+    std::vector<float> uniform(64, 42.0f);
+    ASSERT_FALSE(ColorTheme::BuildHistogramCdf(uniform, uniform.size()).valid);
+    std::vector<float> allInterior(64, -1.0f);
+    ASSERT_FALSE(ColorTheme::BuildHistogramCdf(allInterior, allInterior.size()).valid);
+
+    // 3. Newton multi-basin values build a valid CDF and recolor cleanly.
+    std::vector<float> newton(W * H);
+    for (int y = 0; y < H; ++y)
+    {
+        for (int x = 0; x < W; ++x)
+        {
+            const int root = x % 3;
+            const float iter = 100.0f + static_cast<float>(y * W + x) * 0.1f;
+            newton[static_cast<size_t>(y) * W + x] = static_cast<float>(root) * NewtonRootStride + iter;
+        }
+    }
+    const HistogramCdf newtonCdf = ColorTheme::BuildHistogramCdf(newton, newton.size(), FractalType::Newton);
+    ASSERT_TRUE(newtonCdf.valid);
+    ColorTheme inferno(PresetTheme::Inferno);
+    std::vector<uint32_t> newtonStd(W * H), newtonHist(W * H);
+    inferno.Recolor(newton, newtonStd.data(), newton.size(), 1.0f, 0.0f, false, 0xFF000000, FractalType::Newton, W, nullptr, true, nullptr, false);
+    inferno.Recolor(newton, newtonHist.data(), newton.size(), 1.0f, 0.0f, false, 0xFF000000, FractalType::Newton, W, nullptr, true, nullptr, true);
+    ASSERT_FALSE(newtonStd == newtonHist);
+    for (uint32_t px : newtonHist)
+    {
+        ASSERT_EQ(0xFFu, (px >> 24) & 0xFFu);
+    }
+}
+
+

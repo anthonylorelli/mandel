@@ -1126,7 +1126,8 @@ namespace Mandelbrot
             m_config.width,
             &m_subpixelSamples,
             true,
-            &m_options.lighting);
+            &m_options.lighting,
+            m_options.histogramEqualize);
         const std::string ascii = RenderAsciiFrameStabilized(
             m_iterations,
             m_pixels,

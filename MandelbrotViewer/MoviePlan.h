@@ -40,6 +40,7 @@ namespace Mandelbrot
         uint64_t targetSeed{1};
         uint32_t interior{0xFF000000};
         DirectionalLightingParams lighting{};
+        bool histogramEqualize{false};
 
         static double EndZoomForSpeed(double startZoom, bool zoomIn, double speed, int seconds)
         {

@@ -654,6 +654,13 @@ namespace Mandelbrot
             }
         }
 
+        if (const auto it = obj->find("histogramEqualize"); it != obj->end())
+        {
+            const auto* b = std::get_if<bool>(&it->second.data);
+            if (!b) throw std::invalid_argument("Config JSON 'histogramEqualize' must be a boolean.");
+            plan.histogramEqualize = *b;
+        }
+
         if (const auto it = obj->find("lighting3d"); it != obj->end())
         {
             const auto* b = std::get_if<bool>(&it->second.data);

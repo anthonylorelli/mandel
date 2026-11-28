@@ -238,6 +238,7 @@ namespace Mandelbrot
         std::optional<float> phase;
         std::optional<bool> invert;
         std::optional<uint32_t> interiorColor;
+        std::optional<bool> histogramEqualize;
         std::optional<bool> lightingEnabled;
         std::optional<float> lightAzimuth;
         std::optional<float> lightElevation;
@@ -573,6 +574,16 @@ namespace Mandelbrot
                     if (!detail::TryWideToAscii(val, ascii) || !detail::TryParseColor(ascii, color))
                         return fail(L"Invalid --interior-color (use #RRGGBB, #AARRGGBB, or 0xAARRGGBB): " + std::wstring(val));
                     interiorColor = color;
+                }
+                else if (flagView == L"--histogram" || flagView == L"--auto-contrast")
+                {
+                    requireNoValue();
+                    histogramEqualize = true;
+                }
+                else if (flagView == L"--no-histogram")
+                {
+                    requireNoValue();
+                    histogramEqualize = false;
                 }
                 else if (flagView == L"--lighting" || flagView == L"--3d-lighting")
                 {
@@ -944,6 +955,7 @@ namespace Mandelbrot
             if (phase) plan.phase = *phase;
             if (invert) plan.invert = *invert;
             if (interiorColor) plan.interior = *interiorColor;
+            if (histogramEqualize) plan.histogramEqualize = *histogramEqualize;
             if (lightAzimuth) plan.lighting.azimuthDeg = *lightAzimuth;
             if (lightElevation) plan.lighting.elevationDeg = *lightElevation;
             if (lightStrength) plan.lighting.strength = *lightStrength;
@@ -1004,6 +1016,7 @@ namespace Mandelbrot
                 consoleOpts.invert = plan.invert;
                 consoleOpts.interior = plan.interior;
                 consoleOpts.lighting = plan.lighting;
+                consoleOpts.histogramEqualize = plan.histogramEqualize;
 
                 consoleOpts.cols = resolvedAsciiCols;
                 consoleOpts.rows = resolvedAsciiRows;

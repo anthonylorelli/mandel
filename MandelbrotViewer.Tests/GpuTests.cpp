@@ -1624,3 +1624,93 @@ TEST_CASE(Gpu, DirectionalLightingMatchesCpuAcrossBandsNewtonAndSkipRect)
     }
 }
 
+TEST_CASE(Gpu, HistogramEqualizationMatchesCpuAndHasNoBandSeams)
+{
+    std::atomic<bool> cancel{};
+    MandelbrotEngine gpu(ExecutionMode::Gpu, true);
+    MandelbrotEngine cpu(ExecutionMode::Cpu);
+    ASSERT_TRUE(gpu.IsGpuAvailable());
+
+    auto verifyHistMovie = [&](MoviePlan plan, double frame)
+    {
+        MoviePlan gpuPlan = plan;
+        gpuPlan.useGpu = true;
+        MoviePlan cpuPlan = plan;
+        cpuPlan.useGpu = false;
+        MoviePlan stdPlan = gpuPlan;
+        stdPlan.histogramEqualize = false;
+
+        // Histogram equalization disables the pre-colored keyframe zoom pyramid.
+        ASSERT_FALSE(PlanZoomKeyframes(gpuPlan).enabled);
+
+        const auto gpuWhole = RenderMovieFrame(gpuPlan, frame, cancel, {}, gpuPlan.height, &gpu);
+        const auto gpuBanded = RenderMovieFrame(gpuPlan, frame, cancel, {}, 16, &gpu);
+        const auto cpuWhole = RenderMovieFrame(cpuPlan, frame, cancel, {}, cpuPlan.height, &cpu);
+        const auto gpuStd = RenderMovieFrame(stdPlan, frame, cancel, {}, stdPlan.height, &gpu);
+
+        ASSERT_EQ(static_cast<size_t>(gpuPlan.width) * static_cast<size_t>(gpuPlan.height), gpuWhole.size());
+        ASSERT_EQ(gpuWhole.size(), gpuBanded.size());
+        ASSERT_FALSE(gpuWhole == gpuStd);
+
+        // Shared frame-level probe CDF must guarantee zero seams across horizontal render bands.
+        for (size_t i = 0; i < gpuWhole.size(); ++i)
+        {
+            for (int shift : { 0, 8, 16 })
+            {
+                ASSERT_NEAR((gpuWhole[i] >> shift) & 255, (gpuBanded[i] >> shift) & 255, 1);
+            }
+        }
+
+        const double err = FilteredPixelError(cpuWhole, gpuWhole, gpuPlan.width, gpuPlan.height);
+        ASSERT_LT(err, 4.5);
+    };
+
+    // 1. Mandelbrot deep zoom + histogram equalization + 3D lighting
+    {
+        MoviePlan p;
+        p.width = 96;
+        p.height = 64;
+        p.fps = 30;
+        p.seconds = 4;
+        p.motionSmoothing = false;
+        p.useGpu = true;
+        p.theme = ColorTheme(PresetTheme::Inferno);
+        p.start.SetCenter(
+            BigFloat("-0.743643887037158704752191506114774"),
+            BigFloat("0.131825904205311970493132056385139"));
+        p.targetX = p.start.hpCenterX;
+        p.targetY = p.start.hpCenterY;
+        p.start.zoom = 50.0;
+        p.endZoom = 5e5;
+        p.start.maxIterations = 600;
+        p.histogramEqualize = true;
+        p.lighting.enabled = true;
+        p.lighting.azimuthDeg = 135.0f;
+        p.lighting.elevationDeg = 40.0f;
+        p.lighting.strength = 1.2f;
+        verifyHistMovie(p, 10.0);
+    }
+
+    // 2. Newton multi-basin fractal + histogram equalization
+    {
+        MoviePlan p;
+        p.width = 96;
+        p.height = 64;
+        p.fps = 30;
+        p.seconds = 4;
+        p.motionSmoothing = false;
+        p.useGpu = true;
+        p.theme = ColorTheme(PresetTheme::TwilightOcean);
+        p.start.fractalType = FractalType::Newton;
+        p.start.SetCenter(0.0, 0.0);
+        p.targetX = BigFloat(0.0);
+        p.targetY = BigFloat(0.0);
+        p.start.zoom = 1.0;
+        p.endZoom = 16.0;
+        p.start.maxIterations = 256;
+        p.histogramEqualize = true;
+        verifyHistMovie(p, 8.0);
+    }
+}
+
+

@@ -90,6 +90,13 @@ namespace winrt::MandelbrotViewer::implementation
         RecolorBuffer();
     }
 
+    void MainWindow::OnHistogramToggleChanged(IInspectable const&, RoutedEventArgs const&)
+    {
+        if (IsSuppressingEvents()) return;
+        m_histogramEqualize = HistogramToggle().IsOn();
+        RecolorBuffer();
+    }
+
     void MainWindow::OnLightingToggleChanged(IInspectable const&, RoutedEventArgs const&)
     {
         if (IsSuppressingEvents()) return;
