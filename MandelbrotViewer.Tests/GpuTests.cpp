@@ -1628,7 +1628,7 @@ TEST_CASE(Gpu, HistogramEqualizationMatchesCpuAndHasNoBandSeams)
 {
     std::atomic<bool> cancel{};
     MandelbrotEngine gpu(ExecutionMode::Gpu, true);
-    MandelbrotEngine cpu(ExecutionMode::Cpu);
+    MandelbrotEngine cpu(ExecutionMode::Automatic);
     ASSERT_TRUE(gpu.IsGpuAvailable());
 
     auto verifyHistMovie = [&](MoviePlan plan, double frame)
