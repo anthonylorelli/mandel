@@ -118,6 +118,11 @@ namespace Mandelbrot
         uint64_t uploadedLutHash{ 0 };
         bool hasUploadedLut{ false };
 
+        ComPtr<ID3D11Buffer> histCdfBuf;
+        ComPtr<ID3D11ShaderResourceView> histCdfSrv;
+        uint64_t uploadedHistHash{ 0 };
+        bool hasUploadedHist{ false };
+
         ComPtr<ID3D11Buffer> gpuSubIdxBuf;
         ComPtr<ID3D11UnorderedAccessView> gpuSubIdxUav;
         ComPtr<ID3D11ShaderResourceView> gpuSubIdxSrv;
@@ -266,6 +271,7 @@ namespace Mandelbrot
 
         bool UploadBufferDiscard(ID3D11Buffer* buf, const void* src, size_t bytes);
         bool EnsurePaletteLutUploaded(const uint32_t* lutData);
+        bool EnsureHistCdfUploaded(const float* histData);
 
         bool SyncReferenceAndBla(
             const FractalConfig& config,

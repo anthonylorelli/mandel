@@ -204,7 +204,7 @@ namespace Mandelbrot
                               static_cast<uint64_t>(plan.width) *
                               static_cast<uint64_t>(plan.height);
 
-        if (totalFrames < 8 || plan.width < 8 || plan.height < 8 || plan.cycleSpeed != 0.0f)
+        if (totalFrames < 8 || plan.width < 8 || plan.height < 8 || plan.cycleSpeed != 0.0f || plan.histogramEqualize)
         {
             return result;
         }

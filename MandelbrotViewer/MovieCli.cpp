@@ -261,6 +261,7 @@ namespace Mandelbrot
             L"  --phase <float>              Palette phase offset (default: 0.0)\n"
             L"  --invert / --no-invert       Invert palette gradient direction\n"
             L"  --interior-color <hex>       Interior color (#RRGGBB, #AARRGGBB, or 0xAARRGGBB)\n"
+            L"  --histogram / --no-histogram Enable or disable auto-contrast histogram equalization (default: off)\n"
             L"  --lighting / --no-lighting   Enable or disable 3D directional relief lighting (default: off)\n"
             L"  --light-azimuth <deg>        3D light angle in degrees (default: 135, top-left)\n"
             L"  --light-elevation <deg>      3D light elevation in degrees (5..85, default: 45)\n"

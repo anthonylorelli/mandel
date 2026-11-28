@@ -15,6 +15,7 @@ namespace Mandelbrot
 {
     class ColorTheme;
     struct DirectionalLightingParams;
+    struct HistogramCdf;
     class GpuFractalSolver;
     struct GpuBandSkipRect;
     struct GpuMovieShutterParams;
@@ -92,7 +93,8 @@ namespace Mandelbrot
             const std::atomic<bool>* cancelToken = nullptr,
             bool keyframeOversampled = false,
             const GpuBandSkipRect* bandSkip = nullptr,
-            const DirectionalLightingParams* lighting = nullptr);
+            const DirectionalLightingParams* lighting = nullptr,
+            const HistogramCdf* histogramCdf = nullptr);
         bool FinishGpuMovieFrame(
             int width,
             int height,
