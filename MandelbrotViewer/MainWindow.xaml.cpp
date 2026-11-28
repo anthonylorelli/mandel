@@ -874,6 +874,14 @@ namespace winrt::MandelbrotViewer::implementation
             JuliaOptionsPanel().Visibility(supportsJulia ? Visibility::Visible : Visibility::Collapsed);
             if (!supportsJulia) ShowJuliaToggle().IsOn(false);
 
+            if (ColoringModeComboBox())
+            {
+                const bool supportsOrbitColoring = (type != Mandelbrot::FractalType::Newton);
+                ColoringModeComboBox().IsEnabled(supportsOrbitColoring);
+                ColoringModeComboBox().Header(box_value(
+                    supportsOrbitColoring ? L"Orbit Coloring Style" : L"Orbit Coloring Style (N/A for Newton)"));
+            }
+
             const auto typeName = Mandelbrot::GetFractalTypeName(type);
             HudTitleText().Text(winrt::hstring(typeName));
             Title(winrt::hstring(L"Fractal Studio - " + typeName));
@@ -964,6 +972,7 @@ namespace winrt::MandelbrotViewer::implementation
         if (index < 0 || index >= static_cast<int>(modes.size())) return;
         if (m_config.coloringMode == modes[index]) return;
         m_config.coloringMode = modes[index];
+        if (m_config.fractalType == Mandelbrot::FractalType::Newton) return;
         RenderFractal();
         RefreshJuliaSettings();
     }
