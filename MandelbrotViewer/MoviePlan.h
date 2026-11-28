@@ -85,7 +85,9 @@ namespace Mandelbrot
             if (cycleSpeed == 0.0f || fps <= 0) return phase;
             const double shifted = static_cast<double>(phase) +
                 (frameIndex / static_cast<double>(fps)) * static_cast<double>(cycleSpeed);
-            return static_cast<float>(shifted);
+            const double wrapped = shifted - std::floor(shifted);
+            const float result = static_cast<float>(wrapped);
+            return (result >= 1.0f) ? 0.0f : result;
         }
         void Validate() const
         {

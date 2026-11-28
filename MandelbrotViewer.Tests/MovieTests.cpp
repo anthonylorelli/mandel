@@ -843,8 +843,23 @@ TEST_CASE(Movie, PaletteFlowAdvancesPhaseDisablesZoomPyramidAndRendersPerFrame)
 
     p.cycleSpeed = -1.0f;
     p.Validate();
-    ASSERT_NEAR(-0.25f, p.PhaseAt(15.0), 1e-6f);
+    ASSERT_NEAR(0.75f, p.PhaseAt(15.0), 1e-6f);
     ASSERT_FALSE(PlanZoomKeyframes(p).enabled);
+
+    // Long movies keep full float LUT precision by reducing phase modulo 1.0 in double.
+    {
+        MoviePlan longMovie = p;
+        longMovie.fps = 60;
+        longMovie.seconds = 3600;
+        longMovie.phase = 0.0f;
+        longMovie.cycleSpeed = 5.0f;
+        longMovie.Validate();
+        // Frame 215999 is 1/60s before 3600s => 18000 - 5/60 cycles => 11/12 = 0.9166667
+        const float latePhase = longMovie.PhaseAt(215999.0);
+        ASSERT_GE(latePhase, 0.0f);
+        ASSERT_LT(latePhase, 1.0f);
+        ASSERT_NEAR(11.0f / 12.0f, latePhase, 1e-5f);
+    }
 
     // Out-of-range or non-finite cycleSpeed values are rejected.
     for (float bad : { -5.5f, 5.5f, std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity() })
