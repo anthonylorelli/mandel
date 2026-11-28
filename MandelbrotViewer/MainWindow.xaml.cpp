@@ -808,7 +808,8 @@ namespace winrt::MandelbrotViewer::implementation
             config.width,
             &samples,
             true,
-            &m_lighting);
+            &m_lighting,
+            m_histogramEqualize);
 
         bitmap.Invalidate();
     }

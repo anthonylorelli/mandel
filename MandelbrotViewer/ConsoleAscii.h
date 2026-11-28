@@ -76,6 +76,7 @@ namespace Mandelbrot
         bool invert{ false };
         uint32_t interior{ 0xFF000000u };
         DirectionalLightingParams lighting{};
+        bool histogramEqualize{ false };
 
         // Terminal grid dimensions (0 = auto-detect from console window, fallback to defaults)
         int cols{ 0 };

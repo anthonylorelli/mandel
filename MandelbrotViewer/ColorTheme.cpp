@@ -302,8 +302,82 @@ namespace Mandelbrot
         return kLogScale * std::log(1.0f + iter * kInvKnee) * frequency;
     }
 
+    HistogramCdf ColorTheme::BuildHistogramCdf(
+        const std::vector<float>& iterationBuffer,
+        size_t count,
+        FractalType fractalType)
+    {
+        HistogramCdf result{};
+        const size_t n = std::min(count, iterationBuffer.size());
+        if (n < 16) return result;
+
+        const float* data = iterationBuffer.data();
+        const bool isNewton = (fractalType == FractalType::Newton);
+
+        auto extractRaw = [isNewton](float value) noexcept -> float
+        {
+            if (isNewton)
+            {
+                const int root = static_cast<int>(value / NewtonRootStride);
+                const float iter = std::max(0.0f, value - static_cast<float>(root) * NewtonRootStride);
+                return 12.0f * std::log(1.0f + iter * (1.0f / 12.0f));
+            }
+            return MapIterationToPhase(value, 1.0f);
+        };
+
+        float minVal = std::numeric_limits<float>::infinity();
+        float maxVal = -std::numeric_limits<float>::infinity();
+        uint64_t escapedCount = 0;
+
+        for (size_t i = 0; i < n; ++i)
+        {
+            const float v = data[i];
+            if (v < 0.0f || !std::isfinite(v)) continue;
+            const float raw = extractRaw(v);
+            if (!std::isfinite(raw)) continue;
+            if (raw < minVal) minVal = raw;
+            if (raw > maxVal) maxVal = raw;
+            ++escapedCount;
+        }
+
+        const float span = maxVal - minVal;
+        if (escapedCount < 16 || !std::isfinite(span) || !(span > 1e-5f))
+        {
+            return result;
+        }
+
+        const float invSpan = 1.0f / span;
+        std::array<uint32_t, HistogramCdf::kBins> counts{};
+        for (size_t i = 0; i < n; ++i)
+        {
+            const float v = data[i];
+            if (v < 0.0f || !std::isfinite(v)) continue;
+            const float raw = extractRaw(v);
+            if (!std::isfinite(raw)) continue;
+            const float norm = std::clamp((raw - minVal) * invSpan, 0.0f, 1.0f);
+            const size_t bin = std::min<size_t>(
+                HistogramCdf::kBins - 1,
+                static_cast<size_t>(norm * static_cast<float>(HistogramCdf::kBins)));
+            ++counts[bin];
+        }
+
+        result.minVal = minVal;
+        result.invSpan = invSpan;
+        result.cdf[0] = 0.0f;
+        uint64_t running = 0;
+        const double invTotal = 1.0 / static_cast<double>(escapedCount);
+        for (size_t i = 0; i < HistogramCdf::kBins; ++i)
+        {
+            running += counts[i];
+            result.cdf[i + 1] = static_cast<float>(static_cast<double>(running) * invTotal);
+        }
+        result.cdf[HistogramCdf::kBins] = 1.0f;
+        result.valid = true;
+        return result;
+    }
+
     uint32_t ColorTheme::ColorIteration(float value, float frequency, float phaseOffset, bool invert,
-        uint32_t interiorColor, FractalType fractalType) const
+        uint32_t interiorColor, FractalType fractalType, const HistogramCdf* hist) const
     {
         if (value < 0.0f) return interiorColor;
         const float lutMax = static_cast<float>(LUT_SIZE - 1);
@@ -313,7 +387,9 @@ namespace Mandelbrot
             const float iter = value - root * NewtonRootStride;
             const float rootBase = static_cast<float>(root % 3) / 3.0f;
             const float compressedIter = 12.0f * std::log(1.0f + iter * (1.0f / 12.0f));
-            const float rawRing = compressedIter * 0.06f * frequency + phaseOffset;
+            const float rawRing = (hist && hist->valid)
+                ? (hist->Lookup(compressedIter) * frequency + phaseOffset)
+                : (compressedIter * 0.06f * frequency + phaseOffset);
             float ring = rawRing - std::floor(rawRing);
             if (ring >= 1.0f) ring = 0.0f;
             float u = rootBase + ring * (1.0f / 3.0f);
@@ -333,7 +409,10 @@ namespace Mandelbrot
             return color;
         }
 
-        return ColorAtPhase(MapIterationToPhase(value, frequency), phaseOffset, invert, 0.0f);
+        const float basePhase = (hist && hist->valid)
+            ? (hist->Lookup(MapIterationToPhase(value, 1.0f)) * frequency)
+            : MapIterationToPhase(value, frequency);
+        return ColorAtPhase(basePhase, phaseOffset, invert, 0.0f);
     }
 
     uint32_t ColorTheme::ColorAtPhase(float basePhase, float phaseOffset, bool invert, float deltaU) const
@@ -384,9 +463,35 @@ namespace Mandelbrot
         int width,
         const std::vector<SubpixelSamples>* subpixelSamples,
         bool filterPalette,
-        const DirectionalLightingParams* lighting) const
+        const DirectionalLightingParams* lighting,
+        bool histogramEqualize,
+        const HistogramCdf* precomputedHist) const
     {
         if (!pDestPixels || iterationBuffer.size() < count || m_lut.empty()) return;
+
+        HistogramCdf localHist{};
+        const HistogramCdf* activeHist = nullptr;
+        if (histogramEqualize)
+        {
+            if (precomputedHist)
+            {
+                activeHist = precomputedHist->valid ? precomputedHist : nullptr;
+            }
+            else
+            {
+                localHist = BuildHistogramCdf(iterationBuffer, count, fractalType);
+                activeHist = localHist.valid ? &localHist : nullptr;
+            }
+        }
+
+        auto mapPhase = [activeHist, frequency](float iter) noexcept -> float
+        {
+            if (activeHist)
+            {
+                return activeHist->Lookup(MapIterationToPhase(iter, 1.0f)) * frequency;
+            }
+            return MapIterationToPhase(iter, frequency);
+        };
 
         const float* iterData = iterationBuffer.data();
         const uint32_t* lutData = m_lut.data();
@@ -402,7 +507,7 @@ namespace Mandelbrot
             for (intptr_t idx = 0; idx < totalCount; ++idx)
             {
                 pDestPixels[idx] = ColorIteration(iterData[idx], frequency, phaseOffset, invert,
-                    interiorColor, fractalType);
+                    interiorColor, fractalType, activeHist);
             }
         }
         else if (!filterPalette || totalCount < 64)
@@ -416,7 +521,7 @@ namespace Mandelbrot
                     pDestPixels[idx] = interiorColor;
                     continue;
                 }
-                const float phase = MapIterationToPhase(iter, frequency) + phaseOffset;
+                const float phase = mapPhase(iter) + phaseOffset;
                 float u = phase - std::floor(phase);
                 if (u >= 1.0f) u = 0.0f;
                 if (invert) u = 1.0f - u;
@@ -436,7 +541,7 @@ namespace Mandelbrot
                     continue;
                 }
 
-                const float basePhase = MapIterationToPhase(iter, frequency);
+                const float basePhase = mapPhase(iter);
 
                 // Estimate 2D screen-space phase gradient max(|dU/dx|, |dU/dy|) for band-limited anti-aliasing
                 float deltaU = 0.0f;
@@ -446,11 +551,11 @@ namespace Mandelbrot
                     (rowStride <= 0 || (idx + 1) % rowStride != 0);
                 if (hasRight && iterData[idx + 1] >= 0.0f)
                 {
-                    deltaU = std::max(deltaU, std::abs(MapIterationToPhase(iterData[idx + 1], frequency) - basePhase));
+                    deltaU = std::max(deltaU, std::abs(mapPhase(iterData[idx + 1]) - basePhase));
                 }
                 else if (hasLeft && iterData[idx - 1] >= 0.0f)
                 {
-                    deltaU = std::max(deltaU, std::abs(basePhase - MapIterationToPhase(iterData[idx - 1], frequency)));
+                    deltaU = std::max(deltaU, std::abs(basePhase - mapPhase(iterData[idx - 1])));
                 }
 
                 if (rowStride > 0)
@@ -461,7 +566,7 @@ namespace Mandelbrot
                         const float iterY = iterData[ny];
                         if (iterY >= 0.0f)
                         {
-                            deltaU = std::max(deltaU, std::abs(MapIterationToPhase(iterY, frequency) - basePhase));
+                            deltaU = std::max(deltaU, std::abs(mapPhase(iterY) - basePhase));
                         }
                     }
                 }
@@ -493,7 +598,7 @@ namespace Mandelbrot
                 if (fractalType != FractalType::Newton)
                     for (int s = 0; s < 4; ++s)
                         if (sample.iterations[s] >= 0.0f)
-                            phases[s] = MapIterationToPhase(sample.iterations[s], frequency);
+                            phases[s] = mapPhase(sample.iterations[s]);
                 for (int s = 0; s < 4; ++s)
                 {
                     // Each quarter-pixel sample has a half-pixel footprint. Estimate its
@@ -505,7 +610,7 @@ namespace Mandelbrot
                                 deltaU = std::max(deltaU, std::abs(phases[s] - phases[neighbor]));
                     colors[s] = fractalType != FractalType::Newton && sample.iterations[s] >= 0.0f
                         ? ColorAtPhase(phases[s], phaseOffset, invert, deltaU)
-                        : ColorIteration(sample.iterations[s], frequency, phaseOffset, invert, interiorColor, fractalType);
+                        : ColorIteration(sample.iterations[s], frequency, phaseOffset, invert, interiorColor, fractalType, activeHist);
                 }
                 if (colors[0] == colors[1] && colors[0] == colors[2] && colors[0] == colors[3] &&
                     (colors[0] == center || weight >= 1.0f))

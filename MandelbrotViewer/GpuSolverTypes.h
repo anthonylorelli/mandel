@@ -19,6 +19,7 @@ namespace Mandelbrot::detail
     inline constexpr uint32_t kIndirectSubpixelSentinel = 0xFFFFFFFFu;
     inline constexpr uint32_t kMovieShutterTapCount = 7;
     inline constexpr size_t kPaletteLutSize = 4096;
+    inline constexpr size_t kHistogramCdfSize = 1025;
     inline constexpr int kZeroExpSentinel = -1073741824;
     inline constexpr uint32_t kMultiPassMinMaxIter = 2048;
 
@@ -137,8 +138,10 @@ namespace Mandelbrot::detail
         uint32_t subGroupThreads, subRayOffset, subRayLimit, keyframeOversampled;
         uint32_t skipX0, skipY0, skipX1, skipY1;
         float lightDirX, lightDirY, lightDirZ, lightStrength;
+        float histMin, histInvSpan;
+        uint32_t histEnabled, histPad;
     };
-    static_assert(sizeof(PostProcessCb) == 96 && sizeof(PostProcessCb) <= kGpuConstantBufferBytes);
+    static_assert(sizeof(PostProcessCb) == 112 && sizeof(PostProcessCb) <= kGpuConstantBufferBytes);
 
     struct GpuShutterTap
     {

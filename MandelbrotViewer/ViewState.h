@@ -73,7 +73,8 @@ namespace Mandelbrot
     inline std::wstring SerializeViewState(
         const MandelbrotConfig& config, const ColorTheme& theme,
         float frequency, float phaseOffset, bool invert, uint32_t interiorColor,
-        const DirectionalLightingParams& lighting = {})
+        const DirectionalLightingParams& lighting = {},
+        bool histogramEqualize = false)
     {
         std::wostringstream ss;
         ss.imbue(std::locale::classic());
@@ -101,6 +102,8 @@ namespace Mandelbrot
            << L"  \"phaseOffset\": " << phaseOffset << L",\n"
            << L"  \"invert\": " << (invert ? L"true" : L"false") << L",\n"
            << L"  \"interiorColor\": " << interiorColor << L",\n";
+        if (histogramEqualize)
+            ss << L"  \"histogramEqualize\": true,\n";
         if (lighting.enabled)
             ss << L"  \"lighting3d\": true,\n"
                << L"  \"lightAzimuth\": " << lighting.azimuthDeg << L",\n"

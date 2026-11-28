@@ -43,6 +43,9 @@ namespace Mandelbrot
         float lightDirY{ 0.0f };
         float lightDirZ{ 1.0f };
         float lightStrength{ 0.0f };
+        const float* histCdfData{ nullptr }; // HistogramCdf::kTableSize (1025) floats
+        float histMin{ 0.0f };
+        float histInvSpan{ 0.0f };
     };
 
     struct GpuMovieShutterParams

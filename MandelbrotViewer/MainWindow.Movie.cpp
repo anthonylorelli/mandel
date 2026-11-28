@@ -44,9 +44,11 @@ namespace winrt::MandelbrotViewer::implementation
             plan.start = PresentationCamera();
             plan.theme = m_theme; plan.frequency = m_frequency; plan.phase = m_phaseOffset;
             plan.invert = m_invertColors; plan.interior = m_interiorColor; plan.lighting = m_lighting;
+            plan.histogramEqualize = m_histogramEqualize;
             const auto targetXText = TargetXTextBox().Text(), targetYText = TargetYTextBox().Text();
             const auto exactX = m_zoomTargetX, exactY = m_zoomTargetY;
             const bool exactXText = targetXText == m_targetXText, exactYText = targetYText == m_targetYText;
+            const bool liveCycleActive = AnimateToggle().IsChecked().GetBoolean();
             if (m_isZoomAnimating) StopZoomAnimation(false);
             StopJuliaTravel(false);
             if (m_animateTimer) m_animateTimer.Stop();
@@ -129,6 +131,32 @@ namespace winrt::MandelbrotViewer::implementation
             zoomSpeed.ValueChanged([updateZoomAndTargets](auto&&, auto&&) { updateZoomAndTargets(); });
             autoTarget.Checked([updateZoomAndTargets](auto&&, auto&&) { updateZoomAndTargets(); });
             autoTarget.Unchecked([updateZoomAndTargets](auto&&, auto&&) { updateZoomAndTargets(); });
+
+            Slider cycleSpeed;
+            cycleSpeed.Minimum(-2.0); cycleSpeed.Maximum(2.0); cycleSpeed.StepFrequency(0.05);
+            cycleSpeed.Value(liveCycleActive ? 0.20 : 0.0);
+            const auto updateCycleHeader = [weakCycle = make_weak(cycleSpeed)]()
+            {
+                auto ctrl = weakCycle.get();
+                if (!ctrl) return;
+                const double val = std::round(ctrl.Value() * 20.0) / 20.0;
+                std::wostringstream header;
+                header << L"Palette flow speed (";
+                if (std::abs(val) < 1e-6)
+                {
+                    header << L"static";
+                }
+                else
+                {
+                    header << std::fixed << std::setprecision(2) << (val > 0.0 ? L"+" : L"") << val << L" cycles/s";
+                }
+                header << L")";
+                ctrl.Header(box_value(header.str()));
+            };
+            updateCycleHeader();
+            cycleSpeed.ValueChanged([updateCycleHeader](auto&&, auto&&) { updateCycleHeader(); });
+            settings.Children().Append(cycleSpeed);
+
             CheckBox motion; motion.Content(box_value(L"Smooth motion between frames")); motion.IsChecked(true); settings.Children().Append(motion);
             TextBlock errorText; errorText.TextWrapping(TextWrapping::Wrap); settings.Children().Append(errorText);
             ScrollViewer scroller; scroller.Content(settings); scroller.MaxHeight(510);
@@ -182,6 +210,8 @@ namespace winrt::MandelbrotViewer::implementation
                     if (autoIterations)
                         plan.start.maxIterations = Mandelbrot::MandelbrotEngine::RecommendMaxIterations(
                             plan.start.zoom, plan.start.fractalType, baseIterations);
+                    const double roundedCycle = std::round(cycleSpeed.Value() * 20.0) / 20.0;
+                    plan.cycleSpeed = (std::abs(roundedCycle) < 1e-6) ? 0.0f : static_cast<float>(roundedCycle);
                     plan.motionSmoothing = motion.IsChecked().GetBoolean();
                     plan.Validate();
                     if (plan.autoRetarget)

@@ -1,6 +1,7 @@
 #include "GpuFractalSolverImpl.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace Mandelbrot
@@ -218,6 +219,20 @@ namespace Mandelbrot
         postCb.lightDirY = colorParams.lightDirY;
         postCb.lightDirZ = colorParams.lightDirZ;
         postCb.lightStrength = colorParams.lightStrength;
+        const bool useHist = (colorParams.histCdfData != nullptr &&
+            std::isfinite(colorParams.histMin) &&
+            std::isfinite(colorParams.histInvSpan) &&
+            colorParams.histInvSpan > 0.0f);
+        if (useHist)
+        {
+            if (!m_impl->EnsureHistCdfUploaded(colorParams.histCdfData))
+            {
+                return false;
+            }
+            postCb.histMin = colorParams.histMin;
+            postCb.histInvSpan = colorParams.histInvSpan;
+            postCb.histEnabled = 1u;
+        }
 
         bool subCanceled = false;
         if (!m_impl->DispatchGpuSubpixelPass(
@@ -237,7 +252,7 @@ namespace Mandelbrot
             m_impl->pixelSubInfoSrv.Get(),
             m_impl->subOutSrv.Get(),
             m_impl->paletteLutSrv.Get(),
-            nullptr,
+            useHist ? m_impl->histCdfSrv.Get() : nullptr,
             nullptr,
             nullptr,
             nullptr

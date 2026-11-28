@@ -469,6 +469,13 @@
                                       Checked="OnInvertChecked" Unchecked="OnInvertUnchecked"/>
                         </Grid>
 
+                        <!-- Optional Histogram Equalization (Auto-Contrast) -->
+                        <ToggleSwitch x:Name="HistogramToggle" Header="Auto-Contrast (Histogram)"
+                                      OnContent="Equalized Dynamic Range"
+                                      OffContent="Standard Logarithmic"
+                                      IsOn="False"
+                                      Toggled="OnHistogramToggleChanged"/>
+
                         <!-- Optional 3D Directional Lighting -->
                         <ToggleSwitch x:Name="LightingToggle" Header="3D Directional Lighting"
                                       OnContent="Sculpted Relief Shading"

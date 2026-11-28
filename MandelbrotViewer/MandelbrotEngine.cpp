@@ -339,7 +339,8 @@ namespace Mandelbrot
         const std::atomic<bool>* cancelToken,
         bool keyframeOversampled,
         const GpuBandSkipRect* bandSkip,
-        const DirectionalLightingParams* lighting)
+        const DirectionalLightingParams* lighting,
+        const HistogramCdf* histogramCdf)
     {
         if (m_executionMode != ExecutionMode::Gpu || theme.Lut().size() != ColorTheme::LUT_SIZE)
         {
@@ -362,6 +363,12 @@ namespace Mandelbrot
         {
             lighting->ComputeLightDirection(colorParams.lightDirX, colorParams.lightDirY, colorParams.lightDirZ);
             colorParams.lightStrength = std::clamp(lighting->strength, 0.0f, DirectionalLightingParams::MaxStrength);
+        }
+        if (histogramCdf && histogramCdf->valid && histogramCdf->invSpan > 0.0f)
+        {
+            colorParams.histCdfData = histogramCdf->cdf.data();
+            colorParams.histMin = histogramCdf->minVal;
+            colorParams.histInvSpan = histogramCdf->invSpan;
         }
 
         return EnsureGpuSolver().RenderMovieBand(
