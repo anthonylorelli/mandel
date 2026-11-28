@@ -232,6 +232,7 @@ namespace Mandelbrot
         std::optional<int> iterations;
         std::optional<bool> autoIterations;
         std::optional<bool> smooth;
+        std::optional<ColoringMode> coloringMode;
         std::optional<bool> useGpu;
         std::optional<PresetTheme> themePreset;
         std::optional<float> frequency;
@@ -515,6 +516,15 @@ namespace Mandelbrot
                 {
                     requireNoValue();
                     smooth = false;
+                }
+                else if (flagView == L"--coloring" || flagView == L"--coloring-mode")
+                {
+                    std::string ascii;
+                    const auto val = takeValue("--coloring");
+                    ColoringMode mode = ColoringMode::EscapeTime;
+                    if (!detail::TryWideToAscii(val, ascii) || !detail::TryParseColoringMode(ascii, mode))
+                        return fail(L"Unknown --coloring style (expected escape-time, stripe, trap-point, trap-cross, or trap-ring): " + std::wstring(val));
+                    coloringMode = mode;
                 }
                 else if (flagView == L"--gpu")
                 {
@@ -937,6 +947,7 @@ namespace Mandelbrot
             }
             if (startZoom) plan.start.zoom = *startZoom;
             if (smooth) plan.start.smooth = *smooth;
+            if (coloringMode) plan.start.coloringMode = *coloringMode;
 
             // 7. Color & theme overrides.
             if (themePreset) plan.theme.SetPreset(*themePreset);

@@ -392,6 +392,13 @@ namespace winrt::MandelbrotViewer::implementation
             }
             ThemePresetComboBox().SelectedIndex(0);
 
+            // Populate Orbit Coloring Styles
+            for (const auto mode : Mandelbrot::GetAllColoringModes())
+            {
+                ColoringModeComboBox().Items().Append(box_value(Mandelbrot::GetColoringModeName(mode)));
+            }
+            ColoringModeComboBox().SelectedIndex(0);
+
             // Setup live animation timer
             auto weak = get_weak();
             m_animateTimer = DispatcherTimer();
@@ -946,5 +953,18 @@ namespace winrt::MandelbrotViewer::implementation
         if (IsSuppressingEvents() || !SmoothToggle()) return;
         m_config.smooth = SmoothToggle().IsOn();
         RenderFractal();
+        RefreshJuliaSettings();
+    }
+
+    void MainWindow::OnColoringModeSelectionChanged(IInspectable const&, SelectionChangedEventArgs const&)
+    {
+        if (IsSuppressingEvents() || !ColoringModeComboBox()) return;
+        const int index = ColoringModeComboBox().SelectedIndex();
+        const auto modes = Mandelbrot::GetAllColoringModes();
+        if (index < 0 || index >= static_cast<int>(modes.size())) return;
+        if (m_config.coloringMode == modes[index]) return;
+        m_config.coloringMode = modes[index];
+        RenderFractal();
+        RefreshJuliaSettings();
     }
 }

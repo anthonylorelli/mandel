@@ -408,6 +408,9 @@
                                       OffContent="Discrete Steps"
                                       IsOn="True"
                                       Toggled="OnSmoothToggleChanged"/>
+
+                        <ComboBox x:Name="ColoringModeComboBox" Header="Orbit Coloring Style" HorizontalAlignment="Stretch"
+                                  SelectionChanged="OnColoringModeSelectionChanged"/>
                     </StackPanel>
 
                     <MenuFlyoutSeparator />

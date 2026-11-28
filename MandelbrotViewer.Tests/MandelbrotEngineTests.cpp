@@ -789,3 +789,108 @@ TEST_CASE(MandelbrotEngine, DeepReferenceCacheCancelCannotLeaveMismatchedOrbit)
     ASSERT_NEAR(cfg1.centerY, s3.refCyDouble, 1e-12);
 }
 
+TEST_CASE(MandelbrotEngine, ColoringModes_StripeAndOrbitTrapsProduceDistinctFinitePotentialsAcrossPaths)
+{
+    MandelbrotEngine engine(ExecutionMode::Automatic);
+    const auto modes = GetAllColoringModes();
+    ASSERT_EQ(static_cast<size_t>(5), modes.size());
+
+    auto verifyAllModesDistinct = [&](FractalConfig baseCfg)
+    {
+        std::vector<std::vector<float>> outputs;
+        outputs.reserve(modes.size());
+        for (ColoringMode mode : modes)
+        {
+            FractalConfig cfg = baseCfg;
+            cfg.coloringMode = mode;
+            std::vector<float> iters;
+            engine.Compute(cfg, iters);
+            ASSERT_EQ(static_cast<size_t>(cfg.width) * static_cast<size_t>(cfg.height), iters.size());
+
+            int escaped = 0;
+            for (float v : iters)
+            {
+                ASSERT_TRUE(std::isfinite(v));
+                if (v >= 0.0f) ++escaped;
+            }
+            ASSERT_GT(escaped, 0);
+            outputs.push_back(std::move(iters));
+        }
+
+        // Every coloring mode must produce distinct exterior values while keeping interior (-1) consistent
+        // for the orbit trap modes (which share the same bailout as EscapeTime).
+        for (size_t i = 0; i < modes.size(); ++i)
+        {
+            for (size_t j = i + 1; j < modes.size(); ++j)
+            {
+                ASSERT_FALSE(outputs[i] == outputs[j]);
+            }
+        }
+        for (size_t m = 2; m < modes.size(); ++m)
+        {
+            for (size_t k = 0; k < outputs[0].size(); ++k)
+            {
+                ASSERT_EQ(outputs[0][k] < 0.0f, outputs[m][k] < 0.0f);
+            }
+        }
+    };
+
+    // 1. Standard Mandelbrot (contains both interior and exterior pixels)
+    {
+        FractalConfig cfg;
+        cfg.width = 48;
+        cfg.height = 36;
+        cfg.SetCenter(-0.75, 0.0);
+        cfg.zoom = 1.0;
+        cfg.maxIterations = 200;
+        verifyAllModesDistinct(cfg);
+    }
+
+    // 2. Julia set (Mandelbrot Julia)
+    {
+        FractalConfig cfg;
+        cfg.width = 48;
+        cfg.height = 36;
+        cfg.juliaSet = true;
+        cfg.juliaX = BigFloat(-0.75);
+        cfg.juliaY = BigFloat(0.11);
+        cfg.SetCenter(0.0, 0.0);
+        cfg.zoom = 1.0;
+        cfg.maxIterations = 200;
+        verifyAllModesDistinct(cfg);
+    }
+
+    // 3. Deep-zoom perturbation (zoom >= DeepZoomThreshold)
+    {
+        FractalConfig cfg;
+        cfg.width = 32;
+        cfg.height = 24;
+        cfg.SetCenter(
+            BigFloat("-0.743643887037158704752191506114774"),
+            BigFloat("0.131825904205311970493132056385139"));
+        cfg.zoom = 1e14;
+        cfg.maxIterations = 400;
+        verifyAllModesDistinct(cfg);
+    }
+
+    // 4. Newton multi-basin encoding remains untouched regardless of coloringMode.
+    {
+        FractalConfig n0;
+        n0.fractalType = FractalType::Newton;
+        n0.width = 32;
+        n0.height = 24;
+        n0.SetCenter(0.0, 0.0);
+        n0.zoom = 1.0;
+        n0.maxIterations = 128;
+
+        FractalConfig n1 = n0;
+        n1.coloringMode = ColoringMode::OrbitTrapCross;
+
+        std::vector<float> out0, out1;
+        engine.Compute(n0, out0);
+        engine.Compute(n1, out1);
+        ASSERT_TRUE(out0 == out1);
+    }
+}
+
+
