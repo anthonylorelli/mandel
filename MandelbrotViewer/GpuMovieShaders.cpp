@@ -25,6 +25,8 @@ cbuffer PostParams : register(b0)
     uint subRayOffset, subRayLimit, keyframeOversampled;
     uint skipX0, skipY0, skipX1, skipY1;
     float lightDirX, lightDirY, lightDirZ, lightStrength;
+    float histMin, histInvSpan;
+    uint histEnabled, histPad;
 };
 
 struct GpuPixelSubInfo
@@ -201,6 +203,8 @@ cbuffer PostParams : register(b0)
     uint subRayOffset, subRayLimit, keyframeOversampled;
     uint skipX0, skipY0, skipX1, skipY1;
     float lightDirX, lightDirY, lightDirZ, lightStrength;
+    float histMin, histInvSpan;
+    uint histEnabled, histPad;
 };
 
 struct GpuPixelSubInfo
@@ -213,13 +217,27 @@ StructuredBuffer<float> InIters : register(t0);
 StructuredBuffer<GpuPixelSubInfo> InPixelSubInfo : register(t1);
 StructuredBuffer<float> InSubpixelsFlat : register(t2);
 Buffer<uint> PaletteLut : register(t3);
+Buffer<float> HistCdf : register(t4);
 
 RWStructuredBuffer<uint> OutAccumPixels : register(u0);
 
+float LookupHistCdf(float rawVal)
+{
+    float norm = saturate((rawVal - histMin) * histInvSpan);
+    float pos = norm * 1024.0f;
+    uint idx = min(1023u, uint(pos));
+    float frac = pos - float(idx);
+    return lerp(HistCdf[idx], HistCdf[idx + 1u], frac);
+}
+
 float MapIterToPhase(float iterVal)
 {
-    if (iterVal <= 0.0f) return 0.0f;
-    return 1.6f * log(1.0f + iterVal * 0.1f) * frequency;
+    float raw = (iterVal <= 0.0f) ? 0.0f : (1.6f * log(1.0f + iterVal * 0.1f));
+    if (histEnabled != 0u)
+    {
+        return LookupHistCdf(raw) * frequency;
+    }
+    return raw * frequency;
 }
 
 float HeightFromIterGpu(float value)
@@ -287,7 +305,9 @@ uint ColorIterationGpu(float value)
         float iter = value - float(root) * 1000000.0f;
         float rootBase = float(root % 3) * (1.0f / 3.0f);
         float compressedIter = 12.0f * log(1.0f + iter * (1.0f / 12.0f));
-        float rawRing = compressedIter * 0.06f * frequency + phaseOffset;
+        float rawRing = (histEnabled != 0u)
+            ? (LookupHistCdf(compressedIter) * frequency + phaseOffset)
+            : (compressedIter * 0.06f * frequency + phaseOffset);
         float ring = rawRing - floor(rawRing);
         if (ring >= 1.0f) ring = 0.0f;
         float u = rootBase + ring * (1.0f / 3.0f);

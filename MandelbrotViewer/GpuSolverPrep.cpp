@@ -46,7 +46,8 @@ namespace Mandelbrot
             uploadedHasDeepExpOrbit = false;
         }
 
-        if (config.fractalType == FractalType::Mandelbrot)
+        if (config.fractalType == FractalType::Mandelbrot &&
+            config.coloringMode == ColoringMode::EscapeTime)
         {
             if (cacheKey != uploadedBlaCachePtr ||
                 refState.orbitVersion != uploadedBlaOrbitVersion ||
@@ -111,7 +112,9 @@ namespace Mandelbrot
             uploadedHasBlaExp = false;
         }
 
-        const bool hasBla = (config.fractalType == FractalType::Mandelbrot && blaBuilder.numLevels >= 3);
+        const bool hasBla = (config.fractalType == FractalType::Mandelbrot &&
+            config.coloringMode == ColoringMode::EscapeTime &&
+            blaBuilder.numLevels >= 3);
         outRunDeepExp = zoomDeepExp || (hasBla && !blaBuilder.fitsFloat32);
 
         if (outRunDeepExp && !uploadedHasDeepExpOrbit)
@@ -215,7 +218,8 @@ namespace Mandelbrot
             {
                 outJuliaCx = config.juliaX.ToDouble();
                 outJuliaCy = config.juliaY.ToDouble();
-                outJuliaBailout2 = std::max(16.0, 4.0 * std::hypot(outJuliaCx, outJuliaCy));
+                const double baseBailout2 = (config.coloringMode == ColoringMode::StripeAverage) ? 1e6 : 16.0;
+                outJuliaBailout2 = std::max(baseBailout2, 4.0 * std::hypot(outJuliaCx, outJuliaCy));
             }
 
             const bool reuseCols = hasUploadedCols && colCoordsBuf &&
@@ -351,7 +355,9 @@ namespace Mandelbrot
         }
         else
         {
-            const bool hasBla = (config.fractalType == FractalType::Mandelbrot && blaBuilder.numLevels >= 3);
+            const bool hasBla = (config.fractalType == FractalType::Mandelbrot &&
+                config.coloringMode == ColoringMode::EscapeTime &&
+                blaBuilder.numLevels >= 3);
             outMode = hasBla ? GpuShaderMode::PerturbLdsBla : GpuShaderMode::PerturbLds;
 
             const bool reuseCols = hasUploadedCols && colCoordsBuf &&
@@ -455,6 +461,7 @@ namespace Mandelbrot
             cb.juliaCy = static_cast<float>(juliaCy);
             cb.bailout2 = static_cast<float>(juliaBailout2);
             cb.outRowOffset = outRowOffset;
+            cb.coloringMode = static_cast<uint32_t>(config.coloringMode);
             cb.skipX0 = skipX0;
             cb.skipY0 = skipY0;
             cb.skipX1 = skipX1;
@@ -477,6 +484,7 @@ namespace Mandelbrot
             cb.refCx = static_cast<float>(refState.refCxDouble);
             cb.refCy = static_cast<float>(refState.refCyDouble);
             cb.outRowOffset = outRowOffset;
+            cb.coloringMode = static_cast<uint32_t>(config.coloringMode);
             cb.skipX0 = skipX0;
             cb.skipY0 = skipY0;
             cb.skipX1 = skipX1;

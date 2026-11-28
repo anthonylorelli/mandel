@@ -375,6 +375,12 @@ TEST_CASE(MovieCli, RejectsInvalidAndConflictingArguments)
         { L"--export-movie", L"a.mp4", L"--light-elevation", L"90" },
         { L"--export-movie", L"a.mp4", L"--light-strength", L"-0.1" },
         { L"--export-movie", L"a.mp4", L"--light-strength", L"3.0" },
+        { L"--export-movie", L"a.mp4", L"--coloring", L"unknown-style" },
+        { L"--export-movie", L"a.mp4", L"--cycle-speed", L"5.5" },
+        { L"--export-movie", L"a.mp4", L"--cycle-speed", L"-5.5" },
+        { L"--export-movie", L"a.mp4", L"--cycle-speed", L"fast" },
+        { L"--ascii", L"--once", L"--cycle-speed", L"0.2" },
+        { L"--export-movie", L"a.mp4", L"--histogram=1" },
         { L"--export-movie", L"a.mp4", L"--config", L"C:\\does-not-exist-mandel-cli.json" }
     };
 
@@ -383,6 +389,90 @@ TEST_CASE(MovieCli, RejectsInvalidAndConflictingArguments)
         const auto res = ParseMovieCli(args);
         ASSERT_TRUE(res.action == CliAction::Error);
         ASSERT_FALSE(res.errorMessage.empty());
+    }
+
+    // Valid positive and negative --cycle-speed values parse cleanly for --export-movie.
+    {
+        const auto pos = ParseMovieCli({ L"--export-movie", L"flow.mp4", L"--cycle-speed", L"0.5" });
+        ASSERT_TRUE(pos.action == CliAction::ExportMovie);
+        ASSERT_NEAR(0.5f, pos.options.plan.cycleSpeed, 1e-6f);
+
+        const auto neg = ParseMovieCli({ L"--export-movie", L"flow.mp4", L"--cycle-speed=-1.25" });
+        ASSERT_TRUE(neg.action == CliAction::ExportMovie);
+        ASSERT_NEAR(-1.25f, neg.options.plan.cycleSpeed, 1e-6f);
+
+        ASSERT_TRUE(MovieCliUsage().find(L"--cycle-speed") != std::wstring::npos);
+    }
+
+    // --histogram / --auto-contrast / --no-histogram work for both --export-movie and --ascii, and round-trip via JSON config.
+    {
+        const auto movieHist = ParseMovieCli({ L"--export-movie", L"h.mp4", L"--histogram" });
+        ASSERT_TRUE(movieHist.action == CliAction::ExportMovie);
+        ASSERT_TRUE(movieHist.options.plan.histogramEqualize);
+
+        const auto asciiHist = ParseMovieCli({ L"--ascii", L"--once", L"--auto-contrast" });
+        ASSERT_TRUE(asciiHist.action == CliAction::ConsoleAscii);
+        ASSERT_TRUE(asciiHist.consoleOptions.histogramEqualize);
+
+        MandelbrotConfig cfg;
+        ColorTheme theme(PresetTheme::Inferno);
+        const std::wstring jsonW = SerializeViewState(cfg, theme, 1.0f, 0.0f, false, 0xFF000000u, {}, true);
+        TempFile histCfg(L".json");
+        {
+            std::ofstream out(histCfg.path, std::ios::binary);
+            const std::string utf8 = WideToUtf8Ascii(jsonW);
+            out.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
+        }
+        const auto fromJson = ParseMovieCli({ L"--export-movie", L"h.mp4", L"--config", histCfg.path.wstring() });
+        ASSERT_TRUE(fromJson.action == CliAction::ExportMovie);
+        ASSERT_TRUE(fromJson.options.plan.histogramEqualize);
+
+        const auto overridden = ParseMovieCli({ L"--export-movie", L"h.mp4", L"--config", histCfg.path.wstring(), L"--no-histogram" });
+        ASSERT_TRUE(overridden.action == CliAction::ExportMovie);
+        ASSERT_FALSE(overridden.options.plan.histogramEqualize);
+
+        ASSERT_TRUE(MovieCliUsage().find(L"--histogram") != std::wstring::npos);
+    }
+
+    // --coloring parses all modes for both --export-movie and --ascii, and round-trips through JSON config.
+    {
+        const std::array<std::pair<const wchar_t*, ColoringMode>, 5> cases{{
+            { L"escape-time", ColoringMode::EscapeTime },
+            { L"stripe", ColoringMode::StripeAverage },
+            { L"trap-point", ColoringMode::OrbitTrapPoint },
+            { L"trap-cross", ColoringMode::OrbitTrapCross },
+            { L"trap-ring", ColoringMode::OrbitTrapRing }
+        }};
+        for (const auto& [token, expected] : cases)
+        {
+            const auto res = ParseMovieCli({ L"--export-movie", L"c.mp4", L"--coloring", token });
+            ASSERT_TRUE(res.action == CliAction::ExportMovie);
+            ASSERT_TRUE(res.options.plan.start.coloringMode == expected);
+        }
+
+        const auto asciiTrap = ParseMovieCli({ L"--ascii", L"--once", L"--coloring", L"pickover" });
+        ASSERT_TRUE(asciiTrap.action == CliAction::ConsoleAscii);
+        ASSERT_TRUE(asciiTrap.consoleOptions.start.coloringMode == ColoringMode::OrbitTrapCross);
+
+        MandelbrotConfig cfg;
+        cfg.coloringMode = ColoringMode::OrbitTrapRing;
+        ColorTheme theme(PresetTheme::Inferno);
+        const std::wstring jsonW = SerializeViewState(cfg, theme, 1.0f, 0.0f, false, 0xFF000000u);
+        TempFile colorCfg(L".json");
+        {
+            std::ofstream out(colorCfg.path, std::ios::binary);
+            const std::string utf8 = WideToUtf8Ascii(jsonW);
+            out.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
+        }
+        const auto fromJson = ParseMovieCli({ L"--export-movie", L"c.mp4", L"--config", colorCfg.path.wstring() });
+        ASSERT_TRUE(fromJson.action == CliAction::ExportMovie);
+        ASSERT_TRUE(fromJson.options.plan.start.coloringMode == ColoringMode::OrbitTrapRing);
+
+        const auto overridden = ParseMovieCli({ L"--export-movie", L"c.mp4", L"--config", colorCfg.path.wstring(), L"--coloring", L"stripe" });
+        ASSERT_TRUE(overridden.action == CliAction::ExportMovie);
+        ASSERT_TRUE(overridden.options.plan.start.coloringMode == ColoringMode::StripeAverage);
+
+        ASSERT_TRUE(MovieCliUsage().find(L"--coloring") != std::wstring::npos);
     }
 
     // Malformed JSON config is rejected cleanly.

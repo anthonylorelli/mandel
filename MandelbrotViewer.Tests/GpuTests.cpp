@@ -1624,3 +1624,242 @@ TEST_CASE(Gpu, DirectionalLightingMatchesCpuAcrossBandsNewtonAndSkipRect)
     }
 }
 
+TEST_CASE(Gpu, PaletteFlowMatchesCpuAndStaticPhase)
+{
+    std::atomic<bool> cancel{};
+    MandelbrotEngine gpu(ExecutionMode::Gpu, true);
+    MandelbrotEngine cpu(ExecutionMode::Automatic);
+    ASSERT_TRUE(gpu.IsGpuAvailable());
+
+    MoviePlan p;
+    p.width = 96;
+    p.height = 64;
+    p.fps = 24;
+    p.seconds = 2;
+    p.motionSmoothing = false;
+    p.useGpu = true;
+    p.theme = ColorTheme(PresetTheme::Psychedelic);
+    p.start.SetCenter(-0.75, 0.12);
+    p.targetX = p.start.hpCenterX;
+    p.targetY = p.start.hpCenterY;
+    p.start.zoom = 2.5;
+    p.endZoom = 2.5;
+    p.start.maxIterations = 256;
+    p.phase = 0.15f;
+    p.cycleSpeed = 0.5f;
+
+    MoviePlan staticAt12 = p;
+    staticAt12.phase = p.PhaseAt(12.0);
+    staticAt12.cycleSpeed = 0.0f;
+
+    MoviePlan cpuPlan = p;
+    cpuPlan.useGpu = false;
+
+    const auto gpuFrame0 = RenderMovieFrame(p, 0.0, cancel, {}, p.height, &gpu);
+    const auto gpuFrame12 = RenderMovieFrame(p, 12.0, cancel, {}, p.height, &gpu);
+    const auto gpuStatic12 = RenderMovieFrame(staticAt12, 12.0, cancel, {}, staticAt12.height, &gpu);
+    const auto cpuFrame12 = RenderMovieFrame(cpuPlan, 12.0, cancel, {}, cpuPlan.height, &cpu);
+
+    ASSERT_EQ(static_cast<size_t>(p.width) * static_cast<size_t>(p.height), gpuFrame12.size());
+    ASSERT_FALSE(gpuFrame0 == gpuFrame12);
+    ASSERT_TRUE(gpuFrame12 == gpuStatic12);
+    ASSERT_LT(FilteredPixelError(cpuFrame12, gpuFrame12, p.width, p.height), 4.5);
+}
+
+TEST_CASE(Gpu, HistogramEqualizationMatchesCpuAndHasNoBandSeams)
+{
+    std::atomic<bool> cancel{};
+    MandelbrotEngine gpu(ExecutionMode::Gpu, true);
+    MandelbrotEngine cpu(ExecutionMode::Automatic);
+    ASSERT_TRUE(gpu.IsGpuAvailable());
+
+    auto verifyHistMovie = [&](MoviePlan plan, double frame)
+    {
+        MoviePlan gpuPlan = plan;
+        gpuPlan.useGpu = true;
+        MoviePlan cpuPlan = plan;
+        cpuPlan.useGpu = false;
+        MoviePlan stdPlan = gpuPlan;
+        stdPlan.histogramEqualize = false;
+
+        // Histogram equalization disables the pre-colored keyframe zoom pyramid.
+        ASSERT_FALSE(PlanZoomKeyframes(gpuPlan).enabled);
+
+        const auto gpuWhole = RenderMovieFrame(gpuPlan, frame, cancel, {}, gpuPlan.height, &gpu);
+        const auto gpuBanded = RenderMovieFrame(gpuPlan, frame, cancel, {}, 16, &gpu);
+        const auto cpuWhole = RenderMovieFrame(cpuPlan, frame, cancel, {}, cpuPlan.height, &cpu);
+        const auto gpuStd = RenderMovieFrame(stdPlan, frame, cancel, {}, stdPlan.height, &gpu);
+
+        ASSERT_EQ(static_cast<size_t>(gpuPlan.width) * static_cast<size_t>(gpuPlan.height), gpuWhole.size());
+        ASSERT_EQ(gpuWhole.size(), gpuBanded.size());
+        ASSERT_FALSE(gpuWhole == gpuStd);
+
+        // Shared frame-level probe CDF must guarantee zero seams across horizontal render bands.
+        for (size_t i = 0; i < gpuWhole.size(); ++i)
+        {
+            for (int shift : { 0, 8, 16 })
+            {
+                ASSERT_NEAR((gpuWhole[i] >> shift) & 255, (gpuBanded[i] >> shift) & 255, 1);
+            }
+        }
+
+        const double err = FilteredPixelError(cpuWhole, gpuWhole, gpuPlan.width, gpuPlan.height);
+        ASSERT_LT(err, 4.5);
+    };
+
+    // 1. Mandelbrot deep zoom + histogram equalization + 3D lighting
+    {
+        MoviePlan p;
+        p.width = 96;
+        p.height = 64;
+        p.fps = 30;
+        p.seconds = 4;
+        p.motionSmoothing = false;
+        p.useGpu = true;
+        p.theme = ColorTheme(PresetTheme::Inferno);
+        p.start.SetCenter(
+            BigFloat("-0.743643887037158704752191506114774"),
+            BigFloat("0.131825904205311970493132056385139"));
+        p.targetX = p.start.hpCenterX;
+        p.targetY = p.start.hpCenterY;
+        p.start.zoom = 50.0;
+        p.endZoom = 5e5;
+        p.start.maxIterations = 600;
+        p.histogramEqualize = true;
+        p.lighting.enabled = true;
+        p.lighting.azimuthDeg = 135.0f;
+        p.lighting.elevationDeg = 40.0f;
+        p.lighting.strength = 1.2f;
+        verifyHistMovie(p, 10.0);
+    }
+
+    // 2. Newton multi-basin fractal + histogram equalization
+    {
+        MoviePlan p;
+        p.width = 96;
+        p.height = 64;
+        p.fps = 30;
+        p.seconds = 4;
+        p.motionSmoothing = false;
+        p.useGpu = true;
+        p.theme = ColorTheme(PresetTheme::TwilightOcean);
+        p.start.fractalType = FractalType::Newton;
+        p.start.SetCenter(0.0, 0.0);
+        p.targetX = BigFloat(0.0);
+        p.targetY = BigFloat(0.0);
+        p.start.zoom = 1.0;
+        p.endZoom = 16.0;
+        p.start.maxIterations = 256;
+        p.histogramEqualize = true;
+        verifyHistMovie(p, 8.0);
+    }
+}
+
+TEST_CASE(Gpu, OrbitTrapAndStripeAverageMatchCpuAcrossShallowPerturbAndFallback)
+{
+    std::atomic<bool> cancel{};
+    MandelbrotEngine gpu(ExecutionMode::Gpu, true);
+    MandelbrotEngine cpu(ExecutionMode::Automatic);
+    ASSERT_TRUE(gpu.IsGpuAvailable());
+
+    const std::array<ColoringMode, 4> orbitModes{
+        ColoringMode::StripeAverage,
+        ColoringMode::OrbitTrapPoint,
+        ColoringMode::OrbitTrapCross,
+        ColoringMode::OrbitTrapRing
+    };
+
+    auto verifyParity = [&](FractalConfig cfg)
+    {
+        for (ColoringMode mode : orbitModes)
+        {
+            cfg.coloringMode = mode;
+            ASSERT_TRUE(gpu.CanUseGpu(cfg));
+
+            MoviePlan gpuPlan;
+            gpuPlan.width = cfg.width;
+            gpuPlan.height = cfg.height;
+            gpuPlan.fps = 24;
+            gpuPlan.seconds = 1;
+            gpuPlan.motionSmoothing = false;
+            gpuPlan.useGpu = true;
+            gpuPlan.theme = ColorTheme(PresetTheme::Inferno);
+            gpuPlan.start = cfg;
+            gpuPlan.targetX = cfg.hpCenterX;
+            gpuPlan.targetY = cfg.hpCenterY;
+            gpuPlan.endZoom = cfg.zoom;
+
+            MoviePlan cpuPlan = gpuPlan;
+            cpuPlan.useGpu = false;
+
+            const auto gpuPixels = RenderMovieFrame(gpuPlan, 0.0, cancel, {}, gpuPlan.height, &gpu);
+            const auto cpuPixels = RenderMovieFrame(cpuPlan, 0.0, cancel, {}, cpuPlan.height, &cpu);
+            ASSERT_EQ(static_cast<size_t>(cfg.width) * static_cast<size_t>(cfg.height), gpuPixels.size());
+            ASSERT_LT(FilteredPixelError(cpuPixels, gpuPixels, cfg.width, cfg.height), 5.0);
+        }
+    };
+
+    // 1. Shallow Mandelbrot (GpuShallowShader)
+    {
+        FractalConfig cfg;
+        cfg.width = 96;
+        cfg.height = 64;
+        cfg.SetCenter(-0.75, 0.12);
+        cfg.zoom = 2.0;
+        cfg.maxIterations = 256;
+        verifyParity(cfg);
+    }
+
+    // 2. Shallow Julia (GpuShallowShader)
+    {
+        FractalConfig cfg;
+        cfg.width = 96;
+        cfg.height = 64;
+        cfg.juliaSet = true;
+        cfg.juliaX = BigFloat(-0.75);
+        cfg.juliaY = BigFloat(0.11);
+        cfg.SetCenter(0.0, 0.0);
+        cfg.zoom = 1.5;
+        cfg.maxIterations = 256;
+        verifyParity(cfg);
+    }
+
+    // 3. PerturbLds Mandelbrot (zoom >= 16, bypasses BLA)
+    {
+        FractalConfig cfg;
+        cfg.width = 96;
+        cfg.height = 64;
+        cfg.SetCenter(-0.7436438870371587, 0.1318259042053119);
+        cfg.zoom = 500.0;
+        cfg.maxIterations = 400;
+        verifyParity(cfg);
+    }
+
+    // 4. PerturbLds Burning Ship
+    {
+        FractalConfig cfg;
+        cfg.fractalType = FractalType::BurningShip;
+        cfg.width = 96;
+        cfg.height = 64;
+        cfg.SetCenter(-1.755, -0.025);
+        cfg.zoom = 200.0;
+        cfg.maxIterations = 350;
+        verifyParity(cfg);
+    }
+
+    // 5. Ultra-deep zoom (>= kGpuDeepExpThreshold) falls back cleanly to CPU for non-EscapeTime modes.
+    {
+        FractalConfig ultra;
+        ultra.width = 32;
+        ultra.height = 24;
+        ultra.SetCenter(
+            BigFloat("-0.743643887037158704752191506114774"),
+            BigFloat("0.131825904205311970493132056385139"));
+        ultra.zoom = 1e35;
+        ultra.maxIterations = 500;
+        ultra.coloringMode = ColoringMode::OrbitTrapCross;
+        ASSERT_FALSE(gpu.CanUseGpu(ultra));
+    }
+}
+
+

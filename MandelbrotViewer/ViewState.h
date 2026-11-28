@@ -73,7 +73,8 @@ namespace Mandelbrot
     inline std::wstring SerializeViewState(
         const MandelbrotConfig& config, const ColorTheme& theme,
         float frequency, float phaseOffset, bool invert, uint32_t interiorColor,
-        const DirectionalLightingParams& lighting = {})
+        const DirectionalLightingParams& lighting = {},
+        bool histogramEqualize = false)
     {
         std::wostringstream ss;
         ss.imbue(std::locale::classic());
@@ -94,11 +95,15 @@ namespace Mandelbrot
            << L"  \"width\": " << config.width << L",\n"
            << L"  \"height\": " << config.height << L",\n"
            << L"  \"maxIterations\": " << config.maxIterations << L",\n"
-           << L"  \"smooth\": " << (config.smooth ? L"true" : L"false") << L",\n"
-           << L"  \"frequency\": " << frequency << L",\n"
+           << L"  \"smooth\": " << (config.smooth ? L"true" : L"false") << L",\n";
+        if (config.coloringMode != ColoringMode::EscapeTime)
+            ss << L"  \"coloringMode\": \"" << GetColoringModeName(config.coloringMode) << L"\",\n";
+        ss << L"  \"frequency\": " << frequency << L",\n"
            << L"  \"phaseOffset\": " << phaseOffset << L",\n"
            << L"  \"invert\": " << (invert ? L"true" : L"false") << L",\n"
            << L"  \"interiorColor\": " << interiorColor << L",\n";
+        if (histogramEqualize)
+            ss << L"  \"histogramEqualize\": true,\n";
         if (lighting.enabled)
             ss << L"  \"lighting3d\": true,\n"
                << L"  \"lightAzimuth\": " << lighting.azimuthDeg << L",\n"

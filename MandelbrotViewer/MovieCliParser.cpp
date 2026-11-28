@@ -232,12 +232,15 @@ namespace Mandelbrot
         std::optional<int> iterations;
         std::optional<bool> autoIterations;
         std::optional<bool> smooth;
+        std::optional<ColoringMode> coloringMode;
         std::optional<bool> useGpu;
         std::optional<PresetTheme> themePreset;
         std::optional<float> frequency;
         std::optional<float> phase;
+        std::optional<float> cycleSpeed;
         std::optional<bool> invert;
         std::optional<uint32_t> interiorColor;
+        std::optional<bool> histogramEqualize;
         std::optional<bool> lightingEnabled;
         std::optional<float> lightAzimuth;
         std::optional<float> lightElevation;
@@ -516,6 +519,15 @@ namespace Mandelbrot
                     requireNoValue();
                     smooth = false;
                 }
+                else if (flagView == L"--coloring" || flagView == L"--coloring-mode")
+                {
+                    std::string ascii;
+                    const auto val = takeValue("--coloring");
+                    ColoringMode mode = ColoringMode::EscapeTime;
+                    if (!detail::TryWideToAscii(val, ascii) || !detail::TryParseColoringMode(ascii, mode))
+                        return fail(L"Unknown --coloring style (expected escape-time, stripe, trap-point, trap-cross, or trap-ring): " + std::wstring(val));
+                    coloringMode = mode;
+                }
                 else if (flagView == L"--gpu")
                 {
                     requireNoValue();
@@ -555,6 +567,16 @@ namespace Mandelbrot
                         return fail(L"Invalid --phase (expected finite number): " + std::wstring(val));
                     phase = f;
                 }
+                else if (flagView == L"--cycle-speed")
+                {
+                    double v = 0.0;
+                    const auto val = takeValue("--cycle-speed");
+                    const bool ok = TryParseDouble(val, v);
+                    const float f = static_cast<float>(v);
+                    if (!ok || !std::isfinite(f) || f < MinMovieCycleSpeed || f > MaxMovieCycleSpeed)
+                        return fail(L"Invalid --cycle-speed (expected -5.0..5.0 cycles/sec): " + std::wstring(val));
+                    cycleSpeed = f;
+                }
                 else if (flagView == L"--invert")
                 {
                     requireNoValue();
@@ -573,6 +595,16 @@ namespace Mandelbrot
                     if (!detail::TryWideToAscii(val, ascii) || !detail::TryParseColor(ascii, color))
                         return fail(L"Invalid --interior-color (use #RRGGBB, #AARRGGBB, or 0xAARRGGBB): " + std::wstring(val));
                     interiorColor = color;
+                }
+                else if (flagView == L"--histogram" || flagView == L"--auto-contrast")
+                {
+                    requireNoValue();
+                    histogramEqualize = true;
+                }
+                else if (flagView == L"--no-histogram")
+                {
+                    requireNoValue();
+                    histogramEqualize = false;
                 }
                 else if (flagView == L"--lighting" || flagView == L"--3d-lighting")
                 {
@@ -793,9 +825,9 @@ namespace Mandelbrot
         else
         {
             if (!outputPath.empty() || resWidth.has_value() || resHeight.has_value() ||
-                codec.has_value() || motionSmoothing.has_value())
+                codec.has_value() || motionSmoothing.has_value() || cycleSpeed.has_value())
             {
-                return fail(L"Movie-only options (--output, --resolution, --codec, --motion-smoothing) cannot be combined with --ascii.");
+                return fail(L"Movie-only options (--output, --resolution, --codec, --motion-smoothing, --cycle-speed) cannot be combined with --ascii.");
             }
             if (overrideWidth && (*overrideWidth < MinConsoleCols || *overrideWidth > MaxConsoleCols))
             {
@@ -937,6 +969,7 @@ namespace Mandelbrot
             }
             if (startZoom) plan.start.zoom = *startZoom;
             if (smooth) plan.start.smooth = *smooth;
+            if (coloringMode) plan.start.coloringMode = *coloringMode;
 
             // 7. Color & theme overrides.
             if (themePreset) plan.theme.SetPreset(*themePreset);
@@ -944,6 +977,7 @@ namespace Mandelbrot
             if (phase) plan.phase = *phase;
             if (invert) plan.invert = *invert;
             if (interiorColor) plan.interior = *interiorColor;
+            if (histogramEqualize) plan.histogramEqualize = *histogramEqualize;
             if (lightAzimuth) plan.lighting.azimuthDeg = *lightAzimuth;
             if (lightElevation) plan.lighting.elevationDeg = *lightElevation;
             if (lightStrength) plan.lighting.strength = *lightStrength;
@@ -1004,6 +1038,7 @@ namespace Mandelbrot
                 consoleOpts.invert = plan.invert;
                 consoleOpts.interior = plan.interior;
                 consoleOpts.lighting = plan.lighting;
+                consoleOpts.histogramEqualize = plan.histogramEqualize;
 
                 consoleOpts.cols = resolvedAsciiCols;
                 consoleOpts.rows = resolvedAsciiRows;
@@ -1103,6 +1138,7 @@ namespace Mandelbrot
             if (duration) plan.seconds = *duration;
             if (codec) plan.codec = *codec;
             if (motionSmoothing) plan.motionSmoothing = *motionSmoothing;
+            if (cycleSpeed) plan.cycleSpeed = *cycleSpeed;
 
             // 10. Zoom motion & target.
             if (endZoom)

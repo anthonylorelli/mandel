@@ -23,7 +23,7 @@ cbuffer Params : register(b0)
     uint subpixelTotal;
     float refCx;
     float refCy;
-    uint outRowOffset, pad1, pad2, pad3;
+    uint outRowOffset, coloringMode, pad2, pad3;
     uint skipX0, skipY0, skipX1, skipY1;
 };
 
@@ -36,7 +36,7 @@ RWStructuredBuffer<float> OutIters : register(u0);
 RWStructuredBuffer<float> OutSubpixelsFlat : register(u1);
 
 groupshared float2 s_orbit[LDS_ORBIT_SIZE];
-
+)" MANDEL_HLSL_ORBIT_COLOR_HELPERS R"(
 float DiffAbsF(float A, float a)
 {
     float sum = A + a;
@@ -114,13 +114,16 @@ float EvalPerturbLds(float dcx, float dcy, uint sharedLim)
     uint iter = 0u;
     float escZx = 0.0f, escZy = 0.0f;
     uint ldsStop = min(refLen, LDS_ORBIT_SIZE);
+    float effBailout2 = (coloringMode == 1u) ? 1e6f : 16.0f;
+    float stripeSum = 0.0f, prevStripeSum = 0.0f, minDist = 1e30f;
+    uint stripeCount = 0u;
 
     if (fractalType == 0u)
     {
         [loop]
         while (iter < maxIter)
         {
-            if (needScaleCheck == 0u && m > 0u && m < ldsStop)
+            if (coloringMode == 0u && needScaleCheck == 0u && m > 0u && m < ldsStop)
             {
                 uint endIter = iter + min(maxIter - iter, ldsStop - m);
                 [loop]
@@ -148,7 +151,11 @@ float EvalPerturbLds(float dcx, float dcy, uint sharedLim)
             float zx = rx + dx;
             float zy = ry + dy;
             float mod2 = zx * zx + zy * zy;
-            if (mod2 > 16.0f) { escZx = zx; escZy = zy; break; }
+            if (coloringMode != 0u && iter > 0u)
+            {
+                SampleOrbitColor(zx, zy, mod2, stripeSum, prevStripeSum, stripeCount, minDist);
+            }
+            if (mod2 > effBailout2) { escZx = zx; escZy = zy; break; }
 
             bool doRebase = (m == refLen);
             if (!doRebase && m > 0u)
@@ -175,7 +182,7 @@ float EvalPerturbLds(float dcx, float dcy, uint sharedLim)
         [loop]
         while (iter < maxIter)
         {
-            if (needScaleCheck == 0u && m > 0u && m < ldsStop)
+            if (coloringMode == 0u && needScaleCheck == 0u && m > 0u && m < ldsStop)
             {
                 uint endIter = iter + min(maxIter - iter, ldsStop - m);
                 if (fractalType == 1u)
@@ -236,7 +243,11 @@ float EvalPerturbLds(float dcx, float dcy, uint sharedLim)
             float zx = rx + dx;
             float zy = ry + dy;
             float mod2 = zx * zx + zy * zy;
-            if (mod2 > 16.0f) { escZx = zx; escZy = zy; break; }
+            if (coloringMode != 0u && iter > 0u)
+            {
+                SampleOrbitColor(zx, zy, mod2, stripeSum, prevStripeSum, stripeCount, minDist);
+            }
+            if (mod2 > effBailout2) { escZx = zx; escZy = zy; break; }
 
             bool doRebase = (m == refLen);
             if (!doRebase && m > 0u)
@@ -280,6 +291,8 @@ float EvalPerturbLds(float dcx, float dcy, uint sharedLim)
     }
 
     if (iter >= maxIter) return -1.0f;
+    if (coloringMode != 0u)
+        return FinishOrbitColor(fractalType, iter, escZx * escZx + escZy * escZy, effBailout2, stripeSum, prevStripeSum, stripeCount, minDist);
     if (smoothFlag == 0u) return float(iter);
     return FinishPerturbSmooth(fractalType, iter, escZx, escZy, refCx + dcx, refCy + dcy);
 }

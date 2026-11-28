@@ -253,6 +253,24 @@ namespace Mandelbrot
             return;
         }
 
+        D3D11_BUFFER_DESC histDesc{};
+        histDesc.ByteWidth = static_cast<UINT>(kHistogramCdfSize * sizeof(float));
+        histDesc.Usage = D3D11_USAGE_DYNAMIC;
+        histDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        histDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (FAILED(device->CreateBuffer(&histDesc, nullptr, &histCdfBuf)))
+        {
+            return;
+        }
+        D3D11_SHADER_RESOURCE_VIEW_DESC histSrvDesc{};
+        histSrvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+        histSrvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+        histSrvDesc.Buffer.NumElements = static_cast<UINT>(kHistogramCdfSize);
+        if (FAILED(device->CreateShaderResourceView(histCdfBuf.Get(), &histSrvDesc, &histCdfSrv)))
+        {
+            return;
+        }
+
         available = true;
     }
 
@@ -285,6 +303,8 @@ namespace Mandelbrot
         switch (config.fractalType)
         {
         case FractalType::Mandelbrot:
+            if (config.coloringMode != ColoringMode::EscapeTime)
+                return config.zoom < kGpuDeepExpThreshold;
             return config.zoom <= MaxZoom;
         case FractalType::Tricorn:
             return config.zoom < kGpuTricornMaxZoom;
@@ -481,6 +501,30 @@ namespace Mandelbrot
         }
         uploadedLutHash = hash;
         hasUploadedLut = true;
+        return true;
+    }
+
+    bool GpuFractalSolver::Impl::EnsureHistCdfUploaded(const float* histData)
+    {
+        if (!histData || !histCdfBuf) return false;
+        uint64_t hash = 14695981039346656037ULL;
+        for (size_t i = 0; i < kHistogramCdfSize; ++i)
+        {
+            uint32_t bits = 0;
+            std::memcpy(&bits, &histData[i], sizeof(uint32_t));
+            hash ^= bits;
+            hash *= 1099511628211ULL;
+        }
+        if (hasUploadedHist && hash == uploadedHistHash)
+        {
+            return true;
+        }
+        if (!UploadBufferDiscard(histCdfBuf.Get(), histData, kHistogramCdfSize * sizeof(float)))
+        {
+            return false;
+        }
+        uploadedHistHash = hash;
+        hasUploadedHist = true;
         return true;
     }
 

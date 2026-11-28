@@ -28,8 +28,13 @@ namespace Mandelbrot
         if (!std::isfinite(cx) || !std::isfinite(cy)) throw std::invalid_argument("Invalid Julia parameter.");
         const double zoom = std::clamp(config.zoom, 1e-12, MaxZoom);
         const double step = 3.0 / zoom / config.width;
+        const ColoringMode coloringMode = config.coloringMode;
+        const bool useOrbitColor = (coloringMode != ColoringMode::EscapeTime);
         // R >= 4 and R^2 >= 4|c| guarantees escape, including parameters outside Mandelbrot/Burning Ship.
-        const double bailout2 = std::max(16.0, 4.0 * std::hypot(cx, cy));
+        const double baseBailout2 = (coloringMode == ColoringMode::StripeAverage)
+            ? detail::kStripeBailoutRadius2
+            : 16.0;
+        const double bailout2 = std::max(baseBailout2, 4.0 * std::hypot(cx, cy));
         if (!std::isfinite(bailout2)) throw std::invalid_argument("Julia parameter is too large.");
         const bool deep = zoom >= DeepZoomThreshold;
         const int limbs = std::clamp((static_cast<int>(std::ceil((2.0 * std::log2(zoom) + 96.0) / 32.0)) + 1) & ~1, 4, BigFloat::N);
@@ -38,9 +43,13 @@ namespace Mandelbrot
         BigFloat centerY;
         config.ResolveHpCenter(centerX, centerY);
         constexpr double invLn2 = 1.44269504088896340736;
-        auto finish = [&](double zr, double zi, int iter) -> float
+        auto finish = [&](double zr, double zi, int iter, const detail::OrbitColorAccumulator& orbitColor) -> float
         {
             if (iter >= config.maxIterations) return -1.0f;
+            if (useOrbitColor)
+            {
+                return orbitColor.Finish(config.fractalType, iter, zr * zr + zi * zi, bailout2, config.smooth);
+            }
             if (!config.smooth) return static_cast<float>(iter);
             return detail::ComputeSmoothEscapeIteration(
                 config.fractalType, iter, zr, zi, 0.0, 0.0, cx, cy, invLn2);
@@ -68,6 +77,7 @@ namespace Mandelbrot
         {
             auto [zr, zi] = seed(px, py);
             const BigFloat limit(bailout2), one(1.0);
+            detail::OrbitColorAccumulator orbitColor{ coloringMode };
             for (int iter = 0; iter < config.maxIterations; ++iter)
             {
                 if (canceled()) return -1.0f;
@@ -75,7 +85,12 @@ namespace Mandelbrot
                 const auto mag = r2 + i2;
                 if (iter == 0 && config.juliaX.IsZero() && config.juliaY.IsZero() && BigFloat::CompareMagnitude(mag, one) <= 0)
                     return -1.0f;
-                if (BigFloat::CompareMagnitude(mag, limit) > 0) return finish(zr.ToDouble(), zi.ToDouble(), iter);
+                if (useOrbitColor && iter > 0)
+                {
+                    const double dzr = zr.ToDouble(), dzi = zi.ToDouble();
+                    orbitColor.Sample(dzr, dzi, dzr * dzr + dzi * dzi);
+                }
+                if (BigFloat::CompareMagnitude(mag, limit) > 0) return finish(zr.ToDouble(), zi.ToDouble(), iter, orbitColor);
                 stepBigFloatJulia(zr, zi, r2, i2);
             }
             return -1.0f;
@@ -134,14 +149,20 @@ namespace Mandelbrot
             BigFloat dx((px + 0.5 - config.width * 0.5) * step);
             BigFloat dy((config.height * 0.5 - py - 0.5) * step);
             const BigFloat limit(bailout2);
+            detail::OrbitColorAccumulator orbitColor{ coloringMode };
             for (int iter = 0; iter < config.maxIterations; ++iter)
             {
                 if (canceled()) return -1.0f;
                 if (static_cast<size_t>(iter) >= preciseOrbit.size()) return exactPixel(px, py);
                 const auto& [rx, ry] = preciseOrbit[iter];
                 const auto zr = rx + dx, zi = ry + dy;
+                if (useOrbitColor && iter > 0)
+                {
+                    const double dzr = zr.ToDouble(), dzi = zi.ToDouble();
+                    orbitColor.Sample(dzr, dzi, dzr * dzr + dzi * dzi);
+                }
                 if (BigFloat::CompareMagnitude(zr.Sqr(limbs) + zi.Sqr(limbs), limit) > 0)
-                    return finish(zr.ToDouble(), zi.ToDouble(), iter);
+                    return finish(zr.ToDouble(), zi.ToDouble(), iter, orbitColor);
                 const auto nextDx = (rx + rx + dx).Mul(dx, limbs) - (ry + ry + dy).Mul(dy, limbs);
                 if (burningShip)
                 {
@@ -165,6 +186,7 @@ namespace Mandelbrot
             if (canceled()) return -1.0f;
             const double ox = (px + 0.5 - config.width * 0.5) * step;
             const double oy = (config.height * 0.5 - py - 0.5) * step;
+            detail::OrbitColorAccumulator orbitColor{ coloringMode };
             if (!deep)
             {
                 double zr = config.centerX + ox, zi = config.centerY + oy;
@@ -173,7 +195,12 @@ namespace Mandelbrot
                 for (int iter = 0; iter < config.maxIterations; ++iter)
                 {
                     if ((iter & 63) == 0 && canceled()) return -1.0f;
-                    if (zr * zr + zi * zi > bailout2) return finish(zr, zi, iter);
+                    const double mag = zr * zr + zi * zi;
+                    if (useOrbitColor && iter > 0)
+                    {
+                        orbitColor.Sample(zr, zi, mag);
+                    }
+                    if (mag > bailout2) return finish(zr, zi, iter, orbitColor);
                     const double nextR = zr * zr - zi * zi + cx;
                     zi = burningShip ? (-2.0 * std::abs(zr * zi) + cy) : (2.0 * zr * zi + cy);
                     zr = nextR;
@@ -208,7 +235,11 @@ namespace Mandelbrot
                         (std::abs(zr) < 1e-6 * (std::abs(ref.x) + std::abs(dx)) ||
                          std::abs(zi) < 1e-6 * (std::abs(ref.y) + std::abs(dy)))))
                     return exactPixel(px, py);
-                if (mag > bailout2) return finish(zr, zi, iter);
+                if (useOrbitColor && iter > 0)
+                {
+                    orbitColor.Sample(zr, zi, mag);
+                }
+                if (mag > bailout2) return finish(zr, zi, iter, orbitColor);
                 const double nextDx = (2.0 * ref.x + dx) * dx - (2.0 * ref.y + dy) * dy;
                 double nextDy;
                 if (burningShip)

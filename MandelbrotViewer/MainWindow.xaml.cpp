@@ -392,6 +392,13 @@ namespace winrt::MandelbrotViewer::implementation
             }
             ThemePresetComboBox().SelectedIndex(0);
 
+            // Populate Orbit Coloring Styles
+            for (const auto mode : Mandelbrot::GetAllColoringModes())
+            {
+                ColoringModeComboBox().Items().Append(box_value(Mandelbrot::GetColoringModeName(mode)));
+            }
+            ColoringModeComboBox().SelectedIndex(0);
+
             // Setup live animation timer
             auto weak = get_weak();
             m_animateTimer = DispatcherTimer();
@@ -801,7 +808,8 @@ namespace winrt::MandelbrotViewer::implementation
             config.width,
             &samples,
             true,
-            &m_lighting);
+            &m_lighting,
+            m_histogramEqualize);
 
         bitmap.Invalidate();
     }
@@ -866,6 +874,14 @@ namespace winrt::MandelbrotViewer::implementation
             const bool supportsJulia = Mandelbrot::SupportsJuliaCompanion(type);
             JuliaOptionsPanel().Visibility(supportsJulia ? Visibility::Visible : Visibility::Collapsed);
             if (!supportsJulia) ShowJuliaToggle().IsOn(false);
+
+            if (ColoringModeComboBox())
+            {
+                const bool supportsOrbitColoring = (type != Mandelbrot::FractalType::Newton);
+                ColoringModeComboBox().IsEnabled(supportsOrbitColoring);
+                ColoringModeComboBox().Header(box_value(
+                    supportsOrbitColoring ? L"Orbit Coloring Style" : L"Orbit Coloring Style (N/A for Newton)"));
+            }
 
             const auto typeName = Mandelbrot::GetFractalTypeName(type);
             HudTitleText().Text(winrt::hstring(typeName));
@@ -946,5 +962,19 @@ namespace winrt::MandelbrotViewer::implementation
         if (IsSuppressingEvents() || !SmoothToggle()) return;
         m_config.smooth = SmoothToggle().IsOn();
         RenderFractal();
+        RefreshJuliaSettings();
+    }
+
+    void MainWindow::OnColoringModeSelectionChanged(IInspectable const&, SelectionChangedEventArgs const&)
+    {
+        if (IsSuppressingEvents() || !ColoringModeComboBox()) return;
+        const int index = ColoringModeComboBox().SelectedIndex();
+        const auto modes = Mandelbrot::GetAllColoringModes();
+        if (index < 0 || index >= static_cast<int>(modes.size())) return;
+        if (m_config.coloringMode == modes[index]) return;
+        m_config.coloringMode = modes[index];
+        if (m_config.fractalType == Mandelbrot::FractalType::Newton) return;
+        RenderFractal();
+        RefreshJuliaSettings();
     }
 }

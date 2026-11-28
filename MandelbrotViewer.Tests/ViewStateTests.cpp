@@ -140,3 +140,32 @@ TEST_CASE(ViewState, DirectionalLightingSerializesOnlyWhenEnabled)
     ASSERT_NEAR(1.75, std::stod(JsonValue(onJson, L"lightStrength")), 1e-4);
 }
 
+TEST_CASE(ViewState, HistogramEqualizeSerializesOnlyWhenEnabled)
+{
+    MandelbrotConfig config;
+    ColorTheme theme;
+
+    const auto offJson = SerializeViewState(config, theme, 1.0f, 0.0f, false, 0xFF000000);
+    ASSERT_TRUE(offJson.find(L"histogramEqualize") == std::wstring::npos);
+
+    const auto onJson = SerializeViewState(config, theme, 1.0f, 0.0f, false, 0xFF000000, {}, true);
+    ASSERT_TRUE(JsonValue(onJson, L"histogramEqualize") == L"true");
+}
+
+TEST_CASE(ViewState, ColoringModeSerializesOnlyWhenNonDefault)
+{
+    MandelbrotConfig config;
+    ColorTheme theme;
+
+    const auto stdJson = SerializeViewState(config, theme, 1.0f, 0.0f, false, 0xFF000000);
+    ASSERT_TRUE(stdJson.find(L"coloringMode") == std::wstring::npos);
+
+    for (ColoringMode mode : { ColoringMode::StripeAverage, ColoringMode::OrbitTrapPoint, ColoringMode::OrbitTrapCross, ColoringMode::OrbitTrapRing })
+    {
+        config.coloringMode = mode;
+        const auto json = SerializeViewState(config, theme, 1.0f, 0.0f, false, 0xFF000000);
+        ASSERT_TRUE(JsonValue(json, L"coloringMode") == GetColoringModeName(mode));
+    }
+}
+
+

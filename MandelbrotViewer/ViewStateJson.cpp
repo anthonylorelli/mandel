@@ -213,6 +213,37 @@ namespace Mandelbrot
             if (key == "custom" || key == "custompalette") { outTheme = PresetTheme::Custom; return true; }
             return false;
         }
+
+        bool TryParseColoringMode(std::string_view text, ColoringMode& outMode)
+        {
+            const std::string key = NormalizeToken(text);
+            if (key == "escapetime" || key == "escapetimestandard" || key == "standard" || key == "escape")
+            {
+                outMode = ColoringMode::EscapeTime;
+                return true;
+            }
+            if (key == "stripe" || key == "stripeaverage" || key == "stripes")
+            {
+                outMode = ColoringMode::StripeAverage;
+                return true;
+            }
+            if (key == "trappoint" || key == "orbittrappoint" || key == "orbittraporiginpoint" || key == "point" || key == "origin")
+            {
+                outMode = ColoringMode::OrbitTrapPoint;
+                return true;
+            }
+            if (key == "trapcross" || key == "orbittrapcross" || key == "orbittrapcrossstalks" || key == "cross" || key == "stalks" || key == "pickover")
+            {
+                outMode = ColoringMode::OrbitTrapCross;
+                return true;
+            }
+            if (key == "trapring" || key == "orbittrapring" || key == "orbittrapunitring" || key == "ring" || key == "circle")
+            {
+                outMode = ColoringMode::OrbitTrapRing;
+                return true;
+            }
+            return false;
+        }
     }
 
     namespace
@@ -610,6 +641,16 @@ namespace Mandelbrot
             plan.start.smooth = *b;
         }
 
+        if (const auto it = obj->find("coloringMode"); it != obj->end())
+        {
+            const auto* name = std::get_if<std::string>(&it->second.data);
+            if (!name) throw std::invalid_argument("Config JSON 'coloringMode' must be a string.");
+            ColoringMode mode = ColoringMode::EscapeTime;
+            if (!detail::TryParseColoringMode(*name, mode))
+                throw std::invalid_argument("Unknown 'coloringMode' in config JSON: " + *name);
+            plan.start.coloringMode = mode;
+        }
+
         if (const auto it = obj->find("frequency"); it != obj->end())
         {
             const auto* n = std::get_if<JsonValue::Number>(&it->second.data);
@@ -652,6 +693,13 @@ namespace Mandelbrot
             {
                 throw std::invalid_argument("Config JSON 'interiorColor' must be an integer or color string.");
             }
+        }
+
+        if (const auto it = obj->find("histogramEqualize"); it != obj->end())
+        {
+            const auto* b = std::get_if<bool>(&it->second.data);
+            if (!b) throw std::invalid_argument("Config JSON 'histogramEqualize' must be a boolean.");
+            plan.histogramEqualize = *b;
         }
 
         if (const auto it = obj->find("lighting3d"); it != obj->end())
