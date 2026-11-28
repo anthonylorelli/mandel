@@ -1624,3 +1624,46 @@ TEST_CASE(Gpu, DirectionalLightingMatchesCpuAcrossBandsNewtonAndSkipRect)
     }
 }
 
+TEST_CASE(Gpu, PaletteFlowMatchesCpuAndStaticPhase)
+{
+    std::atomic<bool> cancel{};
+    MandelbrotEngine gpu(ExecutionMode::Gpu, true);
+    MandelbrotEngine cpu(ExecutionMode::Automatic);
+    ASSERT_TRUE(gpu.IsGpuAvailable());
+
+    MoviePlan p;
+    p.width = 96;
+    p.height = 64;
+    p.fps = 24;
+    p.seconds = 2;
+    p.motionSmoothing = false;
+    p.useGpu = true;
+    p.theme = ColorTheme(PresetTheme::Psychedelic);
+    p.start.SetCenter(-0.75, 0.12);
+    p.targetX = p.start.hpCenterX;
+    p.targetY = p.start.hpCenterY;
+    p.start.zoom = 2.5;
+    p.endZoom = 2.5;
+    p.start.maxIterations = 256;
+    p.phase = 0.15f;
+    p.cycleSpeed = 0.5f;
+
+    MoviePlan staticAt12 = p;
+    staticAt12.phase = p.PhaseAt(12.0);
+    staticAt12.cycleSpeed = 0.0f;
+
+    MoviePlan cpuPlan = p;
+    cpuPlan.useGpu = false;
+
+    const auto gpuFrame0 = RenderMovieFrame(p, 0.0, cancel, {}, p.height, &gpu);
+    const auto gpuFrame12 = RenderMovieFrame(p, 12.0, cancel, {}, p.height, &gpu);
+    const auto gpuStatic12 = RenderMovieFrame(staticAt12, 12.0, cancel, {}, staticAt12.height, &gpu);
+    const auto cpuFrame12 = RenderMovieFrame(cpuPlan, 12.0, cancel, {}, cpuPlan.height, &cpu);
+
+    ASSERT_EQ(static_cast<size_t>(p.width) * static_cast<size_t>(p.height), gpuFrame12.size());
+    ASSERT_FALSE(gpuFrame0 == gpuFrame12);
+    ASSERT_TRUE(gpuFrame12 == gpuStatic12);
+    ASSERT_LT(FilteredPixelError(cpuFrame12, gpuFrame12, p.width, p.height), 4.5);
+}
+
+

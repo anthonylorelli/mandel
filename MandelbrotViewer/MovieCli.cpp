@@ -225,6 +225,7 @@ namespace Mandelbrot
             L"  --codec <h264|hevc>          Video codec: h264/avc (default) or hevc/h265\n"
             L"  --motion-smoothing           Enable analytical motion-blur shutter (default)\n"
             L"  --no-motion-smoothing        Disable motion-blur shutter\n"
+            L"  --cycle-speed <cycles/s>     Animate palette phase during movie (-5.0..5.0, default: 0.0)\n"
             L"\n"
             L"View & Source Options (shared by --ascii and --export-movie):\n"
             L"  --config <file.json>         Load view & theme JSON from 'Copy Coordinates & Config'\n"
