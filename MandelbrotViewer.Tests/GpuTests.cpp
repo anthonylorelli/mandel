@@ -1628,7 +1628,7 @@ TEST_CASE(Gpu, PaletteFlowMatchesCpuAndStaticPhase)
 {
     std::atomic<bool> cancel{};
     MandelbrotEngine gpu(ExecutionMode::Gpu, true);
-    MandelbrotEngine cpu(ExecutionMode::Cpu);
+    MandelbrotEngine cpu(ExecutionMode::Automatic);
     ASSERT_TRUE(gpu.IsGpuAvailable());
 
     MoviePlan p;

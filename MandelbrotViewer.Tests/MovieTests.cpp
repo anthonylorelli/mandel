@@ -873,7 +873,7 @@ TEST_CASE(Movie, PaletteFlowAdvancesPhaseDisablesZoomPyramidAndRendersPerFrame)
     staticAtFrame12.cycleSpeed = 0.0f;
 
     std::atomic<bool> cancel{};
-    MandelbrotEngine cpu(ExecutionMode::Cpu);
+    MandelbrotEngine cpu(ExecutionMode::Automatic);
     const auto frame0 = RenderMovieFrame(flowing, 0.0, cancel, {}, flowing.height, &cpu);
     const auto frame12 = RenderMovieFrame(flowing, 12.0, cancel, {}, flowing.height, &cpu);
     const auto expected12 = RenderMovieFrame(staticAtFrame12, 12.0, cancel, {}, staticAtFrame12.height, &cpu);
