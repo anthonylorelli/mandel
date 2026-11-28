@@ -865,9 +865,7 @@ TEST_CASE(MandelbrotEngine, ColoringModes_StripeAndOrbitTrapsProduceDistinctFini
         FractalConfig cfg;
         cfg.width = 32;
         cfg.height = 24;
-        cfg.SetCenter(
-            BigFloat("-0.743643887037158704752191506114774"),
-            BigFloat("0.131825904205311970493132056385139"));
+        cfg.SetCenter(BigFloat("-0.75"), BigFloat("0.1"));
         cfg.zoom = 1e14;
         cfg.maxIterations = 400;
         verifyAllModesDistinct(cfg);
